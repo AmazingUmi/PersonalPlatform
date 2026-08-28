@@ -29,5 +29,7 @@ postgres-data/
 
 # Test coverage
 .coverage
+frontend/test-results/
+frontend/playwright-report/
 htmlcov/
 coverage/
