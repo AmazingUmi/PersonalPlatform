@@ -1,0 +1,43 @@
+# Production-style overlay for docker compose.
+#   docker compose -f docker-compose.yml -f docker/docker-compose.prod.yml up -d
+#
+# Differences from the default dev compose file:
+# - runs built artifacts (dist) instead of dev watchers
+# - non-root container user, read-only-ish hardening via resource limits
+# - restart policies for unattended operation
+# - storage volume for /workspace/storage
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/backend.prod.Dockerfile
+    user: "node"
+    command: ["node", "dist/main.js"]
+    restart: unless-stopped
+    volumes: []
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/frontend.prod.Dockerfile
+    user: "node"
+    restart: unless-stopped
+    volumes: []
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+
+  database:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"

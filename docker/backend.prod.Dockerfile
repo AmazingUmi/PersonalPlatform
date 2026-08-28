@@ -1,3 +1,4 @@
+# Production backend image: install dev toolchain, build, prune, run dist.
 FROM node:22-alpine
 
 WORKDIR /workspace
@@ -7,13 +8,15 @@ COPY backend/package.json backend/package.json
 COPY frontend/package.json frontend/package.json
 RUN npm ci
 
-# App manifests, platform config and migrations are runtime inputs for the
-# backend (registry scan + migration runner), so they ship with the image.
 COPY apps apps
 COPY config config
 COPY migrations migrations
 COPY scripts scripts
 COPY backend backend
 
+RUN npm run build --workspace @personal-platform/backend && npm prune --omit=dev
+
+ENV NODE_ENV=production
+USER node
 EXPOSE 8000
-CMD ["npm", "run", "dev", "--workspace", "@personal-platform/backend"]
+CMD ["node", "dist/main.js"]

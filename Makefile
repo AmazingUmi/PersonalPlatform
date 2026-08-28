@@ -1,4 +1,4 @@
-.PHONY: dev down logs ps check build
+.PHONY: dev down logs ps check build test verify backup
 
 dev:
 	docker compose up --build
@@ -13,8 +13,16 @@ ps:
 	docker compose ps
 
 check:
-	docker compose run --rm backend npm run check --workspace @personal-platform/backend
-	docker compose run --rm frontend npm run check --workspace @personal-platform/frontend
+	npm run check
 
 build:
 	npm run build
+
+test:
+	npm test
+
+verify:
+	bash scripts/verify.sh
+
+backup:
+	bash scripts/backup.sh backup

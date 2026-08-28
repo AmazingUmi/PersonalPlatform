@@ -1,7 +1,7 @@
 # Personal Platform — 具体实现方案
 
 > 基线：`PERSONAL_PLATFORM_INITIAL_DESIGN.md` v0.1  
-> 当前状态：P0、P1 已完成；P2–P6 实施中  
+> 当前状态：P0–P6 已完成  
 > 原则：先验证平台闭环，不提前实现 v0.2 能力
 
 ## 1. 范围控制
@@ -234,7 +234,7 @@ GET  /api/core/apps/:id/health
 完成定义：至少两个测试 Widget 可共存；禁用来源 App 后自动消失；单 Widget 异常不影响 Dashboard。  
 验证：前端 Vitest 11 项（Widget 共存、禁用消失、错误隔离、core.settings 布局）；后端 settings API 集成测试（键校验、404、JSONB 往返）。新增 `GET/PUT /api/core/settings/:key`。
 
-### P4 — Shared Services
+### P4 — Shared Services（已完成）
 
 - 实现 Local Storage driver、Event Bus 和 Scheduler。
 - 为每项服务编写契约测试与一个最小示例。
@@ -242,7 +242,7 @@ GET  /api/core/apps/:id/health
 
 完成定义：App 只通过 `AppContext` 使用共享服务，且不存在跨 App 数据库写入。
 
-### P5 — Validation Apps
+### P5 — Validation Apps（已完成）
 
 **Assets**：物品/分类 CRUD、搜索、附件、总数 Widget。  
 **Tasks**：任务状态/截止时间/筛选、到期 Job、`tasks.task.completed.v1` 事件、今日 Widget。  
@@ -250,7 +250,7 @@ GET  /api/core/apps/:id/health
 
 每个 App 只实现验证架构所需的 happy path、验证和错误处理，不扩展账户、复杂权限、导入导出或协作功能。
 
-### P6 — Stabilization
+### P6 — Stabilization（已完成）
 
 - API/组件/E2E 测试和覆盖关键失败路径。
 - 备份/恢复脚本，Migration runbook。

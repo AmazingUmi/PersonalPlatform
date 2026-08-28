@@ -26,11 +26,16 @@ services:
       HOST: 0.0.0.0
       PORT: 8000
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PLATFORM_ROOT: /workspace
       DATABASE_URL: postgresql://${POSTGRES_USER:-personal_platform}:${POSTGRES_PASSWORD:-change-me-for-local-development}@database:5432/${POSTGRES_DB:-personal_platform}
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     volumes:
       - ./backend:/workspace/backend
+      - ./apps:/workspace/apps
+      - ./config:/workspace/config
+      - ./migrations:/workspace/migrations
+      - ./storage:/workspace/storage
     depends_on:
       database:
         condition: service_healthy
