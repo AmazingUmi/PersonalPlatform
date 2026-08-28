@@ -51,7 +51,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
           properties: {
             title: { type: "string", minLength: 1, maxLength: 300 },
             description: { type: "string" },
-            dueAt: { type: "string" },
+            dueAt: { type: "string", format: "date-time" },
           },
         },
       },
@@ -87,7 +87,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
             title: { type: "string", minLength: 1 },
             description: { type: "string" },
             status: { type: "string", enum: ["todo", "done"] },
-            dueAt: { type: "string" },
+            dueAt: { type: "string", format: "date-time" },
           },
         },
       },

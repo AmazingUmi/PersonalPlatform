@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../../shared/api";
 import type { FrontendAppModule } from "../../shared/appTypes";
 import { useAsync } from "../../shared/useAsync";
+import logo from "./assets/logo.svg";
 
 type Board = number[][];
 type Direction = "left" | "right" | "up" | "down";
@@ -145,7 +146,7 @@ function Game2048() {
 
   return (
     <div className="page game">
-      <h1>2048</h1>
+      <h1 className="game__title"><img src={logo} alt="2048 logo" width={36} height={36} /> 2048</h1>
       <div className="game__bar">
         <strong>Score: {score}</strong>
         <button type="button" onClick={newGame}>

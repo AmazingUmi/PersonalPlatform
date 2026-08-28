@@ -1,169 +1,638 @@
 import assert from "node:assert/strict";
-import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
-import { Database } from "../../src/core/database/index.js";
-import { createLogger } from "../../src/core/logging/index.js";
-import { createPlatform, type Platform } from "../../src/core/platform.js";
-import type { PlatformConfig } from "../../src/core/config/index.js";
+import assetsApp from "../../src/apps/assets/index.js";
+import miniGameApp from "../../src/apps/mini_game/index.js";
+import tasksApp from "../../src/apps/tasks/index.js";
+import type { BackendAppModule } from "../../src/core/app-registry/types.js";
+import type { Database } from "../../src/core/database/index.js";
 import { runMigrations } from "../../src/core/database/migrate.js";
-import { coreMigrationTarget, runAppMigrations } from "../../src/core/database/startup-migrations.js";
-import { backendAppModules, frontendAppIds } from "../../src/generated/apps.js";
+import type { Platform } from "../../src/core/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
+import { buildFixturePlatform, type FixtureManifest } from "../helpers/platform.js";
 
-const log = createLogger("fatal");
-const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
 let db: Database;
 let platform: Platform;
-let tmpRoot: string;
+let cleanup: () => void;
+let root: string;
+
+function appYaml(id: string, capabilities: string[]): string {
+  return `manifest_version: 1
+id: ${id}
+name: ${id}
+version: 0.1.0
+description: fixture app ${id}
+default_enabled: true
+frontend:
+  route: /${id}
+widgets: []
+capabilities:
+${capabilities.map((c) => `  ${c}: true`).join("\n")}
+`;
+}
+
+const ASSETS_SQL = `CREATE TABLE categories (id uuid PRIMARY KEY, name text NOT NULL UNIQUE, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE items (id uuid PRIMARY KEY, category_id uuid REFERENCES categories(id) ON DELETE SET NULL, name text NOT NULL, description text, quantity integer NOT NULL DEFAULT 1, acquired_at date, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE attachments (id uuid PRIMARY KEY, item_id uuid NOT NULL REFERENCES items(id) ON DELETE CASCADE, filename text NOT NULL, content_type text, size bigint NOT NULL DEFAULT 0, storage_key text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());`;
+
+const TASKS_SQL = `CREATE TABLE tasks (id uuid PRIMARY KEY, title text NOT NULL, description text, status text NOT NULL DEFAULT 'todo', due_at timestamptz, completed_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());`;
+
+const MINI_GAME_SQL = `CREATE TABLE saves (id text PRIMARY KEY, score integer NOT NULL DEFAULT 0, board jsonb NOT NULL DEFAULT '[]'::jsonb, updated_at timestamptz NOT NULL DEFAULT now());`;
+
+interface CompletedPayload {
+  id: string;
+  title: string;
+}
+
+/** Captured envelopes for `tasks.task.completed.v1`. */
+const completedEvents: Array<{
+  id: string;
+  type: string;
+  source: string;
+  payload: CompletedPayload;
+}> = [];
+
+const spyApp: BackendAppModule = {
+  id: "spy",
+  async registerApi() {},
+  async registerEvents(ctx) {
+    return [
+      ctx.events.subscribe("tasks.task.completed.v1", (event) => {
+        completedEvents.push({
+          id: event.id,
+          type: event.type,
+          source: event.source,
+          payload: event.payload as CompletedPayload,
+        });
+      }),
+    ];
+  },
+};
 
 before(async () => {
   db = await resetDatabase();
-  await runMigrations({ databaseUrl: TEST_DATABASE_URL, targets: [coreMigrationTarget(repoRoot)], log });
-
-  tmpRoot = mkdtempSync(join(tmpdir(), "pp-apps-e2e-"));
-  mkdirSync(join(tmpRoot, "storage"), { recursive: true });
-  mkdirSync(join(tmpRoot, "config"), { recursive: true });
-  writeFileSync(join(tmpRoot, "config", "platform.yaml"), "platform:\n  name: test\n");
-  for (const appId of ["assets", "tasks", "mini_game"]) {
-    mkdirSync(join(tmpRoot, "apps", appId), { recursive: true });
-    copyFileSync(join(repoRoot, "apps", appId, "app.yaml"), join(tmpRoot, "apps", appId, "app.yaml"));
-  }
-
-  const config: PlatformConfig = {
-    platform: { name: "test", environment: "test" },
-    apps: { manifests_directory: "apps", enabled: {} },
-    storage: { driver: "local", root: "storage" },
-  };
-
-  platform = await createPlatform({
-    config,
-    root: tmpRoot,
-    log,
-    database: db,
-    backendModules: backendAppModules,
-    frontendAppIds,
-    beforeActivation: async () => {
-      await runAppMigrations({
-        databaseUrl: TEST_DATABASE_URL,
-        root: repoRoot,
-        manifestsDir: join(repoRoot, "apps"),
-        database: db,
-        log,
-      });
+  const manifests: FixtureManifest[] = [
+    {
+      id: "assets",
+      yaml: appYaml("assets", ["database", "storage"]),
+      migrations: [ASSETS_SQL],
     },
+    {
+      id: "tasks",
+      yaml: appYaml("tasks", ["database", "scheduler", "events"]),
+      migrations: [TASKS_SQL],
+    },
+    {
+      id: "mini_game",
+      yaml: appYaml("mini_game", ["database", "events"]),
+      migrations: [MINI_GAME_SQL],
+    },
+    {
+      id: "spy",
+      yaml: appYaml("spy", ["events"]),
+    },
+  ];
+  const fixture = await buildFixturePlatform({
+    database: db,
+    manifests,
+    backendModules: {
+      assets: assetsApp,
+      tasks: tasksApp,
+      mini_game: miniGameApp,
+      spy: spyApp,
+    },
+  });
+  platform = fixture.platform;
+  cleanup = fixture.cleanup;
+  root = fixture.root;
+
+  await runMigrations({
+    databaseUrl: TEST_DATABASE_URL,
+    targets: [
+      { scope: "assets", schema: "assets", dir: join(root, "apps", "assets", "migrations") },
+      { scope: "tasks", schema: "tasks", dir: join(root, "apps", "tasks", "migrations") },
+      { scope: "mini_game", schema: "mini_game", dir: join(root, "apps", "mini_game", "migrations") },
+    ],
   });
 });
 
 after(async () => {
-  await platform.stop().catch(() => undefined);
-  rmSync(tmpRoot, { recursive: true, force: true });
+  await platform.stop();
+  cleanup();
   await db.close();
 });
 
-describe("three validation apps", () => {
-  it("lists all three apps as enabled", () => {
-    const apps = platform.getApps();
-    const ids = apps.map((app) => app.id).sort();
-    assert.deepEqual(ids, ["assets", "mini_game", "tasks"]);
-    assert.ok(apps.every((app) => app.status === "enabled"));
-  });
-
-  it("assets: create category, create item, search and list", async () => {
-    const category = await platform.app.inject({
+describe("assets app API", () => {
+  it("creates and lists categories", async () => {
+    const first = await platform.app.inject({
       method: "POST",
       url: "/api/apps/assets/categories",
       payload: { name: "Electronics" },
     });
-    assert.equal(category.statusCode, 201);
+    assert.equal(first.statusCode, 201);
+    assert.equal(first.json().name, "Electronics");
+    assert.ok(first.json().id, "created category has an id");
 
+    const second = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/assets/categories",
+      payload: { name: "Furniture" },
+    });
+    assert.equal(second.statusCode, 201);
+
+    const list = await platform.app.inject({ method: "GET", url: "/api/apps/assets/categories" });
+    assert.equal(list.statusCode, 200);
+    assert.deepEqual(
+      list.json().items.map((c: { name: string }) => c.name),
+      ["Electronics", "Furniture"],
+    );
+  });
+
+  it("creates an item with fields and fetches it by id", async () => {
+    const categories = await platform.app.inject({ method: "GET", url: "/api/apps/assets/categories" });
+    const electronicsId = categories.json().items.find((c: { name: string }) => c.name === "Electronics").id as string;
+
+    const acquiredAt = new Date("2026-01-15T10:00:00.000Z").toISOString();
     const created = await platform.app.inject({
       method: "POST",
       url: "/api/apps/assets/items",
-      payload: { name: "Laptop", categoryId: category.json().id, quantity: 1 },
+      payload: {
+        name: "Laptop",
+        description: "work machine",
+        quantity: 2,
+        acquiredAt,
+        categoryId: electronicsId,
+      },
     });
     assert.equal(created.statusCode, 201);
-    assert.equal(created.json().name, "Laptop");
+    const body = created.json();
+    assert.equal(body.name, "Laptop");
+    assert.equal(body.description, "work machine");
+    assert.equal(body.quantity, 2);
+    assert.equal(body.category_id, electronicsId);
+    assert.ok(body.acquired_at, "acquired_at persisted");
 
-    const search = await platform.app.inject({ method: "GET", url: "/api/apps/assets/items?q=Lap" });
-    assert.equal(search.json().items.length, 1);
+    const fetched = await platform.app.inject({ method: "GET", url: `/api/apps/assets/items/${body.id}` });
+    assert.equal(fetched.statusCode, 200);
+    assert.equal(fetched.json().name, "Laptop");
 
-    const summary = await platform.app.inject({ method: "GET", url: "/api/apps/assets/summary" });
-    assert.equal(summary.json().items, 1);
+    const missing = await platform.app.inject({
+      method: "GET",
+      url: "/api/apps/assets/items/00000000-0000-0000-0000-000000000000",
+    });
+    assert.equal(missing.statusCode, 404);
+    assert.equal(missing.json().error.code, "not_found");
   });
 
-  it("assets: stores attachments through platform storage", async () => {
+  it("rejects invalid item payloads with validation_error", async () => {
+    const missingName = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/assets/items",
+      payload: { description: "no name" },
+    });
+    assert.equal(missingName.statusCode, 400);
+    assert.equal(missingName.json().error.code, "validation_error");
+
+    const negativeQuantity = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/assets/items",
+      payload: { name: "Bad", quantity: -1 },
+    });
+    assert.equal(negativeQuantity.statusCode, 400);
+    assert.equal(negativeQuantity.json().error.code, "validation_error");
+
+    const badDate = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/assets/items",
+      payload: { name: "Bad", acquiredAt: "not-a-date" },
+    });
+    assert.equal(badDate.statusCode, 400);
+    assert.equal(badDate.json().error.code, "validation_error");
+  });
+
+  it("filters items by q and categoryId", async () => {
+    const chair = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/assets/items",
+      payload: { name: "Office Chair", description: "ergonomic seat" },
+    });
+    assert.equal(chair.statusCode, 201);
+    await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/assets/items",
+      payload: { name: "Standing Desk", description: "office furniture" },
+    });
+
+    const byDescription = await platform.app.inject({
+      method: "GET",
+      url: "/api/apps/assets/items?q=ergonomic",
+    });
+    assert.deepEqual(
+      byDescription.json().items.map((i: { name: string }) => i.name),
+      ["Office Chair"],
+    );
+
+    const byNameCaseInsensitive = await platform.app.inject({
+      method: "GET",
+      url: "/api/apps/assets/items?q=LAP",
+    });
+    assert.deepEqual(
+      byNameCaseInsensitive.json().items.map((i: { name: string }) => i.name),
+      ["Laptop"],
+    );
+
+    const categories = await platform.app.inject({ method: "GET", url: "/api/apps/assets/categories" });
+    const electronicsId = categories.json().items.find((c: { name: string }) => c.name === "Electronics").id as string;
+    const byCategory = await platform.app.inject({
+      method: "GET",
+      url: `/api/apps/assets/items?categoryId=${electronicsId}`,
+    });
+    const names = byCategory.json().items.map((i: { name: string }) => i.name);
+    assert.ok(names.includes("Laptop"), "category filter includes the categorized item");
+    assert.ok(!names.includes("Office Chair"), "category filter excludes uncategorized items");
+  });
+
+  it("partially updates an item", async () => {
+    const created = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/assets/items",
+      payload: { name: "Monitor" },
+    });
+    const itemId = created.json().id as string;
+
+    const quantityUpdate = await platform.app.inject({
+      method: "PUT",
+      url: `/api/apps/assets/items/${itemId}`,
+      payload: { quantity: 3 },
+    });
+    assert.equal(quantityUpdate.statusCode, 200);
+    assert.equal(quantityUpdate.json().quantity, 3);
+    assert.equal(quantityUpdate.json().name, "Monitor", "untouched fields are preserved");
+
+    const nameUpdate = await platform.app.inject({
+      method: "PUT",
+      url: `/api/apps/assets/items/${itemId}`,
+      payload: { name: "Ultra Monitor" },
+    });
+    assert.equal(nameUpdate.statusCode, 200);
+    assert.equal(nameUpdate.json().name, "Ultra Monitor");
+    assert.equal(nameUpdate.json().quantity, 3);
+
+    const missing = await platform.app.inject({
+      method: "PUT",
+      url: "/api/apps/assets/items/00000000-0000-0000-0000-000000000000",
+      payload: { name: "Ghost" },
+    });
+    assert.equal(missing.statusCode, 404);
+    assert.equal(missing.json().error.code, "not_found");
+  });
+
+  it("deletes an item and answers 404 afterwards", async () => {
+    const created = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/assets/items",
+      payload: { name: "Temp Item" },
+    });
+    const itemId = created.json().id as string;
+
+    const removed = await platform.app.inject({ method: "DELETE", url: `/api/apps/assets/items/${itemId}` });
+    assert.equal(removed.statusCode, 204);
+
+    const gone = await platform.app.inject({ method: "GET", url: `/api/apps/assets/items/${itemId}` });
+    assert.equal(gone.statusCode, 404);
+
+    const removedAgain = await platform.app.inject({ method: "DELETE", url: `/api/apps/assets/items/${itemId}` });
+    assert.equal(removedAgain.statusCode, 404);
+    assert.equal(removedAgain.json().error.code, "not_found");
+  });
+
+  it("stores, lists and downloads attachments through platform storage", async () => {
     const created = await platform.app.inject({
       method: "POST",
       url: "/api/apps/assets/items",
       payload: { name: "Camera" },
     });
-    const itemId = created.json().id;
+    const itemId = created.json().id as string;
+    const content = "attachment-payload-123";
 
     const upload = await platform.app.inject({
       method: "POST",
       url: `/api/apps/assets/items/${itemId}/attachments`,
-      payload: { filename: "receipt.txt", contentType: "text/plain", dataBase64: Buffer.from("hello").toString("base64") },
+      payload: {
+        filename: "receipt.txt",
+        contentType: "text/plain",
+        dataBase64: Buffer.from(content, "utf8").toString("base64"),
+      },
     });
     assert.equal(upload.statusCode, 201);
+    assert.equal(upload.json().filename, "receipt.txt");
+    assert.equal(upload.json().content_type, "text/plain");
+    assert.equal(Number(upload.json().size), Buffer.byteLength(content, "utf8"));
+    const attachmentId = upload.json().id as string;
 
-    const list = await platform.app.inject({ method: "GET", url: `/api/apps/assets/items/${itemId}/attachments` });
+    const list = await platform.app.inject({
+      method: "GET",
+      url: `/api/apps/assets/items/${itemId}/attachments`,
+    });
+    assert.equal(list.statusCode, 200);
     assert.equal(list.json().items.length, 1);
+    assert.equal(list.json().items[0].id, attachmentId);
+
+    const download = await platform.app.inject({
+      method: "GET",
+      url: `/api/apps/assets/items/${itemId}/attachments/${attachmentId}`,
+    });
+    assert.equal(download.statusCode, 200);
+    assert.equal(download.rawPayload.toString("utf8"), content);
+    const contentType = download.headers["content-type"];
+    assert.ok(
+      typeof contentType === "string" && contentType.startsWith("text/plain"),
+      `unexpected content-type: ${String(contentType)}`,
+    );
+
+    const missingDownload = await platform.app.inject({
+      method: "GET",
+      url: `/api/apps/assets/items/${itemId}/attachments/00000000-0000-0000-0000-000000000000`,
+    });
+    assert.equal(missingDownload.statusCode, 404);
+    assert.equal(missingDownload.json().error.code, "not_found");
   });
 
-  it("tasks: create, complete and summarize", async () => {
+  it("reports summary counts", async () => {
+    const before = await platform.app.inject({ method: "GET", url: "/api/apps/assets/summary" });
+    const beforeBody = before.json() as { items: number; categories: number };
+
+    const categories = await platform.app.inject({ method: "POST", url: "/api/apps/assets/categories", payload: { name: "Summary Cat" } });
+    await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/assets/items",
+      payload: { name: "Summary Item", categoryId: categories.json().id },
+    });
+
+    const after = await platform.app.inject({ method: "GET", url: "/api/apps/assets/summary" });
+    const afterBody = after.json() as { items: number; categories: number };
+    assert.equal(afterBody.items, beforeBody.items + 1);
+    assert.equal(afterBody.categories, beforeBody.categories + 1);
+  });
+});
+
+describe("tasks app API", () => {
+  it("creates a task with a due date and validates input", async () => {
     const created = await platform.app.inject({
       method: "POST",
       url: "/api/apps/tasks/tasks",
-      payload: { title: "Write docs" },
+      payload: { title: "Buy groceries", dueAt: new Date().toISOString() },
     });
     assert.equal(created.statusCode, 201);
+    assert.equal(created.json().title, "Buy groceries");
+    assert.equal(created.json().status, "todo");
+    assert.equal(created.json().completed_at, null);
+    assert.ok(created.json().due_at, "dueAt persisted");
 
-    const completed = await platform.app.inject({
+    const missingTitle = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/tasks/tasks",
+      payload: { description: "no title" },
+    });
+    assert.equal(missingTitle.statusCode, 400);
+    assert.equal(missingTitle.json().error.code, "validation_error");
+  });
+
+  it("lists tasks and filters by status", async () => {
+    const todo = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/tasks/tasks",
+      payload: { title: "Filter Todo" },
+    });
+    const done = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/tasks/tasks",
+      payload: { title: "Filter Done" },
+    });
+    await platform.app.inject({
       method: "PUT",
-      url: `/api/apps/tasks/tasks/${created.json().id}`,
+      url: `/api/apps/tasks/tasks/${done.json().id}`,
       payload: { status: "done" },
     });
-    assert.equal(completed.json().status, "done");
-    assert.ok(completed.json().completed_at);
 
-    const summary = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/summary" });
-    assert.equal(summary.json().done, 1);
+    const all = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/tasks" });
+    const allTitles = all.json().items.map((t: { title: string }) => t.title);
+    assert.ok(allTitles.includes("Filter Todo"));
+    assert.ok(allTitles.includes("Filter Done"));
+
+    const todoList = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/tasks?status=todo" });
+    const todoTitles = todoList.json().items.map((t: { title: string }) => t.title);
+    assert.ok(todoTitles.includes("Filter Todo"));
+    assert.ok(!todoTitles.includes("Filter Done"));
+
+    const doneList = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/tasks?status=done" });
+    const doneTitles = doneList.json().items.map((t: { title: string }) => t.title);
+    assert.ok(doneTitles.includes("Filter Done"));
+    assert.ok(!doneTitles.includes("Filter Todo"));
+    assert.equal(todoList.json().items.find((t: { id: string }) => t.id === todo.json().id).status, "todo");
   });
 
-  it("mini_game: persists and loads a save", async () => {
-    const board = [[2, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-    const save = await platform.app.inject({
-      method: "PUT",
-      url: "/api/apps/mini_game/saves",
-      payload: { score: 64, board },
-    });
-    assert.equal(save.statusCode, 200);
-    assert.equal(save.json().score, 64);
-
-    const loaded = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves" });
-    assert.equal(loaded.json().save.score, 64);
-
-    const summary = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/summary" });
-    assert.equal(summary.json().highScore, 64);
-  });
-
-  it("disabling an app blocks its API but preserves data", async () => {
+  it("completes a task and reopens it clearing completed_at", async () => {
     const created = await platform.app.inject({
       method: "POST",
-      url: "/api/apps/assets/items",
-      payload: { name: "Keep Me" },
+      url: "/api/apps/tasks/tasks",
+      payload: { title: "Cycle" },
     });
-    const itemId = created.json().id;
+    const taskId = created.json().id as string;
 
-    await platform.setAppEnabled("assets", false);
-    const blocked = await platform.app.inject({ method: "GET", url: "/api/apps/assets/items" });
-    assert.equal(blocked.statusCode, 404, "disabled app API returns 404");
+    const done = await platform.app.inject({
+      method: "PUT",
+      url: `/api/apps/tasks/tasks/${taskId}`,
+      payload: { status: "done" },
+    });
+    assert.equal(done.statusCode, 200);
+    assert.equal(done.json().status, "done");
+    assert.ok(done.json().completed_at, "completed_at set on completion");
 
-    await platform.setAppEnabled("assets", true);
-    const restored = await platform.app.inject({ method: "GET", url: `/api/apps/assets/items/${itemId}` });
-    assert.equal(restored.statusCode, 200);
-    assert.equal(restored.json().name, "Keep Me");
+    const reopened = await platform.app.inject({
+      method: "PUT",
+      url: `/api/apps/tasks/tasks/${taskId}`,
+      payload: { status: "todo" },
+    });
+    assert.equal(reopened.statusCode, 200);
+    assert.equal(reopened.json().status, "todo");
+    assert.equal(reopened.json().completed_at, null, "completed_at cleared on reopen");
+  });
+
+  it("deletes a task and answers 404 afterwards", async () => {
+    const created = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/tasks/tasks",
+      payload: { title: "Delete Me" },
+    });
+    const taskId = created.json().id as string;
+
+    const removed = await platform.app.inject({ method: "DELETE", url: `/api/apps/tasks/tasks/${taskId}` });
+    assert.equal(removed.statusCode, 204);
+
+    const gone = await platform.app.inject({ method: "GET", url: `/api/apps/tasks/tasks/${taskId}` });
+    assert.equal(gone.statusCode, 404);
+    assert.equal(gone.json().error.code, "not_found");
+  });
+
+  it("summarizes today, overdue and done counts", async () => {
+    const baseline = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/summary" });
+    const before = baseline.json() as { today: number; overdue: number; done: number };
+
+    // Due at the end of the database server's "today" so it is due today but
+    // never overdue, regardless of server timezone.
+    const endOfToday = await db.context().query<{ due: Date }>(
+      "SELECT (CURRENT_DATE::text || ' 23:59:59')::timestamptz AS due",
+    );
+    const dueToday = endOfToday.rows[0]!.due.toISOString();
+    const overdueDue = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+
+    await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/tasks/tasks",
+      payload: { title: "Due Today", dueAt: dueToday },
+    });
+    await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/tasks/tasks",
+      payload: { title: "Overdue One", dueAt: overdueDue },
+    });
+    const toFinish = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/tasks/tasks",
+      payload: { title: "Already Done" },
+    });
+    await platform.app.inject({
+      method: "PUT",
+      url: `/api/apps/tasks/tasks/${toFinish.json().id}`,
+      payload: { status: "done" },
+    });
+
+    const summary = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/summary" });
+    const counts = summary.json() as { today: number; overdue: number; done: number };
+    assert.equal(counts.today, before.today + 1, "one extra task due today");
+    assert.equal(counts.overdue, before.overdue + 1, "one extra overdue task");
+    assert.equal(counts.done, before.done + 1, "one extra done task");
+  });
+
+  it("publishes tasks.task.completed.v1 once per completion", async () => {
+    completedEvents.length = 0;
+    const created = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/tasks/tasks",
+      payload: { title: "Publish Me" },
+    });
+    const taskId = created.json().id as string;
+
+    const done = await platform.app.inject({
+      method: "PUT",
+      url: `/api/apps/tasks/tasks/${taskId}`,
+      payload: { status: "done" },
+    });
+    assert.equal(done.statusCode, 200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    assert.equal(completedEvents.length, 1, "exactly one completion event");
+    const event = completedEvents[0]!;
+    assert.equal(event.type, "tasks.task.completed.v1");
+    assert.equal(event.source, "tasks");
+    assert.equal(event.payload.id, taskId);
+    assert.equal(event.payload.title, "Publish Me");
+
+    const doneAgain = await platform.app.inject({
+      method: "PUT",
+      url: `/api/apps/tasks/tasks/${taskId}`,
+      payload: { status: "done" },
+    });
+    assert.equal(doneAgain.statusCode, 200);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(completedEvents.length, 1, "re-completing a done task does not publish again");
+  });
+});
+
+describe("mini_game app API", () => {
+  it("starts with no save", async () => {
+    const empty = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves" });
+    assert.equal(empty.statusCode, 200);
+    assert.deepEqual(empty.json(), { save: null });
+  });
+
+  it("saves, loads and overwrites a board", async () => {
+    const board = [
+      [2, 4, 0, 0],
+      [8, 16, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 2, 4],
+    ];
+    const saved = await platform.app.inject({
+      method: "PUT",
+      url: "/api/apps/mini_game/saves",
+      payload: { score: 128, board },
+    });
+    assert.equal(saved.statusCode, 200);
+    assert.equal(saved.json().score, 128);
+
+    const loaded = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves" });
+    assert.equal(loaded.statusCode, 200);
+    assert.equal(loaded.json().save.score, 128);
+    assert.deepEqual(loaded.json().save.board, board);
+
+    const summary = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/summary" });
+    assert.equal(summary.json().highScore, 128);
+
+    const higherBoard = [
+      [4, 8, 0, 0],
+      [16, 32, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 4, 8],
+    ];
+    const upgraded = await platform.app.inject({
+      method: "PUT",
+      url: "/api/apps/mini_game/saves",
+      payload: { score: 512, board: higherBoard },
+    });
+    assert.equal(upgraded.statusCode, 200);
+    assert.equal(upgraded.json().score, 512);
+
+    const reloaded = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves" });
+    assert.equal(reloaded.json().save.score, 512);
+    assert.deepEqual(reloaded.json().save.board, higherBoard);
+
+    const newSummary = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/summary" });
+    assert.equal(newSummary.json().highScore, 512);
+  });
+
+  it("rejects invalid save payloads", async () => {
+    const emptyBody = await platform.app.inject({
+      method: "PUT",
+      url: "/api/apps/mini_game/saves",
+      payload: {},
+    });
+    assert.equal(emptyBody.statusCode, 400);
+    assert.equal(emptyBody.json().error.code, "validation_error");
+
+    const missingBoard = await platform.app.inject({
+      method: "PUT",
+      url: "/api/apps/mini_game/saves",
+      payload: { score: 10 },
+    });
+    assert.equal(missingBoard.statusCode, 400);
+    assert.equal(missingBoard.json().error.code, "validation_error");
+
+    const missingScore = await platform.app.inject({
+      method: "PUT",
+      url: "/api/apps/mini_game/saves",
+      payload: { board: [] },
+    });
+    assert.equal(missingScore.statusCode, 400);
+    assert.equal(missingScore.json().error.code, "validation_error");
+
+    const negativeScore = await platform.app.inject({
+      method: "PUT",
+      url: "/api/apps/mini_game/saves",
+      payload: { score: -5, board: [] },
+    });
+    assert.equal(negativeScore.statusCode, 400);
+    assert.equal(negativeScore.json().error.code, "validation_error");
   });
 });

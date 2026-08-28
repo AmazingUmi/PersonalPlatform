@@ -1,0 +1,14 @@
+manifest_version: 1
+id: new_app
+name: New App
+version: 0.1.0
+description: TODO
+default_enabled: true
+frontend:
+  route: /new_app
+widgets: []
+capabilities:
+  database: false
+  storage: false
+  scheduler: false
+  events: false

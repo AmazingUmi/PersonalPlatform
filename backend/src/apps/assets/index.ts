@@ -85,7 +85,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
             name: { type: "string", minLength: 1, maxLength: 300 },
             description: { type: "string" },
             quantity: { type: "integer", minimum: 0 },
-            acquiredAt: { type: "string" },
+            acquiredAt: { type: "string", format: "date-time" },
             categoryId: { type: "string" },
           },
         },
@@ -129,7 +129,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
             name: { type: "string", minLength: 1 },
             description: { type: "string" },
             quantity: { type: "integer", minimum: 0 },
-            acquiredAt: { type: "string" },
+            acquiredAt: { type: "string", format: "date-time" },
             categoryId: { type: "string" },
           },
         },
@@ -212,9 +212,10 @@ async function registerApi(ctx: AppContext): Promise<void> {
       );
       if (!rows[0]) throw new AppError(404, "not_found", "attachment not found");
       const data = await ctx.storage.read(rows[0].storage_key);
+      const safeFilename = rows[0].filename.replace(/[\r\n"]/g, "_");
       return reply
         .type(rows[0].content_type ?? "application/octet-stream")
-        .header("content-disposition", `inline; filename="${rows[0].filename}"`)
+        .header("content-disposition", `inline; filename="${safeFilename}"`)
         .send(data);
     },
   );
