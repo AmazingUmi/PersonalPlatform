@@ -37,6 +37,10 @@ export class EventBus {
   constructor(private readonly log?: Logger) {}
 
   publish<T>(type: string, payload: T, source: string): void {
+    if (!isValidEventType(type)) {
+      // Programming error: fail fast so bad event names never spread.
+      throw new TypeError(`invalid event type '${type}': expected <app_id>.<entity>.<action>.v<N>`);
+    }
     const envelope: EventEnvelope<T> = {
       id: randomUUID(),
       type,
