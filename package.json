@@ -1,0 +1,15 @@
+{
+  "name": "personal-platform",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "check": "npm run check --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

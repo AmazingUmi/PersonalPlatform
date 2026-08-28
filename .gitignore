@@ -1,0 +1,33 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+
+# Node
+node_modules/
+backend/dist/
+frontend/dist/
+*.tsbuildinfo
+
+# Runtime data
+storage/*
+!storage/.gitkeep
+postgres-data/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Test coverage
+.coverage
+htmlcov/
+coverage/

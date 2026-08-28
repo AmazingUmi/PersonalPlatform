@@ -1,0 +1,13 @@
+platform:
+  name: Personal Platform
+  environment: development
+
+apps:
+  manifests_directory: apps
+
+storage:
+  driver: local
+  root: storage
+
+# P0 only establishes the configuration contract. Loading and validation are
+# implemented in P1; secrets always come from environment variables.
