@@ -29,6 +29,16 @@ case "$command" in
       echo "usage: scripts/backup.sh restore <backup_file>" >&2
       exit 1
     fi
+    # Drop the schemas present in the dump so a restore over an existing
+    # database is clean (Disable != Uninstall never drops data implicitly;
+    # restore is an explicit operator action).
+    schemas=$(grep -oE '^CREATE SCHEMA [^"]*"([a-z_]+)"' "$in_file" | grep -oE '"[a-z_]+"' | tr -d '"' | sort -u)
+    if [ -n "$schemas" ]; then
+      echo "dropping schemas: $schemas"
+      for schema in $schemas; do
+        psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS \"$schema\" CASCADE"
+      done
+    fi
     psql "$DATABASE_URL" -v ON_ERROR_STOP=1 < "$in_file"
     echo "restored from $in_file"
     ;;

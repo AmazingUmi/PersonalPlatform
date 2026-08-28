@@ -250,6 +250,8 @@ GET  /api/core/apps/:id/health
 
 每个 App 只实现验证架构所需的 happy path、验证和错误处理，不扩展账户、复杂权限、导入导出或协作功能。
 
+验证：17 项 App API 集成测试（CRUD/校验/404/附件二进制往返/事件单次发布/summary 计数）；Playwright E2E 覆盖三 App 关键路径（创建/搜索/完成/棋盘与存档）。
+
 ### P6 — Stabilization（已完成）
 
 - API/组件/E2E 测试和覆盖关键失败路径。
@@ -258,6 +260,8 @@ GET  /api/core/apps/:id/health
 - Compose 生产覆盖文件、资源限制、非 root 镜像和依赖安全扫描。
 
 完成定义：从创建模板到注册、迁移、启用、页面展示、禁用形成完整闭环。
+
+验证：`npm run e2e`（7 项，含禁用/启用与数据保留）；`scripts/verify.sh` 一键验收全绿；备份/恢复演练通过（恢复前按 dump 清单 DROP 目标 schema）；优雅关闭顺序日志确认；CI 含 PostgreSQL service、集成测试、`npm audit` 与 E2E 阶段。
 
 ## 9. 测试矩阵
 
