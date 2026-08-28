@@ -1,0 +1,16 @@
+manifest_version: 1
+id: tasks
+name: Tasks
+version: 0.1.0
+description: Personal task management
+default_enabled: true
+frontend:
+  route: /tasks
+widgets:
+  - id: today
+    name: Tasks Today
+capabilities:
+  database: true
+  storage: false
+  scheduler: true
+  events: true

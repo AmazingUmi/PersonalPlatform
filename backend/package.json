@@ -5,13 +5,19 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/main.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test \"test/unit/*.test.ts\"",
+    "test:integration": "node --import tsx --test --test-concurrency=1 \"test/integration/*.test.ts\""
   },
   "dependencies": {
+    "ajv": "^8.17.1",
     "fastify": "^5.2.1",
-    "pg": "^8.13.3"
+    "node-cron": "^4.6.0",
+    "node-pg-migrate": "^9.0.0",
+    "pg": "^8.13.3",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/node": "^22.13.4",

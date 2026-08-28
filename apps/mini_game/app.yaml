@@ -1,0 +1,16 @@
+manifest_version: 1
+id: mini_game
+name: Mini Game (2048)
+version: 0.1.0
+description: Minimal 2048 game with save data
+default_enabled: true
+frontend:
+  route: /mini_game
+widgets:
+  - id: highscore
+    name: 2048 High Score
+capabilities:
+  database: true
+  storage: false
+  scheduler: false
+  events: true

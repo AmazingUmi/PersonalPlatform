@@ -1,42 +1,66 @@
 import { useEffect, useState } from "react";
-
-type BackendState = "checking" | "online" | "offline";
+import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { fetchApps, type AppInfo } from "../shared/api";
+import { AppCenter } from "./AppCenter";
+import { Dashboard } from "./Dashboard";
+import { Nav } from "./Nav";
+import { Settings } from "./Settings";
+import { enabledAppModules, resolveRoutes } from "./routes";
 
 export function App() {
-  const [backendState, setBackendState] = useState<BackendState>("checking");
+  const [apps, setApps] = useState<AppInfo[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
-    const controller = new AbortController();
-
-    fetch("/api/core/health/live", { signal: controller.signal })
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        setBackendState("online");
+    let cancelled = false;
+    fetchApps()
+      .then((items) => {
+        if (!cancelled) {
+          setApps(items);
+          setError(null);
+        }
       })
-      .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === "AbortError") return;
-        setBackendState("offline");
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
       });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
 
-    return () => controller.abort();
-  }, []);
+  if (!apps) {
+    return (
+      <div className="shell">
+        <header className="shell__header">
+          <strong>Personal Platform</strong>
+        </header>
+        <main className="shell__main">
+          {error ? <p className="error-text">Backend unavailable: {error}</p> : <p className="muted">Loading…</p>}
+        </main>
+      </div>
+    );
+  }
+
+  const modules = enabledAppModules(apps);
+  const routes = resolveRoutes(modules, apps);
 
   return (
-    <div className="shell">
-      <header className="shell__header">
-        <strong>Personal Platform</strong>
-        <span className={`status status--${backendState}`}>
-          Backend: {backendState}
-        </span>
-      </header>
-      <main className="shell__main">
-        <p className="eyebrow">P0 · Repository Bootstrap</p>
-        <h1>平台骨架已就绪</h1>
-        <p>
-          当前仅包含 Web Shell 占位入口和基础健康检查。App Registry、Dashboard、
-          业务 App 等能力将按实现计划逐步加入。
-        </p>
-      </main>
-    </div>
+    <BrowserRouter>
+      <div className="shell">
+        <Nav apps={apps.filter((app) => app.status === "enabled")} />
+        <main className="shell__main">
+          <Routes>
+            <Route path="/" element={<Dashboard apps={apps} />} />
+            <Route path="/apps" element={<AppCenter apps={apps} onChanged={() => setRefreshKey((k) => k + 1)} />} />
+            <Route path="/settings" element={<Settings />} />
+            {routes.map((route) => (
+              <Route key={route.path} path={route.path} element={route.element} />
+            ))}
+            <Route path="*" element={<div className="page"><h1>Not Found</h1></div>} />
+          </Routes>
+        </main>
+      </div>
+    </BrowserRouter>
   );
 }

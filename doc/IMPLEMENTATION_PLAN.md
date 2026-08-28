@@ -1,7 +1,7 @@
 # Personal Platform — 具体实现方案
 
 > 基线：`PERSONAL_PLATFORM_INITIAL_DESIGN.md` v0.1  
-> 当前状态：P0 已初始化，P1–P6 待实施  
+> 当前状态：P0、P1 已完成；P2–P6 实施中  
 > 原则：先验证平台闭环，不提前实现 v0.2 能力
 
 ## 1. 范围控制
@@ -205,7 +205,7 @@ GET  /api/core/apps/:id/health
 交付：npm workspaces、Web Shell 占位页、Backend health、PostgreSQL、Compose、CI、配置模板。  
 验收：`docker compose up --build` 后三服务 healthy；Shell 显示 Backend online；Backend 启动日志确认 `SELECT 1`。
 
-### P1 — Core Skeleton
+### P1 — Core Skeleton（已完成）
 
 - 拆分当前 `backend/src/main.ts` 为 config/database/health 模块。
 - 实现 Manifest Schema、扫描器、编译期 registry 生成器。
@@ -213,23 +213,26 @@ GET  /api/core/apps/:id/health
 - 实现 `GET /api/core/apps` 与错误中间件。
 - 增加单元、Manifest 契约和启动失败测试。
 
-完成定义：有效/无效 Manifest 均有确定结果；数据库不可用时 readiness 503；单个坏 App 不拖垮 Core。
+完成定义：有效/无效 Manifest 均有确定结果；数据库不可用时 readiness 503；单个坏 App 不拖垮 Core。  
+验证：`npm run test`（backend 单元 21 项）、`npm run test:integration`（backend 集成 15 项，含迁移幂等、坏 App 隔离、readiness 503）。
 
-### P2 — App Lifecycle & App Center
+### P2 — App Lifecycle & App Center（已完成）
 
 - 实现启停状态机、route guard、事件/Job 清理句柄。
 - 前端加入 React Router、导航和 App Center。
 - 端到端验证 Enabled / Disabled / Error。
 
-完成定义：禁用后导航、Widget、API 和后台任务均不可用，Schema 数据仍存在；重新启用后恢复。
+完成定义：禁用后导航、Widget、API 和后台任务均不可用，Schema 数据仍存在；重新启用后恢复。  
+验证：`backend test/integration/lifecycle.test.ts`（7 项：API 404、Job 停止、数据保留、恢复、幂等、未知 App 404）；前端 Vitest 8 项（App Center 操作、路由过滤）。统一 route guard 对非 enabled 状态一律 404，不暴露内部状态。
 
-### P3 — Dashboard & Widget
+### P3 — Dashboard & Widget（已完成）
 
 - Widget Registry 由前端 App module 提供。
 - Dashboard 使用固定响应式网格；布局先存 `core.settings`。
 - 每个 Widget 设置 Error Boundary、loading/empty/error 状态。
 
-完成定义：至少两个测试 Widget 可共存；禁用来源 App 后自动消失；单 Widget 异常不影响 Dashboard。
+完成定义：至少两个测试 Widget 可共存；禁用来源 App 后自动消失；单 Widget 异常不影响 Dashboard。  
+验证：前端 Vitest 11 项（Widget 共存、禁用消失、错误隔离、core.settings 布局）；后端 settings API 集成测试（键校验、404、JSONB 往返）。新增 `GET/PUT /api/core/settings/:key`。
 
 ### P4 — Shared Services
 

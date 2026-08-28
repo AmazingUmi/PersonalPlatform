@@ -1,0 +1,16 @@
+manifest_version: 1
+id: assets
+name: Assets
+version: 0.1.0
+description: Personal asset management
+default_enabled: true
+frontend:
+  route: /assets
+widgets:
+  - id: summary
+    name: Asset Summary
+capabilities:
+  database: true
+  storage: true
+  scheduler: false
+  events: true
