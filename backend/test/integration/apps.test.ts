@@ -11,6 +11,7 @@ import { runMigrations } from "../../src/core/database/migrate.js";
 import type { Platform } from "../../src/core/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 import { buildFixturePlatform, type FixtureManifest } from "../helpers/platform.js";
+import { localDayRangeUtc } from "../../src/core/time/index.js";
 
 let db: Database;
 let platform: Platform;
@@ -81,7 +82,7 @@ before(async () => {
   const manifests: FixtureManifest[] = [
     {
       id: "assets",
-      yaml: appYaml("assets", ["database", "storage"]),
+      yaml: appYaml("assets", ["database", "storage", "events"]),
       migrations: ASSETS_MIGRATIONS,
     },
     {
@@ -493,12 +494,12 @@ describe("tasks app API", () => {
     const baseline = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/summary" });
     const before = baseline.json() as { today: number; overdue: number; done: number };
 
-    // Due at the end of the database server's "today" so it is due today but
-    // never overdue, regardless of server timezone.
-    const endOfToday = await db.context().query<{ due: Date }>(
-      "SELECT (CURRENT_DATE::text || ' 23:59:59')::timestamptz AS due",
-    );
-    const dueToday = endOfToday.rows[0]!.due.toISOString();
+    // Due strictly between now and the end of the platform-timezone "today"
+    // window (fixtures default to UTC), so it counts as due today but is
+    // never overdue — regardless of when the test runs.
+    const todayRange = localDayRangeUtc("UTC");
+    const midpoint = new Date((Date.now() + todayRange.end.getTime()) / 2);
+    const dueToday = midpoint.toISOString();
     const overdueDue = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
 
     await platform.app.inject({

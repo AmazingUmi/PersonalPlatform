@@ -1,6 +1,9 @@
 platform:
   name: Personal Platform
   environment: development
+  # IANA timezone name; the runtime setting core.settings["platform.timezone"]
+  # (set through the settings API) overrides this default.
+  timezone: UTC
 
 apps:
   manifests_directory: apps

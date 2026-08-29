@@ -242,10 +242,15 @@ async function registerApi(ctx: AppContext): Promise<void> {
   });
 
   ctx.api.get("/summary", async () => {
-    // Today = deadline today; overdue = not done and due_at < now(). Completed
-    // tasks are excluded from both (FP-4.5).
+    // "Today" is the user's local calendar day from the platform TimeService
+    // (FP-10.3), expressed as a UTC [start, end) window — never
+    // due_at::date = CURRENT_DATE, which would use the server timezone.
+    // Overdue = not done and due_at < now; completed tasks are excluded from
+    // both (FP-4.5).
+    const { start, end } = ctx.time.todayRangeUtc();
     const today = await db.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM tasks.tasks WHERE status <> 'done' AND due_at IS NOT NULL AND due_at::date = CURRENT_DATE",
+      "SELECT count(*)::text AS count FROM tasks.tasks WHERE status <> 'done' AND due_at IS NOT NULL AND due_at >= $1 AND due_at < $2",
+      [start.toISOString(), end.toISOString()],
     );
     const overdue = await db.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM tasks.tasks WHERE status <> 'done' AND due_at IS NOT NULL AND due_at < now()",
@@ -262,10 +267,12 @@ async function registerApi(ctx: AppContext): Promise<void> {
 }
 
 async function registerJobs(ctx: AppContext): Promise<JobHandle[]> {
+  // The daily boundary follows the platform timezone (FP-10.4); the app never
+  // reads a system timezone itself.
   return [
     ctx.scheduler.register({
       id: "tasks.overdue_check",
-      schedule: { cron: "0 0 * * *" },
+      schedule: { cron: "0 0 * * *", timezone: ctx.time.timezone() },
       run: async () => {
         // Known limitation: this fires daily and re-notifies every still-
         // overdue task; dedupe is deferred until notification persistence
