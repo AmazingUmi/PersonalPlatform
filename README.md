@@ -76,7 +76,16 @@ npm run migration:create -- --scope assets --name add_items
 npm run create:app -- assets "Asset Manager"
 ```
 
-备份/恢复：`npm run backup` / `bash scripts/backup.sh restore <file>`。
+### 备份与恢复（FP-11）
+
+```bash
+npm run backup                                    # 备份到 backups/<timestamp>/
+npm run restore -- backups/<timestamp> --yes      # 恢复（必须显式 --yes）
+```
+
+备份目录包含：`database.sql`（pg_dump 逻辑备份）、`storage.tar.gz`（全部本地存储）、`config/`（非敏感配置）、`metadata.json`（格式版本、创建时间、平台版本、App 列表）。`.env` 密钥、`node_modules`、构建产物永不打包。
+
+**恢复会覆盖当前数据**：restore 会删除并重建数据库中备份所含的 schema（在单事务中执行，失败自动回滚）、整体替换 `storage/` 并覆盖 `config/`。因此 restore 不带 `--yes` 时直接拒绝执行。格式版本不匹配（`formatVersion`）的备份会被拒绝。端到端往返（备份→破坏→恢复→校验数据库与附件）由 `backend/test/integration/backup-restore.test.ts` 自动化覆盖，需要 `pg_dump`/`psql`（本地可用 Homebrew PostgreSQL 自带；CI 安装 postgresql-client-17）。
 
 ## 目录
 

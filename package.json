@@ -14,13 +14,15 @@
     "migration:status": "tsx backend/src/cli/migrate.ts status",
     "migration:create": "tsx backend/src/cli/migrate.ts create",
     "create:app": "tsx scripts/create-app.ts",
-    "backup": "bash scripts/backup.sh",
+    "backup": "tsx scripts/backup.ts create",
     "verify": "bash scripts/verify.sh",
     "test": "npm run test --workspaces --if-present",
     "test:integration": "npm run test:integration --workspaces --if-present",
-    "e2e": "npm run e2e --workspace @personal-platform/frontend --if-present"
+    "e2e": "npm run e2e --workspace @personal-platform/frontend --if-present",
+    "restore": "tsx scripts/backup.ts restore"
   },
   "engines": {
     "node": ">=22"
-  }
+  },
+  "version": "0.1.0"
 }
