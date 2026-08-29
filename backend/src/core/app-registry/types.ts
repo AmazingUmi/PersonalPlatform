@@ -2,8 +2,9 @@ import type { FastifyInstance } from "fastify";
 import type { Logger } from "../logging/index.js";
 import type { DatabaseContext } from "../database/index.js";
 import type { Storage } from "../storage/index.js";
-import type { EventBus, Unsubscribe } from "../events/index.js";
-import type { JobHandle, Scheduler } from "../scheduler/index.js";
+import type { AppEventBus, Unsubscribe } from "../events/index.js";
+import type { AppScheduler, JobHandle } from "../scheduler/index.js";
+import type { TimeService } from "../time/index.js";
 
 export interface ManifestWidget {
   id: string;
@@ -29,6 +30,12 @@ export interface AppManifest {
   capabilities: ManifestCapabilities;
 }
 
+/**
+ * "installed" is kept only for API/type compatibility. Since apps are compiled
+ * into the backend and the frontend ships every route, an app is always
+ * runnable once present — Core never produces "installed" anymore; business
+ * logic must not depend on it (FP-9.4).
+ */
 export type AppStatus = "installed" | "enabled" | "disabled" | "error";
 
 export interface AppHealth {
@@ -39,6 +46,11 @@ export interface AppHealth {
 /**
  * The controlled surface an App receives. It exposes shared infrastructure but
  * never another App's repository or schema.
+ *
+ * Services a manifest does not grant are still present on the context (API
+ * ergonomics stay uniform) but backed by facades that throw a CapabilityError
+ * on use (FP-9.5). Events and jobs registered here are owner-tagged with the
+ * appId so Core can reclaim them even after a failed activation (FP-9.1).
  */
 export interface AppContext {
   appId: string;
@@ -48,8 +60,10 @@ export interface AppContext {
   api: FastifyInstance;
   database: DatabaseContext;
   storage: Storage;
-  events: EventBus;
-  scheduler: Scheduler;
+  events: AppEventBus;
+  scheduler: AppScheduler;
+  /** Platform time semantics; follows the platform timezone (FP-10). */
+  time: TimeService;
 }
 
 export interface BackendAppModule {

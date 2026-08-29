@@ -1,8 +1,9 @@
 import cron from "node-cron";
 import type { Logger } from "../logging/index.js";
+import { isValidTimezone } from "../time/index.js";
 
 export type JobSchedule =
-  | { cron: string }
+  | { cron: string; timezone?: string }
   | { intervalMs: number }
   | { onceAt: Date }
   | { onceAfterMs: number };
@@ -12,6 +13,13 @@ export interface JobSpec {
   id: string;
   schedule: JobSchedule;
   run: () => Promise<void>;
+  /** Owning app id; injected by the App-scoped facade, used by stopByOwner. */
+  owner?: string;
+}
+
+/** The scheduler surface an App receives: registering its own jobs. */
+export interface AppScheduler {
+  register(spec: Omit<JobSpec, "owner">): JobHandle;
 }
 
 export interface JobHandle {
@@ -21,6 +29,7 @@ export interface JobHandle {
 
 interface InternalHandle {
   id: string;
+  owner: string | undefined;
   started: boolean;
   start(): void;
   stop(): void;
@@ -29,6 +38,10 @@ interface InternalHandle {
 /**
  * Single-process scheduler supporting cron, fixed intervals and one-shot jobs.
  * v0.1 runs inside one backend process so it needs no distributed lock.
+ *
+ * Registering an already-registered id throws instead of silently dropping the
+ * previous handle (whose timer would keep running untracked). Re-registering
+ * requires an explicit stop(id) / stopByOwner(owner) first.
  */
 export class Scheduler {
   private readonly jobs = new Map<string, InternalHandle>();
@@ -37,6 +50,12 @@ export class Scheduler {
   constructor(private readonly log?: Logger) {}
 
   register(spec: JobSpec): JobHandle {
+    if (this.jobs.has(spec.id)) {
+      throw new Error(`job '${spec.id}' is already registered; stop it before re-registering`);
+    }
+    if ("cron" in spec.schedule && spec.schedule.timezone && !isValidTimezone(spec.schedule.timezone)) {
+      throw new Error(`job '${spec.id}' has an invalid IANA timezone '${spec.schedule.timezone}'`);
+    }
     const handle = this.createHandle(spec);
     this.jobs.set(spec.id, handle);
     if (this.started) handle.start();
@@ -57,6 +76,18 @@ export class Scheduler {
     }
   }
 
+  /** Stop every job owned by `owner`; returns the stopped ids. */
+  stopByOwner(owner: string): string[] {
+    const stopped: string[] = [];
+    for (const handle of [...this.jobs.values()]) {
+      if (handle.owner !== owner) continue;
+      handle.stop();
+      this.jobs.delete(handle.id);
+      stopped.push(handle.id);
+    }
+    return stopped;
+  }
+
   stopAll(): void {
     for (const handle of this.jobs.values()) handle.stop();
     this.jobs.clear();
@@ -65,6 +96,13 @@ export class Scheduler {
 
   runningJobIds(): string[] {
     return [...this.jobs.keys()];
+  }
+
+  /** App-scoped facade: every registered job is owner-tagged automatically. */
+  forApp(owner: string): AppScheduler {
+    return {
+      register: (spec) => this.register({ ...spec, owner }),
+    };
   }
 
   private createHandle(spec: JobSpec): InternalHandle {
@@ -78,9 +116,13 @@ export class Scheduler {
 
     const schedule = spec.schedule;
     if ("cron" in schedule) {
-      const task = cron.createTask(schedule.cron, () => run(), { name: spec.id });
+      const task = cron.createTask(schedule.cron, () => run(), {
+        name: spec.id,
+        ...(schedule.timezone ? { timezone: schedule.timezone } : {}),
+      });
       return {
         id: spec.id,
+        owner: spec.owner,
         started: false,
         start: () => {
           void task.start();
@@ -96,6 +138,7 @@ export class Scheduler {
       let timer: NodeJS.Timeout | undefined;
       return {
         id: spec.id,
+        owner: spec.owner,
         started: false,
         start: () => {
           if (!timer) timer = setInterval(run, schedule.intervalMs);
@@ -112,6 +155,7 @@ export class Scheduler {
       let timer: NodeJS.Timeout | undefined;
       return {
         id: spec.id,
+        owner: spec.owner,
         started: false,
         start: () => {
           if (!timer) timer = setTimeout(run, delay);
@@ -126,6 +170,7 @@ export class Scheduler {
     let timer: NodeJS.Timeout | undefined;
     return {
       id: spec.id,
+      owner: spec.owner,
       started: false,
       start: () => {
         if (!timer) timer = setTimeout(run, schedule.onceAfterMs);

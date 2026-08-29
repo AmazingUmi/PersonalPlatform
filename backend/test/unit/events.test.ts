@@ -128,3 +128,66 @@ describe("EventBus", () => {
     assert.equal(bus.subscriberCount("a.b.c.v1"), 0);
   });
 });
+
+describe("EventBus owner tracking (FP-9.1)", () => {
+  it("unsubscribeByOwner removes only that owner's subscriptions", async () => {
+    const bus = new EventBus();
+    const ownedSeen: unknown[] = [];
+    const otherSeen: unknown[] = [];
+    const anonymousSeen: unknown[] = [];
+
+    bus.subscribeFor("app_a", "a.shared.event.v1", (event) => {
+      ownedSeen.push(event.payload);
+    });
+    bus.subscribeFor("app_b", "a.shared.event.v1", (event) => {
+      otherSeen.push(event.payload);
+    });
+    bus.subscribe("a.shared.event.v1", (event) => {
+      anonymousSeen.push(event.payload);
+    });
+
+    const removed = bus.unsubscribeByOwner("app_a");
+    assert.equal(removed, 1);
+    assert.equal(bus.subscriberCount("a.shared.event.v1"), 2, "other owners stay subscribed");
+
+    bus.publish("a.shared.event.v1", { ok: true }, "unit-test");
+    await tick();
+    assert.equal(ownedSeen.length, 0, "reclaimed owner receives nothing");
+    assert.equal(otherSeen.length, 1);
+    assert.equal(anonymousSeen.length, 1);
+  });
+
+  it("unsubscribeByOwner cleans up empty event types", () => {
+    const bus = new EventBus();
+    bus.subscribeFor("solo", "solo.event.v1", () => undefined);
+    assert.equal(bus.subscriberCount("solo.event.v1"), 1);
+    bus.unsubscribeByOwner("solo");
+    assert.equal(bus.subscriberCount("solo.event.v1"), 0);
+  });
+
+  it("forApp() facade stamps the owner automatically", async () => {
+    const bus = new EventBus();
+    const scoped = bus.forApp("scoped_app");
+    const seen: unknown[] = [];
+    const unsubscribe = scoped.subscribe("scoped.thing.happened.v1", (event) => {
+      seen.push(event.payload);
+    });
+
+    scoped.publish("scoped.thing.happened.v1", { n: 1 }, "scoped_app");
+    await tick();
+    assert.equal(seen.length, 1, "scoped publish reaches scoped subscribe");
+
+    // The app "lost" its unsubscribe handles; Core still reclaims everything.
+    void unsubscribe;
+    assert.equal(bus.unsubscribeByOwner("scoped_app"), 1);
+    scoped.publish("scoped.thing.happened.v1", { n: 2 }, "scoped_app");
+    await tick();
+    assert.equal(seen.length, 1, "no delivery after owner reclaim");
+  });
+
+  it("forApp() publish still validates event types", () => {
+    const bus = new EventBus();
+    const scoped = bus.forApp("scoped_app");
+    assert.throws(() => scoped.publish("no-version", {}, "scoped_app"), TypeError);
+  });
+});

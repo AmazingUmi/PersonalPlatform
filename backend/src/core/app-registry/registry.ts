@@ -123,13 +123,16 @@ export class AppRegistry {
    * keeps the user's requested state (doc §FP-1.2: `enabled` is intent,
    * `status` is the actual runtime state), so a failed activation shows as
    * `enabled=true, status=error` and a later retry can succeed.
+   *
+   * Awaits the persistence (FP-9.3): when an activation error reaches an API
+   * response, the database row already reflects it.
    */
-  markError(id: string, message: string): AppRecord | undefined {
+  async markError(id: string, message: string): Promise<AppRecord | undefined> {
     const record = this.records.get(id);
     if (!record) return undefined;
     const updated: AppRecord = { ...record, status: "error", errorMessage: message };
     this.records.set(id, updated);
-    void this.persistApp(updated);
+    await this.persistApp(updated);
     return updated;
   }
 

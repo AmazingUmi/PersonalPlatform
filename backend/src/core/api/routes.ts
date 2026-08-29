@@ -16,6 +16,7 @@ export function registerCoreRoutes(
     database: Database | null;
     handlers: CoreApiHandlers;
     platform: { name: string; environment: string };
+    time: { timezone(): string };
   },
 ): void {
   app.get("/api/core/health/live", async () => ({
@@ -26,10 +27,17 @@ export function registerCoreRoutes(
   app.get("/api/core/platform", async () => ({
     name: deps.platform.name,
     environment: deps.platform.environment,
+    timezone: deps.time.timezone(),
   }));
 
-  app.get("/api/core/health/ready", async (request, reply) => {
-    const databaseOk = deps.database ? await deps.database.ping() : false;
+  // Platform time semantics (FP-10): clients and apps read "today" from the
+  // same source instead of guessing server vs. user timezone.
+  app.get("/api/core/time", async () => ({
+    timezone: deps.time.timezone(),
+    now: new Date().toISOString(),
+  }));
+
+  app.get("/api/core/health/ready", async (request, reply) => {    const databaseOk = deps.database ? await deps.database.ping() : false;
     if (!databaseOk) {
       return reply.code(503).send({
         status: "error",

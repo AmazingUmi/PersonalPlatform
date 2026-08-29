@@ -7,9 +7,13 @@ import type { Database } from "./database/index.js";
 import { EventBus } from "./events/index.js";
 import type { Logger } from "./logging/index.js";
 import { Scheduler } from "./scheduler/index.js";
+import { isValidTimezone } from "./time/index.js";
+import { createTimeService, type PlatformTimeService } from "./time/index.js";
 import { createAppContext } from "./app-registry/context.js";
 import { AppRegistry } from "./app-registry/registry.js";
 import type { AppContext, AppHealth, AppRecord, BackendAppModule } from "./app-registry/types.js";
+
+export const TIMEZONE_SETTING_KEY = "platform.timezone";
 
 export interface Platform {
   app: FastifyInstance;
@@ -17,6 +21,8 @@ export interface Platform {
   getApp(id: string): AppRecord | undefined;
   setAppEnabled(id: string, enabled: boolean): Promise<AppRecord>;
   getAppHealth(id: string): Promise<{ statusCode: number; body: unknown }>;
+  /** Effective platform timezone (FP-10). */
+  timezone(): string;
   stop(): Promise<void>;
 }
 
@@ -42,6 +48,7 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
 
   const eventBus = new EventBus(log);
   const scheduler = new Scheduler(log);
+  const time = createTimeService({ defaultTimezone: config.platform.timezone ?? "UTC" });
   const registry = new AppRegistry({
     manifestsDir: join(root, config.apps.manifests_directory),
     database,
@@ -52,9 +59,23 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
   });
   await registry.init();
 
+  // The persisted setting wins over the config default so the user's runtime
+  // choice survives restarts (FP-10.1).
+  if (database) {
+    try {
+      const result = await database
+        .context()
+        .query<{ value: unknown }>("SELECT value FROM core.settings WHERE key = $1", [
+          TIMEZONE_SETTING_KEY,
+        ]);
+      const stored = result.rows[0]?.value;
+      if (typeof stored === "string" && isValidTimezone(stored)) time.setTimezone(stored);
+    } catch {
+      // Fresh database or missing table: keep the config default.
+    }
+  }
+
   const contexts = new Map<string, AppContext>();
-  const eventSubscriptions = new Map<string, Array<() => void>>();
-  const jobHandles = new Map<string, Array<{ stop(): void }>>();
 
   const app: FastifyInstance = Fastify({
     loggerInstance: log as FastifyBaseLogger,
@@ -94,6 +115,8 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
         storageRoot,
         events: eventBus,
         scheduler,
+        time,
+        capabilities: record.capabilities,
       });
       contexts.set(appId, ctx);
       instance.addHook("onRequest", lifecycleGuard(registry, appId));
@@ -101,7 +124,7 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
         await mod.registerApi(ctx);
       } catch (error) {
         log.error({ error, appId }, "app registerApi failed");
-        registry.markError(appId, `registerApi failed: ${(error as Error).message}`);
+        await registry.markError(appId, `registerApi failed: ${(error as Error).message}`);
       }
     }, { prefix: `/api/apps/${appId}` });
   }
@@ -110,51 +133,45 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
     database,
     handlers: { getApps, setAppEnabled, getAppHealth, getSetting, putSetting },
     platform: { name: config.platform.name, environment: config.platform.environment },
+    time: { timezone: () => time.timezone() },
   });
 
   // Force plugin bodies to run so every AppContext is populated before activation.
   await app.ready();
+
+  /**
+   * Reclaim every runtime resource an app owns. Owner-tagged subscriptions and
+   * jobs are removed even when the app's register*() threw halfway and never
+   * returned its handles (FP-9.1) — deactivation must not depend on a
+   * successful registration.
+   */
+  function releaseAppResources(appId: string): void {
+    eventBus.unsubscribeByOwner(appId);
+    scheduler.stopByOwner(appId);
+  }
 
   async function activateApp(appId: string): Promise<void> {
     const mod = backendModules[appId];
     const ctx = contexts.get(appId);
     if (!mod || !ctx) return;
 
+    // Clear leftovers from a previously failed activation of this app.
+    releaseAppResources(appId);
+
     try {
-      const subs = mod.registerEvents ? await mod.registerEvents(ctx) : [];
-      eventSubscriptions.set(appId, subs);
+      if (mod.registerEvents) await mod.registerEvents(ctx);
     } catch (error) {
-      registry.markError(appId, `registerEvents failed: ${(error as Error).message}`);
-      deactivateApp(appId);
+      await registry.markError(appId, `registerEvents failed: ${(error as Error).message}`);
+      releaseAppResources(appId);
       return;
     }
 
     try {
-      const jobs = mod.registerJobs ? await mod.registerJobs(ctx) : [];
-      jobHandles.set(appId, jobs);
+      if (mod.registerJobs) await mod.registerJobs(ctx);
     } catch (error) {
-      registry.markError(appId, `registerJobs failed: ${(error as Error).message}`);
-      deactivateApp(appId);
+      await registry.markError(appId, `registerJobs failed: ${(error as Error).message}`);
+      releaseAppResources(appId);
     }
-  }
-
-  function deactivateApp(appId: string): void {
-    for (const unsub of eventSubscriptions.get(appId) ?? []) {
-      try {
-        unsub();
-      } catch {
-        /* ignore */
-      }
-    }
-    eventSubscriptions.delete(appId);
-    for (const handle of jobHandles.get(appId) ?? []) {
-      try {
-        handle.stop();
-      } catch {
-        /* ignore */
-      }
-    }
-    jobHandles.delete(appId);
   }
 
   if (deps.beforeActivation) {
@@ -176,13 +193,13 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
 
   async function setAppEnabled(id: string, enabled: boolean): Promise<AppRecord> {
     const record = await registry.setEnabled(id, enabled);
-    deactivateApp(id);
+    releaseAppResources(id);
     if (record.status === "enabled") {
       try {
         if (deps.migrateApp) await deps.migrateApp(id);
       } catch (error) {
         log.error({ error, appId: id }, "app migration during enable failed");
-        registry.markError(id, `migration failed: ${(error as Error).message}`);
+        await registry.markError(id, `migration failed: ${(error as Error).message}`);
       }
       if (registry.getStatus(id) === "enabled") await activateApp(id);
     }
@@ -203,6 +220,16 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
 
   async function putSetting(key: string, value: unknown): Promise<{ key: string; value: unknown }> {
     if (!database) throw new AppError(503, "database_unavailable", "database is not available");
+    // The platform timezone is validated and applied live (FP-10.1).
+    if (key === TIMEZONE_SETTING_KEY) {
+      if (typeof value !== "string" || !isValidTimezone(value)) {
+        throw new AppError(
+          422,
+          "invalid_timezone",
+          "value must be a valid IANA timezone name (e.g. Asia/Shanghai), not an offset like UTC+8",
+        );
+      }
+    }
     await database
       .context()
       .query(
@@ -211,6 +238,7 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
         [key, JSON.stringify(value)],
       );
+    if (key === TIMEZONE_SETTING_KEY) time.setTimezone(value as string);
     return { key, value };
   }
 
@@ -245,10 +273,10 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
 
   async function stop(): Promise<void> {
     await app.close();
-    for (const appId of contexts.keys()) deactivateApp(appId);
+    for (const record of registry.getApps()) releaseAppResources(record.id);
     scheduler.stopAll();
     eventBus.close();
   }
 
-  return { app, getApps, getApp, setAppEnabled, getAppHealth, stop };
+  return { app, getApps, getApp, setAppEnabled, getAppHealth, timezone: () => time.timezone(), stop };
 }

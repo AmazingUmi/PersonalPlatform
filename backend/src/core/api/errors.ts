@@ -1,4 +1,5 @@
 import type { FastifyError, FastifyReply, FastifyRequest } from "fastify";
+import { CapabilityError } from "../app-registry/context.js";
 
 /** Application-level error with a stable machine code. */
 export class AppError extends Error {
@@ -40,6 +41,11 @@ export const errorHandler = (
     code = error.code;
     message = error.message;
     details = error.details;
+  } else if (error instanceof CapabilityError) {
+    // Manifest/configuration mismatch, not user data: the message tells the
+    // operator exactly which grant is missing, so surface it verbatim.
+    code = "capability_error";
+    message = error.message;
   } else if (statusCode === 400 || error.code === "FST_ERR_VALIDATION") {
     code = "validation_error";
     message = error.message || "Validation failed";

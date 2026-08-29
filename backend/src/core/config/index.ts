@@ -3,7 +3,8 @@ import { dirname, join, resolve } from "node:path";
 import { parse } from "yaml";
 
 export interface PlatformConfig {
-  platform: { name: string; environment: string };
+  /** `timezone` is an IANA name (Asia/Shanghai); never a UTC+8 style offset. */
+  platform: { name: string; environment: string; timezone?: string };
   apps: { manifests_directory: string; enabled?: Record<string, boolean> };
   storage: { driver: string; root: string };
 }
@@ -46,6 +47,7 @@ export function loadConfig(): PlatformConfig {
     platform: {
       name: String(platform["name"] ?? "Personal Platform"),
       environment: String(platform["environment"] ?? "development"),
+      timezone: platform["timezone"] === undefined ? undefined : String(platform["timezone"]),
     },
     apps: {
       manifests_directory: String(apps["manifests_directory"] ?? "apps"),

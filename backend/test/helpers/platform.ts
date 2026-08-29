@@ -59,6 +59,8 @@ export function prepareFixtureRoot(manifests: FixtureManifest[]): {
 }
 
 export function defaultManifestYaml(id: string): string {
+  // Generic fixtures get every capability so tests focus on lifecycle, not
+  // manifest grants; capability enforcement has its own dedicated tests.
   return `manifest_version: 1
 id: ${id}
 name: ${id.replace(/^./, (c) => c.toUpperCase())}
@@ -70,6 +72,9 @@ frontend:
 widgets: []
 capabilities:
   database: true
+  storage: true
+  scheduler: true
+  events: true
 `;
 }
 

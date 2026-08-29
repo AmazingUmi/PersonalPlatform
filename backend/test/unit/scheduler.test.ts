@@ -169,3 +169,95 @@ describe("Scheduler", () => {
     assert.equal(ran, afterStop, "cron job must not run after scheduler.stop(id)");
   });
 });
+
+describe("Scheduler reliability (FP-9.1/9.2, FP-10.4)", () => {
+  it("registering a duplicate job id throws instead of silently overwriting", () => {
+    const scheduler = new Scheduler();
+    scheduler.register({ id: "dup.job", schedule: { intervalMs: 1000 }, run: async () => undefined });
+    assert.throws(
+      () => scheduler.register({ id: "dup.job", schedule: { intervalMs: 500 }, run: async () => undefined }),
+      /already registered/,
+    );
+    // The original handle is untouched and still stoppable.
+    assert.deepEqual(scheduler.runningJobIds(), ["dup.job"]);
+    scheduler.stop("dup.job");
+    assert.deepEqual(scheduler.runningJobIds(), []);
+  });
+
+  it("re-registering after stop(id) works", () => {
+    const scheduler = new Scheduler();
+    scheduler.register({ id: "dup.job", schedule: { intervalMs: 1000 }, run: async () => undefined });
+    scheduler.stop("dup.job");
+    assert.doesNotThrow(() =>
+      scheduler.register({ id: "dup.job", schedule: { intervalMs: 1000 }, run: async () => undefined }),
+    );
+    scheduler.stopAll();
+  });
+
+  it("stopByOwner stops only that owner's jobs and reports them", async () => {
+    const scheduler = new Scheduler();
+    let aRuns = 0;
+    let bRuns = 0;
+    scheduler.register({
+      id: "app_a.tick",
+      owner: "app_a",
+      schedule: { intervalMs: 15 },
+      run: async () => {
+        aRuns += 1;
+      },
+    });
+    scheduler.register({
+      id: "app_b.tick",
+      owner: "app_b",
+      schedule: { intervalMs: 15 },
+      run: async () => {
+        bRuns += 1;
+      },
+    });
+    scheduler.start();
+    await delay(50);
+
+    const stopped = scheduler.stopByOwner("app_a");
+    assert.deepEqual(stopped, ["app_a.tick"]);
+    assert.deepEqual(scheduler.runningJobIds(), ["app_b.tick"]);
+
+    const aAfter = aRuns;
+    await delay(60);
+    assert.equal(aRuns, aAfter, "owner's jobs must stop running");
+    assert.ok(bRuns > 0, "other owner's jobs keep running");
+    scheduler.stopAll();
+  });
+
+  it("a cron job with an invalid timezone is rejected at register time", () => {
+    const scheduler = new Scheduler();
+    assert.throws(
+      () =>
+        scheduler.register({
+          id: "tz.bad",
+          schedule: { cron: "0 0 * * *", timezone: "UTC+8" },
+          run: async () => undefined,
+        }),
+      /invalid IANA timezone/,
+    );
+  });
+
+  it("accepts a cron job with a valid IANA timezone", () => {
+    const scheduler = new Scheduler();
+    assert.doesNotThrow(() =>
+      scheduler.register({
+        id: "tz.ok",
+        schedule: { cron: "0 0 * * *", timezone: "Asia/Shanghai" },
+        run: async () => undefined,
+      }),
+    );
+    scheduler.stopAll();
+  });
+
+  it("forApp() stamps the owner automatically", () => {
+    const scheduler = new Scheduler();
+    const scoped = scheduler.forApp("tasks");
+    scoped.register({ id: "tasks.overdue_check", schedule: { intervalMs: 1000 }, run: async () => undefined });
+    assert.deepEqual(scheduler.stopByOwner("tasks"), ["tasks.overdue_check"]);
+    assert.deepEqual(scheduler.runningJobIds(), []);
+  });
+});
