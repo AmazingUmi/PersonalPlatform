@@ -117,6 +117,11 @@
   overflow-wrap: anywhere;
 }
 
+.app-card__intent {
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+}
+
 .app-card__foot {
   display: flex;
   align-items: center;
@@ -124,6 +129,12 @@
   gap: var(--space-2);
   padding-top: var(--space-3);
   border-top: var(--border-1) solid var(--px-border-soft);
+}
+
+.app-card__foot-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
 }
 
 /* ---------- Tasks ---------- */

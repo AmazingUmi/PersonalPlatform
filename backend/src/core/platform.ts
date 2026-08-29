@@ -29,6 +29,11 @@ export interface PlatformDeps {
   frontendAppIds?: string[];
   /** Runs after registry init and route registration, before apps activate. */
   beforeActivation?: () => Promise<void>;
+  /**
+   * Applies pending migrations for one app. Called during runtime enable so
+   * activation never runs against an outdated schema (FP-1.1).
+   */
+  migrateApp?: (appId: string) => Promise<void>;
 }
 
 export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
@@ -172,8 +177,19 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
   async function setAppEnabled(id: string, enabled: boolean): Promise<AppRecord> {
     const record = await registry.setEnabled(id, enabled);
     deactivateApp(id);
-    if (record.status === "enabled") await activateApp(id);
-    return record;
+    if (record.status === "enabled") {
+      try {
+        if (deps.migrateApp) await deps.migrateApp(id);
+      } catch (error) {
+        log.error({ error, appId: id }, "app migration during enable failed");
+        registry.markError(id, `migration failed: ${(error as Error).message}`);
+      }
+      if (registry.getStatus(id) === "enabled") await activateApp(id);
+    }
+    // Activation/migration may have flipped the record to error; always return
+    // the registry's final current state so the API never reports a stale
+    // "enabled" record after a failed enable (FP-1.2).
+    return registry.get(id) ?? record;
   }
 
   async function getSetting(key: string): Promise<{ key: string; value: unknown } | null> {

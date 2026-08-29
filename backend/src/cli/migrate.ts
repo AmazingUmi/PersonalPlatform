@@ -7,13 +7,9 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createLogger } from "../core/logging/index.js";
-import { loadConfig, findRepoRoot } from "../core/config/index.js";
-import { Database } from "../core/database/index.js";
+import { findRepoRoot, loadConfig } from "../core/config/index.js";
 import { appliedMigrations, runMigrations, type MigrationTarget } from "../core/database/migrate.js";
-import {
-  appMigrationTargets,
-  coreMigrationTarget,
-} from "../core/database/startup-migrations.js";
+import { appMigrationTargets, coreMigrationTarget } from "../core/database/startup-migrations.js";
 import { scanApps } from "../core/app-registry/scanner.js";
 
 const log = createLogger(process.env.LOG_LEVEL?.toLowerCase() ?? "warn");
@@ -23,7 +19,7 @@ const databaseUrl =
 
 function usage(): never {
   console.log(`Usage:
-  npm run migration:up                                  Run core + enabled app migrations
+  npm run migration:up                                  Run core + installed app migrations
   npm run migration:status                              List scopes and applied migrations
   npm run migration:create -- --scope <core|app_id> --name <name>   Create a SQL migration stub
 `);
@@ -93,11 +89,9 @@ async function main(): Promise<void> {
   }
 
   if (command === "up") {
-    const database = new Database(databaseUrl, log);
     try {
-      await database.connect();
       await runMigrations({ databaseUrl, targets: [coreMigrationTarget(root)], log });
-      const appTargets = await appMigrationTargets(root, appsDir, database, config.apps.enabled ?? {});
+      const appTargets = await appMigrationTargets(appsDir);
       if (appTargets.length > 0) {
         await runMigrations({ databaseUrl, targets: appTargets, log });
       }
@@ -105,7 +99,7 @@ async function main(): Promise<void> {
         `migrations up to date (scopes: ${[coreMigrationTarget(root), ...appTargets].map((t) => t.scope).join(", ")})`,
       );
     } finally {
-      await database.close();
+      // nothing to close; migrations use their own short-lived clients
     }
     return;
   }

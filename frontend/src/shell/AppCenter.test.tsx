@@ -41,4 +41,32 @@ describe("AppCenter", () => {
       expect.objectContaining({ method: "PUT" }),
     );
   });
+
+  it("shows activation errors independently with retry and disable actions", async () => {
+    const failedApp: AppInfo = {
+      ...assetsApp,
+      status: "error",
+      enabled: true,
+      errorMessage: "registerEvents failed: boom",
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ...assetsApp, status: "enabled", enabled: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const onChanged = vi.fn();
+    render(<AppCenter apps={[failedApp]} onChanged={onChanged} />);
+
+    // Error is displayed independently of the requested enable state.
+    expect(screen.getByText(/activation failed/)).toBeDefined();
+    expect(screen.getByText(/registerEvents failed: boom/)).toBeDefined();
+
+    // Retry re-requests enable instead of leaving the app stuck.
+    fireEvent.click(screen.getByText("Retry"));
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+    const [path, init] = fetchMock.mock.calls[0]!;
+    expect(path).toBe("/api/core/apps/assets/enabled");
+    expect(JSON.parse(String(init.body))).toEqual({ enabled: true });
+  });
 });

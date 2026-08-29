@@ -20,6 +20,42 @@ export interface FixtureOptions {
   backendModules?: Record<string, BackendAppModule>;
   frontendAppIds?: string[];
   database: Database | null;
+  /** Mirrors main.ts: applies pending migrations when an app is enabled at runtime. */
+  migrateApp?: (appId: string) => Promise<void>;
+  beforeActivation?: () => Promise<void>;
+  /** Reuse a root prepared by prepareFixtureRoot (lets callers know the root beforehand). */
+  root?: string;
+}
+
+/** Create the temp fixture root (manifests + migrations) without starting a platform. */
+export function prepareFixtureRoot(manifests: FixtureManifest[]): {
+  root: string;
+  cleanup: () => void;
+} {
+  const root = mkdtempSync(join(tmpdir(), "pp-test-"));
+  const manifestsDir = join(root, "apps");
+  mkdirSync(manifestsDir, { recursive: true });
+  mkdirSync(join(root, "storage"), { recursive: true });
+  mkdirSync(join(root, "config"), { recursive: true });
+  writeFileSync(join(root, "config", "platform.yaml"), "platform:\n  name: test\n");
+
+  for (const fixture of manifests) {
+    const appDir = join(manifestsDir, fixture.id);
+    mkdirSync(appDir, { recursive: true });
+    writeFileSync(join(appDir, "app.yaml"), fixture.yaml ?? defaultManifestYaml(fixture.id));
+    if (fixture.migrations && fixture.migrations.length > 0) {
+      const dir = join(appDir, "migrations");
+      mkdirSync(dir, { recursive: true });
+      for (const [index, sql] of fixture.migrations.entries()) {
+        writeFileSync(join(dir, `2026010100000${index + 1}-step${index + 1}.sql`), sql);
+      }
+    }
+  }
+
+  return {
+    root,
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
 }
 
 export function defaultManifestYaml(id: string): string {
@@ -46,25 +82,9 @@ export async function buildFixturePlatform(options: FixtureOptions): Promise<{
   root: string;
   cleanup: () => void;
 }> {
-  const root = mkdtempSync(join(tmpdir(), "pp-test-"));
+  const owned = options.root ? undefined : prepareFixtureRoot(options.manifests);
+  const root = options.root ?? owned!.root;
   const manifestsDir = join(root, "apps");
-  mkdirSync(manifestsDir, { recursive: true });
-  mkdirSync(join(root, "storage"), { recursive: true });
-  mkdirSync(join(root, "config"), { recursive: true });
-  writeFileSync(join(root, "config", "platform.yaml"), "platform:\n  name: test\n");
-
-  for (const fixture of options.manifests) {
-    const appDir = join(manifestsDir, fixture.id);
-    mkdirSync(appDir, { recursive: true });
-    writeFileSync(join(appDir, "app.yaml"), fixture.yaml ?? defaultManifestYaml(fixture.id));
-    if (fixture.migrations && fixture.migrations.length > 0) {
-      const dir = join(appDir, "migrations");
-      mkdirSync(dir, { recursive: true });
-      for (const [index, sql] of fixture.migrations.entries()) {
-        writeFileSync(join(dir, `2026010100000${index + 1}-step${index + 1}.sql`), sql);
-      }
-    }
-  }
 
   const previousRoot = process.env.PLATFORM_ROOT;
   process.env.PLATFORM_ROOT = root;
@@ -94,12 +114,14 @@ export async function buildFixturePlatform(options: FixtureOptions): Promise<{
     database: options.database,
     backendModules,
     frontendAppIds: options.frontendAppIds ?? options.manifests.map((fixture) => fixture.id),
+    migrateApp: options.migrateApp,
+    beforeActivation: options.beforeActivation,
   });
 
   const cleanup = () => {
     if (previousRoot === undefined) delete process.env.PLATFORM_ROOT;
     else process.env.PLATFORM_ROOT = previousRoot;
-    rmSync(root, { recursive: true, force: true });
+    owned?.cleanup();
   };
   return { platform, root, cleanup };
 }

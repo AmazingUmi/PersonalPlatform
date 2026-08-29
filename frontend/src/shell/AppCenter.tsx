@@ -18,11 +18,11 @@ export function AppCenter({ apps, onChanged }: { apps: AppInfo[]; onChanged: () 
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function toggle(app: AppInfo) {
+  async function toggle(app: AppInfo, enabled: boolean) {
     setBusy(app.id);
     setError(null);
     try {
-      await setAppEnabled(app.id, app.status !== "enabled");
+      await setAppEnabled(app.id, enabled);
       onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -55,6 +55,9 @@ export function AppCenter({ apps, onChanged }: { apps: AppInfo[]; onChanged: () 
               </div>
             </div>
             {app.description ? <p className="app-card__desc">{app.description}</p> : null}
+            {app.status === "error" && app.enabled ? (
+              <p className="app-card__intent">Enable requested — activation failed.</p>
+            ) : null}
             {app.errorMessage ? (
               <p className="app-card__error">
                 <PixelIcon name="warning" />
@@ -63,14 +66,35 @@ export function AppCenter({ apps, onChanged }: { apps: AppInfo[]; onChanged: () 
             ) : null}
             <div className="app-card__foot">
               <PixelBadge tone={STATUS_TONES[app.status]}>{app.status}</PixelBadge>
-              <PixelButton
-                size="sm"
-                variant={app.status === "enabled" ? "secondary" : "primary"}
-                disabled={busy === app.id || app.status === "error" || app.status === "installed"}
-                onClick={() => void toggle(app)}
-              >
-                {busy === app.id ? "Working…" : app.status === "enabled" ? "Disable" : "Enable"}
-              </PixelButton>
+              {app.status === "error" ? (
+                <span className="app-card__foot-group">
+                  <PixelButton
+                    size="sm"
+                    variant="secondary"
+                    disabled={busy === app.id}
+                    onClick={() => void toggle(app, false)}
+                  >
+                    {busy === app.id ? "Working…" : "Disable"}
+                  </PixelButton>
+                  <PixelButton
+                    size="sm"
+                    variant="primary"
+                    disabled={busy === app.id}
+                    onClick={() => void toggle(app, true)}
+                  >
+                    {busy === app.id ? "Working…" : "Retry"}
+                  </PixelButton>
+                </span>
+              ) : (
+                <PixelButton
+                  size="sm"
+                  variant={app.status === "enabled" ? "secondary" : "primary"}
+                  disabled={busy === app.id || app.status === "installed"}
+                  onClick={() => void toggle(app, app.status !== "enabled")}
+                >
+                  {busy === app.id ? "Working…" : app.status === "enabled" ? "Disable" : "Enable"}
+                </PixelButton>
+              )}
             </div>
           </li>
         ))}

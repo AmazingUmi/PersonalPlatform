@@ -3,7 +3,8 @@ import { createPlatform } from "./core/platform.js";
 import { createLogger } from "./core/logging/index.js";
 import { loadConfig, findRepoRoot } from "./core/config/index.js";
 import { Database } from "./core/database/index.js";
-import { runCoreMigrations, runAppMigrations } from "./core/database/startup-migrations.js";
+import { runCoreMigrations, runAppMigrations, singleAppMigrationTarget } from "./core/database/startup-migrations.js";
+import { runMigrations } from "./core/database/migrate.js";
 import { backendAppModules, frontendAppIds } from "./generated/apps.js";
 
 const root = findRepoRoot();
@@ -45,18 +46,18 @@ async function main(): Promise<void> {
     database,
     backendModules: backendAppModules,
     frontendAppIds,
-    // App migrations run for enabled apps only, after the registry persisted
-    // the scan results (inside createPlatform) and before apps activate.
+    // App migrations follow every valid INSTALLED app (enabled or disabled),
+    // after the registry persisted the scan results (inside createPlatform)
+    // and before apps activate. Runtime enables re-run pending migrations for
+    // that app so activation never sees an outdated schema.
+    migrateApp: async (appId) => {
+      const target = singleAppMigrationTarget(appsDir, appId);
+      if (!target) return;
+      await runMigrations({ databaseUrl, targets: [target], log });
+    },
     beforeActivation: async () => {
       try {
-        const scopes = await runAppMigrations({
-          databaseUrl,
-          root,
-          manifestsDir: appsDir,
-          database,
-          configEnabled: config.apps.enabled,
-          log,
-        });
+        const scopes = await runAppMigrations({ databaseUrl, manifestsDir: appsDir, log });
         if (scopes.length > 0) log.info({ scopes }, "app migrations applied");
       } catch (error) {
         log.fatal(error, "app migration failed; backend will not start");
