@@ -5,12 +5,13 @@
 ## 已交付（v0.1）
 
 - **Core**：App Registry、Manifest 校验（YAML + JSON Schema）、配置加载、统一日志与错误格式、健康检查
-- **数据**：PostgreSQL Schema 隔离（`core.*` / `assets.*` / `tasks.*` / `mini_game.*`），Core 与 App 独立 Migration（`node-pg-migrate`）
-- **生命周期**：App 可 Enable / Disable / Error，禁用后 API、导航、Widget、事件、任务均不可用，数据保留
-- **前端 Shell**：React Router 导航、Dashboard（Widget 网格 + Error Boundary）、App Center、Settings
+- **数据**：PostgreSQL Schema 隔离（`core.*` / `assets.*` / `tasks.*` / `mini_game.*`），Core 与 App 独立 Migration（`node-pg-migrate`）；App Migration 跟随"已安装"而非"已启用"——禁用的 App 依然保持 schema 升级、数据保留，运行时 Enable 会先补齐 pending migration 再激活，无需重启
+- **生命周期**：`enabled` 记录用户期望、`status` 记录真实运行状态；激活失败呈现为 `enabled=true / status=error`（App Center 提供 Retry / Disable），Disable/Enable 后 API、导航、Widget、事件、任务即时生效，数据保留
+- **前端 Shell**：React Router 导航、Dashboard（Widget 网格 + Error Boundary + 点击导航 + 拖拽排序/隐藏/恢复）、App Center（启停 + 昵称/Accent 个性化）、Settings
 - **共享服务**：Storage（本地驱动 + 路径安全）、Event Bus（进程内 typed pub/sub）、Scheduler（cron / interval / one-shot）
-- **三个验证 App**：Assets（CRUD + 搜索 + 附件 + Widget）、Tasks（状态/筛选 + 到期 Job + 事件 + Widget）、Mini Game（2048 + 存档 + Widget）
-- **工程化**：单元/集成/前端测试、备份脚本、App 模板与生成脚本、`scripts/verify.sh` 验收脚本、GitHub Actions（含 PostgreSQL service）
+- **三个验证 App**：Assets（Item/Category CRUD + 附件上传下载删除 + 服务端搜索/过滤/排序）、Tasks（start/deadline/priority + 编辑器 + 筛选排序）、Mini Game（2048 方向键/WASD + 历史高分 + 防陈旧存档）
+- **查询状态**：Assets / Tasks 的搜索、过滤、排序进入 URL search params（刷新/前进后退/收藏/深链），搜索带 250ms debounce；排序字段走显式 allowlist，禁止任意 SQL 插值
+- **工程化**：单元/集成/前端测试、E2E（Playwright）、备份脚本、App 模板与生成脚本、`scripts/verify.sh` 验收脚本、GitHub Actions（含 PostgreSQL service）
 
 ## 启动
 
@@ -23,13 +24,28 @@ make dev                   # 等价于 docker compose up --build
 
 启动后：
 
-- Web Shell: <http://localhost:5173>
-- Backend 存活检查: <http://localhost:8000/api/core/health/live>
-- Backend 就绪检查: <http://localhost:8000/api/core/health/ready>
-- App 列表: <http://localhost:8000/api/core/apps>
-- PostgreSQL: `localhost:5432`
+- Web Shell: <http://localhost:5173>（默认仅绑定 `127.0.0.1`）
+
+默认网络拓扑（见下方"网络安全默认值"）：database 与 backend 只在 Docker 网络内可达，不对宿主机发布端口；因此 Backend 的 8000 与 PostgreSQL 的 5432 默认无法从宿主机直接访问。
 
 停止：`make down`。
+
+### 网络安全默认值
+
+默认 `docker compose up`：
+
+- frontend → 宿主机 `127.0.0.1:5173`（仅本机可访问）
+- backend → 仅 Docker 网络内可达（frontend 代理 `/api`）
+- database → 仅 Docker 网络内可达
+
+需要调试或 LAN 使用时：
+
+```bash
+make dev-expose   # database/backend 发布到宿主机回环，frontend 开放到所有网卡
+# 或按需覆盖：BIND_IP=0.0.0.0 docker compose up
+```
+
+详见 `docker/compose.expose.yml`。
 
 ## 本地开发与验收
 

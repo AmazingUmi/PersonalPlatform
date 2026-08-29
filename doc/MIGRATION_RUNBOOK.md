@@ -7,7 +7,7 @@
 1. Core 与每个 App 各自维护迁移目录与记录表：
    - Core：`migrations/core/`，记录表 `core.migrations`
    - App：`apps/<id>/migrations/`，记录表 `<id>.migrations`
-2. 执行顺序：Core → **已启用** App（按 app id 稳定排序）。禁用 App 不迁移、不回滚、不删表。
+2. 执行顺序：Core → **已安装**（valid manifest）App（按 app id 稳定排序），禁用 App 同样迁移：migration 跟随安装状态而非启用状态，禁用 App 数据保留、schema 照常升级、不回滚、不删表。
 3. 迁移期间 node-pg-migrate 持有 PostgreSQL advisory lock，防并发执行；任一 scope 失败即中止启动并报告具体 App。
 4. 迁移文件为前向 SQL：`<YYYYMMDDHHMMSS>-<name>.sql`，按文件名时间戳排序执行，每个 scope 的整批迁移在单事务中应用。
 
@@ -52,6 +52,6 @@ npm run verify
 
 ## 禁用 / 启用 App 与迁移的关系
 
-- 禁用：数据与 schema 原样保留；后续版本若该 App 新增迁移，将在其重新启用后的下一次启动时应用。
-- 启用：启动时自动补齐该 App 的未应用迁移，再注册其 API/事件/Job。
+- 禁用：数据与 schema 原样保留；禁用期间发布的新迁移会在下一次启动时照常应用（禁用 App 也在迁移目标集内）。
+- 运行时启用：Core 在激活前先补齐该 App 的未应用迁移，成功后再注册其 API/事件/Job；迁移失败则置为 `status=error`（保留 `enabled=true`），不激活。无需重启后端。
 - 永不因禁用而 DROP 任何业务 schema。

@@ -1,0 +1,20 @@
+# Explicit host exposure for debugging or LAN use (FP-7.4).
+#
+#   docker compose -f docker-compose.yml -f docker/compose.expose.yml up
+#
+# The default compose file keeps the database and backend Docker-internal and
+# binds the frontend to 127.0.0.1. This overlay publishes the database and
+# backend on the host loopback and opens the frontend on all interfaces.
+# Adjust BIND_IP / EXPOSE_BIND_IP in the environment as needed.
+services:
+  database:
+    ports:
+      - "${EXPOSE_BIND_IP:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432"
+
+  backend:
+    ports:
+      - "${EXPOSE_BIND_IP:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"
+
+  frontend:
+    ports:
+      - "${BIND_IP:-0.0.0.0}:${FRONTEND_PORT:-5173}:5173"

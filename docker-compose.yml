@@ -7,8 +7,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-personal_platform}
       POSTGRES_USER: ${POSTGRES_USER:-personal_platform}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-for-local-development}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+    # Not published to the host by default (FP-7.4): only containers on the
+    # compose network reach the database. Use docker/compose.expose.yml to
+    # publish it for local tooling.
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -28,8 +29,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       PLATFORM_ROOT: /workspace
       DATABASE_URL: postgresql://${POSTGRES_USER:-personal_platform}:${POSTGRES_PASSWORD:-change-me-for-local-development}@database:5432/${POSTGRES_DB:-personal_platform}
-    ports:
-      - "${BACKEND_PORT:-8000}:8000"
+    # Not published to the host by default: the frontend proxy is the only
+    # intended entry point. Use docker/compose.expose.yml for API debugging.
     volumes:
       - ./backend:/workspace/backend
       - ./apps:/workspace/apps
@@ -52,8 +53,10 @@ services:
       dockerfile: docker/frontend.Dockerfile
     environment:
       VITE_API_PROXY_TARGET: http://backend:8000
+    # Loopback-only by default (FP-7.4). Set BIND_IP=0.0.0.0 (or a specific
+    # interface address) in the environment to expose the UI on the LAN.
     ports:
-      - "${FRONTEND_PORT:-5173}:5173"
+      - "${BIND_IP:-127.0.0.1}:${FRONTEND_PORT:-5173}:5173"
     volumes:
       - ./frontend:/workspace/frontend
     depends_on:

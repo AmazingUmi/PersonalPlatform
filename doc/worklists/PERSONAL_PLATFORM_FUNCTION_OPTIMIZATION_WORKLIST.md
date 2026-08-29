@@ -893,6 +893,8 @@ manifest identity
 
 **Priority: P2**
 
+**Status: DONE** — URL query state, shared useMutation and pixel ConfirmDialog shipped with FP-3/FP-4 (all destructive actions confirmed); Docker defaults now bind the frontend to 127.0.0.1 and keep database/backend Docker-internal, with docker/compose.expose.yml + make dev-expose for explicit exposure; docs (README, DEVELOPMENT, MIGRATION_RUNBOOK) updated to the new migration lifecycle, app-state semantics, query API and networking defaults.
+
 ## FP-7.1 URL query state
 
 Assets and Tasks filters/sorting should use URL search params.
