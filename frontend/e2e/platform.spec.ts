@@ -62,18 +62,28 @@ test("assets: create, search and see the item", async ({ page }) => {
 test("tasks: create a task and complete it", async ({ page }) => {
   await page.goto("/tasks");
   const title = `e2e-task-${Date.now()}`;
-  await page.getByPlaceholder(/new task/i).fill(title);
-  await page.getByRole("button", { name: "+ Add" }).click();
+  await page.getByRole("button", { name: /new task/i }).click();
+  await page.getByLabel("Task title").fill(title);
+  await page.getByTestId("task-editor").getByLabel("Priority").selectOption("3");
+  await page.getByRole("button", { name: /create task/i }).click();
   const row = page.getByRole("listitem").filter({ hasText: title });
   await expect(row).toBeVisible();
+  await expect(row.getByText("Urgent")).toBeVisible();
 
   // Click (not check): completion re-fetches the list, replacing the row node.
   await row.getByRole("checkbox").click();
   await expect(page.getByRole("listitem").filter({ hasText: title })).toHaveClass(/task--done/);
 
   // Filter keeps it under "Done".
-  await page.getByRole("button", { name: "Done" }).click();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
   await expect(page.getByRole("listitem").filter({ hasText: title })).toBeVisible();
+
+  // Deleting asks for confirmation first.
+  const doomed = page.getByRole("listitem").filter({ hasText: title });
+  await doomed.getByRole("button", { name: new RegExp(`delete task "${title}"`, "i") }).click();
+  await expect(page.getByTestId("confirm-dialog")).toBeVisible();
+  await page.getByRole("button", { name: "Delete", exact: true }).click();
+  await expect(page.getByRole("listitem").filter({ hasText: title })).toHaveCount(0);
 });
 
 test("mini game: board renders, tiles move and the game saves", async ({ page }) => {

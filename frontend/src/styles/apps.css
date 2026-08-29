@@ -693,3 +693,21 @@
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: var(--space-3);
 }
+
+.task__body {
+  flex: 1 1 200px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.task__title {
+  flex: 0 1 auto;
+}
+
+.task__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}

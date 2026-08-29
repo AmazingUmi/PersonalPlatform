@@ -417,7 +417,7 @@ describe("tasks app API", () => {
       payload: { title: "Filter Done" },
     });
     await platform.app.inject({
-      method: "PUT",
+      method: "PATCH",
       url: `/api/apps/tasks/tasks/${done.json().id}`,
       payload: { status: "done" },
     });
@@ -448,7 +448,7 @@ describe("tasks app API", () => {
     const taskId = created.json().id as string;
 
     const done = await platform.app.inject({
-      method: "PUT",
+      method: "PATCH",
       url: `/api/apps/tasks/tasks/${taskId}`,
       payload: { status: "done" },
     });
@@ -457,7 +457,7 @@ describe("tasks app API", () => {
     assert.ok(done.json().completed_at, "completed_at set on completion");
 
     const reopened = await platform.app.inject({
-      method: "PUT",
+      method: "PATCH",
       url: `/api/apps/tasks/tasks/${taskId}`,
       payload: { status: "todo" },
     });
@@ -510,7 +510,7 @@ describe("tasks app API", () => {
       payload: { title: "Already Done" },
     });
     await platform.app.inject({
-      method: "PUT",
+      method: "PATCH",
       url: `/api/apps/tasks/tasks/${toFinish.json().id}`,
       payload: { status: "done" },
     });
@@ -532,7 +532,7 @@ describe("tasks app API", () => {
     const taskId = created.json().id as string;
 
     const done = await platform.app.inject({
-      method: "PUT",
+      method: "PATCH",
       url: `/api/apps/tasks/tasks/${taskId}`,
       payload: { status: "done" },
     });
@@ -547,7 +547,7 @@ describe("tasks app API", () => {
     assert.equal(event.payload.title, "Publish Me");
 
     const doneAgain = await platform.app.inject({
-      method: "PUT",
+      method: "PATCH",
       url: `/api/apps/tasks/tasks/${taskId}`,
       payload: { status: "done" },
     });

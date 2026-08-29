@@ -12,7 +12,7 @@ const categories = {
 };
 
 function setupFetch(items: unknown[] = []) {
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+  const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("/api/apps/assets/categories")) return jsonResponse(categories);
     if (url.includes("/api/apps/assets/items?") || url.endsWith("/api/apps/assets/items")) {
@@ -52,7 +52,7 @@ describe("AssetsPage", () => {
 
     await waitFor(() => {
       const call = fetchMock.mock.calls.find(
-        ([url, init]) => String(url).endsWith("/api/apps/assets/items") && (init as RequestInit | undefined)?.method === "POST",
+        ([url, init]) => String(url).endsWith("/api/apps/assets/items") && init?.method === "POST",
       );
       expect(call).toBeDefined();
       const init = call![1] as RequestInit;

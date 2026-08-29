@@ -546,6 +546,8 @@ Requirements:
 
 **Priority: P1**
 
+**Status: DONE** — `start_at` + `priority` (0–3, CHECK-constrained) via forward migration with (priority, due_at) and start_at indexes; PUT replaced by PATCH with nullable clearing; query API (`q/status/priority/start+due windows/sortBy/order` allowlist); `dueAt < startAt` rejected with 422; task editor dialog + URL-driven filters/sort + priority badges + overdue state + confirmed delete. Scheduler overdue-notification behavior documented as known follow-up.
+
 ## FP-4.1 Data model
 
 Add:
