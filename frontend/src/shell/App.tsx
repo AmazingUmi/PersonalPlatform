@@ -1,10 +1,18 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { fetchApps, type AppInfo } from "../shared/api";
+import { LoadingState } from "../shared/ui/LoadingState";
+import { PixelButton } from "../shared/ui/PixelButton";
+import { PixelIcon } from "../shared/ui/PixelIcon";
+import { PixelWindow } from "../shared/ui/PixelWindow";
+import { StatusMessage } from "../shared/ui/StatusMessage";
 import { AppCenter } from "./AppCenter";
+import { AppDock } from "./AppDock";
 import { Dashboard } from "./Dashboard";
-import { Nav } from "./Nav";
+import { MobileNav } from "./MobileNav";
+import { NotFound } from "./NotFound";
 import { Settings } from "./Settings";
+import { TopBar } from "./TopBar";
 import { enabledAppModules, resolveRoutes } from "./routes";
 
 export function App() {
@@ -31,12 +39,34 @@ export function App() {
 
   if (!apps) {
     return (
-      <div className="shell">
-        <header className="shell__header">
-          <strong>Personal Platform</strong>
+      <div className="shell shell--boot">
+        <header className="topbar">
+          <span className="topbar__brand">
+            <PixelIcon name="logo" size={24} className="topbar__logo" />
+            <span className="topbar__brand-text">Personal Platform</span>
+          </span>
         </header>
-        <main className="shell__main">
-          {error ? <p className="error-text">Backend unavailable: {error}</p> : <p className="muted">Loading…</p>}
+        <main className="shell__content">
+          <div className="page page--boot">
+            {error ? (
+              <PixelWindow title="System Error" icon="warning" accent="danger">
+                <StatusMessage tone="error">
+                  <p>Backend unavailable: {error}</p>
+                </StatusMessage>
+                <PixelButton
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setRefreshKey((key) => key + 1)}
+                >
+                  Retry
+                </PixelButton>
+              </PixelWindow>
+            ) : (
+              <PixelWindow title="Booting" icon="logo">
+                <LoadingState label="Loading system…" />
+              </PixelWindow>
+            )}
+          </div>
         </main>
       </div>
     );
@@ -44,22 +74,33 @@ export function App() {
 
   const modules = enabledAppModules(apps);
   const routes = resolveRoutes(modules, apps);
+  const enabled = apps.filter((app) => app.status === "enabled");
 
   return (
     <BrowserRouter>
       <div className="shell">
-        <Nav apps={apps.filter((app) => app.status === "enabled")} />
-        <main className="shell__main">
-          <Routes>
-            <Route path="/" element={<Dashboard apps={apps} />} />
-            <Route path="/apps" element={<AppCenter apps={apps} onChanged={() => setRefreshKey((k) => k + 1)} />} />
-            <Route path="/settings" element={<Settings />} />
-            {routes.map((route) => (
-              <Route key={route.path} path={route.path} element={route.element} />
-            ))}
-            <Route path="*" element={<div className="page"><h1>Not Found</h1></div>} />
-          </Routes>
-        </main>
+        <a className="skip-link" href="#shell-content">
+          Skip to content
+        </a>
+        <TopBar apps={apps} />
+        <div className="shell__workspace">
+          <AppDock apps={enabled} />
+          <main className="shell__content" id="shell-content" tabIndex={-1}>
+            <Routes>
+              <Route path="/" element={<Dashboard apps={apps} />} />
+              <Route
+                path="/apps"
+                element={<AppCenter apps={apps} onChanged={() => setRefreshKey((key) => key + 1)} />}
+              />
+              <Route path="/settings" element={<Settings apps={apps} />} />
+              {routes.map((route) => (
+                <Route key={route.path} path={route.path} element={route.element} />
+              ))}
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </main>
+        </div>
+        <MobileNav apps={enabled} />
       </div>
     </BrowserRouter>
   );

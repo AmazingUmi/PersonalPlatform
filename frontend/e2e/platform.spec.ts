@@ -57,7 +57,7 @@ test("tasks: create a task and complete it", async ({ page }) => {
   await page.goto("/tasks");
   const title = `e2e-task-${Date.now()}`;
   await page.getByPlaceholder(/new task/i).fill(title);
-  await page.getByRole("button", { name: "Add" }).click();
+  await page.getByRole("button", { name: "+ Add" }).click();
   const row = page.getByRole("listitem").filter({ hasText: title });
   await expect(row).toBeVisible();
 
@@ -65,8 +65,8 @@ test("tasks: create a task and complete it", async ({ page }) => {
   await row.getByRole("checkbox").click();
   await expect(page.getByRole("listitem").filter({ hasText: title })).toHaveClass(/task--done/);
 
-  // Filter keeps it under "done".
-  await page.getByRole("combobox").selectOption("done");
+  // Filter keeps it under "Done".
+  await page.getByRole("button", { name: "Done" }).click();
   await expect(page.getByRole("listitem").filter({ hasText: title })).toBeVisible();
 });
 
@@ -116,14 +116,14 @@ test("disabling an app removes its nav, page and widget; data survives", async (
 
 test("app center lists all apps with status and toggles", async ({ page }) => {
   await page.goto("/apps");
-  const list = page.locator(".app-list");
+  const list = page.locator(".app-grid");
   await expect(list.getByText("Assets")).toBeVisible();
   await expect(list.getByText("Tasks")).toBeVisible();
   await expect(list.getByText("Mini Game (2048)")).toBeVisible();
 
-  const assetsRow = page.locator(".app-row").filter({ hasText: "Assets" });
-  await assetsRow.getByRole("button", { name: "Disable" }).click();
-  await expect(assetsRow.getByText("disabled")).toBeVisible();
-  await assetsRow.getByRole("button", { name: "Enable" }).click();
-  await expect(assetsRow.getByText("enabled")).toBeVisible();
+  const assetsCard = page.locator(".app-card").filter({ hasText: "Assets" });
+  await assetsCard.getByRole("button", { name: "Disable" }).click();
+  await expect(assetsCard.getByText("disabled")).toBeVisible();
+  await assetsCard.getByRole("button", { name: "Enable" }).click();
+  await expect(assetsCard.getByText("enabled")).toBeVisible();
 });

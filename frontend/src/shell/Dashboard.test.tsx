@@ -1,4 +1,5 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "./Dashboard";
 import { getSetting, putSetting, type AppInfo } from "../shared/api";
@@ -57,7 +58,10 @@ describe("Dashboard widgets", () => {
       },
     } satisfies Record<string, FrontendAppModule>);
 
-    render(<Dashboard apps={[app("alpha"), app("beta")]} />);
+    render(
+      <MemoryRouter>
+        <Dashboard apps={[app("alpha"), app("beta")]} />
+      </MemoryRouter>,);
     expect(await screen.findByText("Alpha Widget")).toBeDefined();
     expect(screen.getByText("Beta Widget")).toBeDefined();
     expect(screen.getByText("alpha content")).toBeDefined();
@@ -72,7 +76,10 @@ describe("Dashboard widgets", () => {
         widgets: [{ id: "w1", title: "Alpha Widget", render: () => <p>alpha</p> }],
       },
     });
-    render(<Dashboard apps={[app("alpha", "disabled")]} />);
+    render(
+      <MemoryRouter>
+        <Dashboard apps={[app("alpha", "disabled")]} />
+      </MemoryRouter>,);
     await waitFor(() => expect(screen.getByText(/No widgets available/)).toBeDefined());
   });
 
@@ -92,7 +99,10 @@ describe("Dashboard widgets", () => {
         widgets: [{ id: "w2", title: "Fine Widget", render: () => <p>fine content</p> }],
       },
     });
-    render(<Dashboard apps={[app("broken"), app("fine")]} />);
+    render(
+      <MemoryRouter>
+        <Dashboard apps={[app("broken"), app("fine")]} />
+      </MemoryRouter>,);
     expect(await screen.findByText(/Widget failed to render/)).toBeDefined();
     expect(screen.getByText("Fine Widget")).toBeDefined();
     expect(screen.getByText("fine content")).toBeDefined();
@@ -112,7 +122,10 @@ describe("Dashboard widgets", () => {
       },
     });
     vi.mocked(getSetting).mockResolvedValue(["beta:w2"]);
-    render(<Dashboard apps={[app("alpha"), app("beta")]} />);
+    render(
+      <MemoryRouter>
+        <Dashboard apps={[app("alpha"), app("beta")]} />
+      </MemoryRouter>,);
     await waitFor(() => expect(screen.getByText("Beta Widget")).toBeDefined());
     expect(screen.queryByText("Alpha Widget")).toBeNull();
     expect(screen.getByText(/1 widget\(s\) hidden/)).toBeDefined();

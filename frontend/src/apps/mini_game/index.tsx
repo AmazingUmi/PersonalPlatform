@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../shared/api";
 import type { FrontendAppModule } from "../../shared/appTypes";
+import { PixelBadge } from "../../shared/ui/PixelBadge";
+import { PixelButton } from "../../shared/ui/PixelButton";
+import { StatusMessage } from "../../shared/ui/StatusMessage";
+import { LoadingState } from "../../shared/ui/LoadingState";
 import { useAsync } from "../../shared/useAsync";
 import logo from "./assets/logo.svg";
 
@@ -145,16 +149,30 @@ function Game2048() {
   }
 
   return (
-    <div className="page game">
-      <h1 className="game__title"><img src={logo} alt="2048 logo" width={36} height={36} /> 2048</h1>
+    <div className="page game" data-app="mini_game">
+      <header className="page-header">
+        <h1 className="game__title page-header__title">
+          <img src={logo} alt="" width={36} height={36} className="game__logo" /> 2048
+        </h1>
+        <p className="page-header__subtitle">Mini Game</p>
+      </header>
       <div className="game__bar">
-        <strong>Score: {score}</strong>
-        <button type="button" onClick={newGame}>
-          New Game
-        </button>
-        <span className="muted">
-          {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : saveState === "error" ? "Save failed" : ""}
-        </span>
+        <div className="game__score" aria-label="Score">
+          <span className="game__score-label">Score</span>
+          <span className="game__score-value">{score}</span>
+        </div>
+        <PixelButton onClick={newGame}>New Game</PixelButton>
+        <PixelBadge
+          tone={saveState === "error" ? "danger" : saveState === "saved" ? "success" : "neutral"}
+        >
+          {saveState === "saving"
+            ? "Saving…"
+            : saveState === "saved"
+              ? "Saved"
+              : saveState === "error"
+                ? "Save failed"
+                : "Idle"}
+        </PixelBadge>
       </div>
       <div className="game__board">
         {board.map((row, r) => (
@@ -167,17 +185,36 @@ function Game2048() {
           </div>
         ))}
       </div>
-      {over && <p className="error-text">Game over — press New Game.</p>}
-      <p className="muted">Use arrow keys (or WASD) to move tiles.</p>
+      {over && (
+        <StatusMessage tone="warning" className="game__over">
+          <p>Game over — press New Game.</p>
+        </StatusMessage>
+      )}
+      <p className="game__hint">Arrow keys (or WASD) to move tiles.</p>
     </div>
   );
 }
 
 function HighScoreWidget() {
   const summary = useAsync(() => api<{ highScore: number }>("/api/apps/mini_game/summary"));
-  if (summary.loading) return <p className="muted">Loading…</p>;
-  if (summary.error) return <p className="error-text">{summary.error}</p>;
-  return <p>High score: {summary.data?.highScore ?? 0}</p>;
+  if (summary.loading) return <LoadingState label="Loading…" />;
+  if (summary.error) {
+    return (
+      <div className="widget-fallback">
+        <StatusMessage tone="error">
+          <p>{summary.error}</p>
+        </StatusMessage>
+      </div>
+    );
+  }
+  return (
+    <div className="px-stats">
+      <div className="px-stat">
+        <span className="px-stat__label">High Score</span>
+        <span className="px-stat__value px-stat__value--lg">{summary.data?.highScore ?? 0}</span>
+      </div>
+    </div>
+  );
 }
 
 const app: FrontendAppModule = {

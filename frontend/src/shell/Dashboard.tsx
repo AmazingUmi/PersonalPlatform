@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { ErrorBoundary } from "../shared/ErrorBoundary";
 import { getSetting, putSetting, type AppInfo } from "../shared/api";
+import { EmptyState } from "../shared/ui/EmptyState";
+import { LoadingState } from "../shared/ui/LoadingState";
+import { PixelButton } from "../shared/ui/PixelButton";
+import { PixelWindow } from "../shared/ui/PixelWindow";
+import { StatusMessage } from "../shared/ui/StatusMessage";
+import { appAccent, appIconName } from "../shared/ui/appIcons";
 import { enabledAppModules, resolveWidgets, type ResolvedWidget } from "./routes";
 
 const LAYOUT_KEY = "dashboard.widgets";
@@ -46,8 +53,11 @@ export function Dashboard({ apps }: { apps: AppInfo[] }) {
   if (layout === "loading") {
     return (
       <div className="page">
-        <h1>Dashboard</h1>
-        <p className="muted">Loading widgets…</p>
+        <header className="page-header">
+          <h1 className="page-header__title">Dashboard</h1>
+          <p className="page-header__subtitle">System overview</p>
+        </header>
+        <LoadingState label="Loading widgets…" />
       </div>
     );
   }
@@ -59,40 +69,64 @@ export function Dashboard({ apps }: { apps: AppInfo[] }) {
 
   return (
     <div className="page">
-      <h1>Dashboard</h1>
+      <header className="page-header">
+        <h1 className="page-header__title">Dashboard</h1>
+        <p className="page-header__subtitle">System overview</p>
+      </header>
       {saveError && (
-        <p className="error-text" role="alert">
-          Layout save failed: {saveError}
-        </p>
+        <StatusMessage tone="error">
+          <p>Layout save failed: {saveError}</p>
+        </StatusMessage>
       )}
       {visible.length === 0 ? (
-        <p className="muted">No widgets available. Enable apps in the App Center to populate the dashboard.</p>
+        <EmptyState
+          icon="apps"
+          title="No widgets available"
+          description="Enable apps in the App Center to populate the dashboard."
+          action={
+            <Link to="/apps" className="px-button px-button--primary px-button--md">
+              Open App Center
+            </Link>
+          }
+        />
       ) : (
         <div className="dashboard-grid">
           {visible.map((resolved) => (
             <ErrorBoundary
               key={widgetKey(resolved)}
               fallback={
-                <section className="widget-card widget-card--error">
-                  <h2 className="widget-card__title">{resolved.widget.title}</h2>
-                  <p className="widget-card__body">Widget failed to render.</p>
-                </section>
+                <PixelWindow
+                  title={resolved.widget.title}
+                  icon="warning"
+                  accent="danger"
+                  data-widget-key={widgetKey(resolved)}
+                >
+                  <p className="dashboard-widget-error">Widget failed to render.</p>
+                </PixelWindow>
               }
             >
-              <section className="widget-card" data-widget-key={widgetKey(resolved)}>
-                <h2 className="widget-card__title">{resolved.widget.title}</h2>
-                <div className="widget-card__body">{resolved.widget.render()}</div>
-              </section>
+              <PixelWindow
+                title={resolved.widget.title}
+                icon={appIconName(resolved.appId)}
+                accent={appAccent(resolved.appId)}
+                data-widget-key={widgetKey(resolved)}
+              >
+                {resolved.widget.render()}
+              </PixelWindow>
             </ErrorBoundary>
           ))}
         </div>
       )}
       {hiddenCount > 0 ? (
-        <p>
-          {hiddenCount} widget(s) hidden.{" "}
-          <button type="button" className="link-button" onClick={() => void persistLayout(null, availableKeys)}>
+        <p className="dashboard-hidden">
+          <span>{hiddenCount} widget(s) hidden.</span>
+          <PixelButton
+            variant="ghost"
+            size="sm"
+            onClick={() => void persistLayout(null, availableKeys)}
+          >
             Restore default layout
-          </button>
+          </PixelButton>
         </p>
       ) : null}
     </div>

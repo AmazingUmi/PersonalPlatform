@@ -32,7 +32,10 @@ export default defineConfig({
       },
     },
     {
-      command: "npx vite --port 5199 --strictPort",
+      // Bind IPv4 explicitly: the health poll and baseURL use 127.0.0.1, and
+      // on hosts where `localhost` resolves to ::1 vite would otherwise never
+      // answer on the polled address.
+      command: "npx vite --port 5199 --strictPort --host 127.0.0.1",
       url: "http://127.0.0.1:5199",
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
