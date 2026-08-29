@@ -613,3 +613,59 @@ a.px-button:hover {
 .back-link:hover {
   color: var(--px-ink);
 }
+
+/* ---------- Confirm dialog / modal panels ---------- */
+
+.px-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal, 60);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  background: color-mix(in srgb, var(--px-ink) 45%, transparent);
+  image-rendering: pixelated;
+}
+
+.px-dialog {
+  width: min(420px, 100%);
+}
+
+.px-dialog__message {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--px-ink);
+  overflow-wrap: anywhere;
+}
+
+.px-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.px-select {
+  appearance: none;
+  min-height: 40px;
+  padding: var(--space-2) 10px;
+  border: var(--border-2) solid var(--px-border);
+  border-radius: var(--radius-pixel);
+  background: var(--px-surface);
+  color: var(--px-ink);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+}
+
+.px-textarea {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  padding: var(--space-2) 10px;
+  border: var(--border-2) solid var(--px-border);
+  border-radius: var(--radius-pixel);
+  background: var(--px-surface);
+  color: var(--px-ink);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+}

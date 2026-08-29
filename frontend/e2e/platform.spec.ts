@@ -40,11 +40,17 @@ test("dashboard renders one widget per validation app", async ({ page }) => {
   await expect(page.getByText("2048 High Score")).toBeVisible();
 });
 
+async function createItemViaDialog(page: Page, name: string) {
+  await page.getByRole("button", { name: /new item/i }).click();
+  await page.getByLabel("Item name").fill(name);
+  await page.getByRole("button", { name: /create item/i }).click();
+  await expect(page.getByTestId("item-editor")).toHaveCount(0);
+}
+
 test("assets: create, search and see the item", async ({ page }) => {
   await page.goto("/assets");
   const name = `e2e-item-${Date.now()}`;
-  await page.getByPlaceholder("Item name").fill(name);
-  await page.getByRole("button", { name: "Add item" }).click();
+  await createItemViaDialog(page, name);
   await expect(page.getByRole("link", { name })).toBeVisible();
 
   await page.getByPlaceholder("Search items…").fill(name);
@@ -92,8 +98,7 @@ test("mini game: board renders, tiles move and the game saves", async ({ page })
 test("disabling an app removes its nav, page and widget; data survives", async ({ page }) => {
   const marker = `keep-me-${Date.now()}`;
   await page.goto("/assets");
-  await page.getByPlaceholder("Item name").fill(marker);
-  await page.getByRole("button", { name: "Add item" }).click();
+  await createItemViaDialog(page, marker);
   await expect(page.getByRole("link", { name: marker })).toBeVisible();
 
   await setAppEnabled("assets", false);

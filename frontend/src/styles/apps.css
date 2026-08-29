@@ -613,3 +613,83 @@
   max-width: 440px;
   gap: var(--space-4);
 }
+
+/* ---------- Assets filter toolbar (FP-3.5) ---------- */
+
+.page-header__actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.assets-filters__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.assets-filters__row + .assets-filters__row {
+  margin-top: var(--space-2);
+}
+
+.assets-filters .assets-search {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.assets-filters__location {
+  max-width: 180px;
+}
+
+.assets-filters__date {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+}
+
+.px-chip-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.px-chip__tools {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* ---------- Shared modal form layout ---------- */
+
+.px-dialog--form {
+  width: min(560px, 100%);
+}
+
+.px-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.px-form__row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.px-form__label {
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--px-ink-soft);
+}
+
+.px-form__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-3);
+}

@@ -367,6 +367,8 @@ Add integration tests for all three transitions.
 
 **Priority: P1**
 
+**Status: DONE** — `target_location` via forward migration (+ created_at index); Category PATCH/DELETE with clean duplicate-name errors; full item editor (create/edit) with nullable clearing; server-side query API (`q/categoryId/targetLocation/acquired+created ranges/sortBy/order` with explicit allowlist, NULLS LAST, deterministic fallback); URL-driven filter toolbar with debounced search; attachment download links and confirmed attachment/item/category deletion.
+
 ## FP-3.1 Data model expansion
 
 Existing fields:

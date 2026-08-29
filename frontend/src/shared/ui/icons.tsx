@@ -68,6 +68,56 @@ export const pixelIcons = {
     box: "0 0 16 16",
     node: <path d="M7 3h2v4h4v2H9v4H7V9H3V7h4V3z" />,
   },
+  edit: {
+    box: "0 0 16 16",
+    node: (
+      <path d="M11 1h3v3l-8 8-3 1 1-3 7-9zM2 13h12v2H2z" />
+    ),
+  },
+  up: {
+    box: "0 0 16 16",
+    node: <path d="M7 2h2v2h2v2h2v2h-3v6H6V8H3V6h2V4h2V2z" />,
+  },
+  down: {
+    box: "0 0 16 16",
+    node: <path d="M7 14h2v-2h2v-2h2V8h-3V2H6v6H3v2h2v2h2v2z" />,
+  },
+  grip: {
+    box: "0 0 16 16",
+    node: (
+      <path d="M5 3h2v2H5zM9 3h2v2H9zM5 7h2v2H5zM9 7h2v2H9zM5 11h2v2H5zM9 11h2v2H9z" />
+    ),
+  },
+  eye: {
+    box: "0 0 16 16",
+    node: (
+      <path
+        fillRule="evenodd"
+        d="M8 4C4 4 1 8 1 8s3 4 7 4 7-4 7-4-3-4-7-4zm0 2a2 2 0 110 4 2 2 0 010-4z"
+      />
+    ),
+  },
+  eyeOff: {
+    box: "0 0 16 16",
+    node: (
+      <>
+        <path
+          fillRule="evenodd"
+          d="M8 4C4 4 1 8 1 8s1.2 1.6 3.2 2.8l6.6-6.6C10 4.4 9 4 8 4zm4.5 1.7l2 2S11.4 12 8 12c-.7 0-1.4-.1-2-.3l1.6-1.6A2 2 0 0010.4 8l2.1-2.3z"
+        />
+        <path d="M2 13L13 2l1 1L3 14l-1-1z" />
+      </>
+    ),
+  },
+  palette: {
+    box: "0 0 16 16",
+    node: (
+      <>
+        <path fillRule="evenodd" d="M8 1a7 7 0 000 14c1 0 2-.5 2-1.5S9.5 12 9.5 11 10.5 9 12 9h1.5A2.5 2.5 0 0016 6.5C16 3.5 12.4 1 8 1z" />
+        <path d="M4 5h2v2H4zM7 3h2v2H7zM11 4h2v2h-2zM3 8h2v2H3z" />
+      </>
+    ),
+  },
   trash: {
     box: "0 0 16 16",
     node: (

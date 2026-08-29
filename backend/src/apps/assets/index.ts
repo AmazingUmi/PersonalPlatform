@@ -15,11 +15,28 @@ interface ItemRow {
   description: string | null;
   quantity: number;
   acquired_at: string | null;
+  target_location: string | null;
   created_at: string;
   updated_at: string;
 }
 
+const ITEM_COLUMNS = "id, category_id, name, description, quantity, acquired_at, target_location, created_at, updated_at";
+
+/** Explicit sort allowlist: request values never reach SQL as identifiers. */
+const ITEM_SORT_COLUMNS: Record<string, string> = {
+  name: "name",
+  quantity: "quantity",
+  acquiredAt: "acquired_at",
+  createdAt: "created_at",
+  updatedAt: "updated_at",
+  targetLocation: "target_location",
+};
+
 const id = "assets";
+
+function isUniqueViolation(error: unknown): boolean {
+  return (error as { code?: string }).code === "23505";
+}
 
 async function registerApi(ctx: AppContext): Promise<void> {
   const db = ctx.database;
@@ -44,36 +61,125 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request, reply) => {
-      const { rows } = await db.query<CategoryRow>(
-        "INSERT INTO assets.categories (id, name) VALUES ($1, $2) RETURNING id, name, created_at",
-        [randomUUID(), request.body.name],
-      );
-      return reply.code(201).send(rows[0]);
+      try {
+        const { rows } = await db.query<CategoryRow>(
+          "INSERT INTO assets.categories (id, name) VALUES ($1, $2) RETURNING id, name, created_at",
+          [randomUUID(), request.body.name],
+        );
+        return reply.code(201).send(rows[0]);
+      } catch (error) {
+        if (isUniqueViolation(error)) {
+          throw new AppError(422, "category_name_taken", `a category named "${request.body.name}" already exists`);
+        }
+        throw error;
+      }
     },
   );
 
-  ctx.api.get("/items", async (request) => {
-    const query = (request.query ?? {}) as { q?: string; categoryId?: string };
-    const conditions: string[] = [];
-    const params: unknown[] = [];
-    if (query.q) {
-      params.push(`%${query.q}%`);
-      conditions.push(`(name ILIKE $${params.length} OR description ILIKE $${params.length})`);
-    }
-    if (query.categoryId) {
-      params.push(query.categoryId);
-      conditions.push(`category_id = $${params.length}`);
-    }
-    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    const { rows } = await db.query<ItemRow>(
-      `SELECT id, category_id, name, description, quantity, acquired_at, created_at, updated_at
-       FROM assets.items ${where} ORDER BY created_at DESC`,
-      params,
-    );
-    return { items: rows };
+  ctx.api.patch<{ Params: { id: string }; Body: { name: string } }>(
+    "/categories/:id",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["name"],
+          additionalProperties: false,
+          properties: { name: { type: "string", minLength: 1, maxLength: 200 } },
+        },
+      },
+    },
+    async (request) => {
+      try {
+        const { rows } = await db.query<CategoryRow>(
+          "UPDATE assets.categories SET name = $2 WHERE id = $1 RETURNING id, name, created_at",
+          [request.params.id, request.body.name],
+        );
+        if (!rows[0]) throw new AppError(404, "not_found", "category not found");
+        return rows[0];
+      } catch (error) {
+        if (isUniqueViolation(error)) {
+          throw new AppError(422, "category_name_taken", `a category named "${request.body.name}" already exists`);
+        }
+        throw error;
+      }
+    },
+  );
+
+  // Deleting a category keeps its items (ON DELETE SET NULL on items.category_id).
+  ctx.api.delete<{ Params: { id: string } }>("/categories/:id", async (request, reply) => {
+    const result = await db.query("DELETE FROM assets.categories WHERE id = $1", [request.params.id]);
+    if (result.rowCount === 0) throw new AppError(404, "not_found", "category not found");
+    return reply.code(204).send();
   });
 
-  ctx.api.post<{ Body: { name: string; description?: string; quantity?: number; acquiredAt?: string; categoryId?: string } }>(
+  ctx.api.get<{ Querystring: Record<string, string> }>(
+    "/items",
+    {
+      schema: {
+        querystring: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            q: { type: "string", maxLength: 300 },
+            categoryId: { type: "string" },
+            targetLocation: { type: "string", maxLength: 300 },
+            acquiredAfter: { type: "string", format: "date" },
+            acquiredBefore: { type: "string", format: "date" },
+            createdAfter: { type: "string", format: "date-time" },
+            createdBefore: { type: "string", format: "date-time" },
+            sortBy: { type: "string", enum: Object.keys(ITEM_SORT_COLUMNS) },
+            order: { type: "string", enum: ["asc", "desc"] },
+          },
+        },
+      },
+    },
+    async (request) => {
+      const query = request.query;
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+      if (query.q) {
+        params.push(`%${query.q}%`);
+        conditions.push(`(name ILIKE $${params.length} OR description ILIKE $${params.length})`);
+      }
+      if (query.categoryId) {
+        params.push(query.categoryId);
+        conditions.push(`category_id = $${params.length}`);
+      }
+      if (query.targetLocation) {
+        params.push(`%${query.targetLocation}%`);
+        conditions.push(`target_location ILIKE $${params.length}`);
+      }
+      if (query.acquiredAfter) {
+        params.push(query.acquiredAfter);
+        conditions.push(`acquired_at >= $${params.length}`);
+      }
+      if (query.acquiredBefore) {
+        params.push(query.acquiredBefore);
+        conditions.push(`acquired_at <= $${params.length}`);
+      }
+      if (query.createdAfter) {
+        params.push(query.createdAfter);
+        conditions.push(`created_at >= $${params.length}`);
+      }
+      if (query.createdBefore) {
+        params.push(query.createdBefore);
+        conditions.push(`created_at < $${params.length}`);
+      }
+      const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+      const sortColumn = ITEM_SORT_COLUMNS[query.sortBy ?? "createdAt"] ?? "created_at";
+      const direction = query.order === "asc" ? "ASC" : "DESC";
+      const orderBy = `${sortColumn} ${direction} NULLS LAST, created_at DESC, id`;
+
+      const { rows } = await db.query<ItemRow>(
+        `SELECT ${ITEM_COLUMNS} FROM assets.items ${where} ORDER BY ${orderBy}`,
+        params,
+      );
+      return { items: rows };
+    },
+  );
+
+  ctx.api.post<{ Body: { name: string; description?: string; quantity?: number; acquiredAt?: string; categoryId?: string; targetLocation?: string } }>(
     "/items",
     {
       schema: {
@@ -83,10 +189,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
           additionalProperties: false,
           properties: {
             name: { type: "string", minLength: 1, maxLength: 300 },
-            description: { type: "string" },
+            description: { type: ["string", "null"], maxLength: 5000 },
             quantity: { type: "integer", minimum: 0 },
-            acquiredAt: { type: "string", format: "date" },
-            categoryId: { type: "string" },
+            acquiredAt: { type: ["string", "null"], format: "date" },
+            categoryId: { type: ["string", "null"] },
+            targetLocation: { type: ["string", "null"], maxLength: 300 },
           },
         },
       },
@@ -94,24 +201,32 @@ async function registerApi(ctx: AppContext): Promise<void> {
     async (request, reply) => {
       const b = request.body;
       const newId = randomUUID();
-      const { rows } = await db.query<ItemRow>(
-        `INSERT INTO assets.items (id, category_id, name, description, quantity, acquired_at)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, category_id, name, description, quantity, acquired_at, created_at, updated_at`,
-        [newId, b.categoryId ?? null, b.name, b.description ?? null, b.quantity ?? 1, b.acquiredAt ?? null],
-      );
+      let rows: { rows: ItemRow[] };
+      try {
+        rows = await db.query<ItemRow>(
+          `INSERT INTO assets.items (id, category_id, name, description, quantity, acquired_at, target_location)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           RETURNING ${ITEM_COLUMNS}`,
+          [newId, b.categoryId ?? null, b.name, b.description ?? null, b.quantity ?? 1, b.acquiredAt ?? null, b.targetLocation ?? null],
+        );
+      } catch (error) {
+        if ((error as { code?: string }).code === "23503") {
+          throw new AppError(422, "invalid_reference", "categoryId does not reference an existing category");
+        }
+        throw error;
+      }
       ctx.events.publish(
         "assets.item.created.v1",
         { id: newId, name: b.name, categoryId: b.categoryId ?? null },
         "assets",
       );
-      return reply.code(201).send(rows[0]);
+      return reply.code(201).send(rows.rows[0]);
     },
   );
 
   ctx.api.get<{ Params: { id: string } }>("/items/:id", async (request) => {
     const { rows } = await db.query<ItemRow>(
-      "SELECT id, category_id, name, description, quantity, acquired_at, created_at, updated_at FROM assets.items WHERE id = $1",
+      `SELECT ${ITEM_COLUMNS} FROM assets.items WHERE id = $1`,
       [request.params.id],
     );
     if (!rows[0]) throw new AppError(404, "not_found", "item not found");
@@ -120,23 +235,24 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
   // Partial update with real nullable semantics (FP-2B.1): a missing property
   // leaves the column unchanged, an explicit null clears it, a value updates it.
-  const itemPatchSchema = {
-    body: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        name: { type: "string", minLength: 1, maxLength: 300 },
-        description: { type: ["string", "null"], maxLength: 5000 },
-        quantity: { type: "integer", minimum: 0 },
-        acquiredAt: { type: ["string", "null"], format: "date" },
-        categoryId: { type: ["string", "null"] },
-      },
-    },
-  } as const;
-
   ctx.api.patch<{ Params: { id: string }; Body: Record<string, unknown> }>(
     "/items/:id",
-    { schema: itemPatchSchema },
+    {
+      schema: {
+        body: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            name: { type: "string", minLength: 1, maxLength: 300 },
+            description: { type: ["string", "null"], maxLength: 5000 },
+            quantity: { type: "integer", minimum: 0 },
+            acquiredAt: { type: ["string", "null"], format: "date" },
+            categoryId: { type: ["string", "null"] },
+            targetLocation: { type: ["string", "null"], maxLength: 300 },
+          },
+        },
+      },
+    },
     async (request) => {
       const body = request.body as Record<string, unknown>;
       const columns: Array<[string, string]> = [
@@ -145,6 +261,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
         ["quantity", "quantity"],
         ["acquiredAt", "acquired_at"],
         ["categoryId", "category_id"],
+        ["targetLocation", "target_location"],
       ];
       const sets: string[] = [];
       const params: unknown[] = [request.params.id];
@@ -155,7 +272,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       }
       if (sets.length === 0) {
         const current = await db.query<ItemRow>(
-          "SELECT id, category_id, name, description, quantity, acquired_at, created_at, updated_at FROM assets.items WHERE id = $1",
+          `SELECT ${ITEM_COLUMNS} FROM assets.items WHERE id = $1`,
           [request.params.id],
         );
         if (!current.rows[0]) throw new AppError(404, "not_found", "item not found");
@@ -168,7 +285,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
         rows = await db.query<ItemRow>(
           `UPDATE assets.items SET ${sets.join(", ")}
            WHERE id = $1
-           RETURNING id, category_id, name, description, quantity, acquired_at, created_at, updated_at`,
+           RETURNING ${ITEM_COLUMNS}`,
           params,
         );
       } catch (error) {
@@ -207,8 +324,8 @@ async function registerApi(ctx: AppContext): Promise<void> {
           required: ["filename", "dataBase64"],
           additionalProperties: false,
           properties: {
-            filename: { type: "string", minLength: 1 },
-            contentType: { type: "string" },
+            filename: { type: "string", minLength: 1, maxLength: 300 },
+            contentType: { type: "string", maxLength: 200 },
             dataBase64: { type: "string" },
           },
         },

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { join } from "node:path";
+import { readFileSync, readdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
 import assetsApp from "../../src/apps/assets/index.js";
 import miniGameApp from "../../src/apps/mini_game/index.js";
@@ -31,15 +32,19 @@ ${capabilities.map((c) => `  ${c}: true`).join("\n")}
 `;
 }
 
-const ASSETS_SQL = `CREATE TABLE categories (id uuid PRIMARY KEY, name text NOT NULL UNIQUE, created_at timestamptz NOT NULL DEFAULT now());
-CREATE TABLE items (id uuid PRIMARY KEY, category_id uuid REFERENCES categories(id) ON DELETE SET NULL, name text NOT NULL, description text, quantity integer NOT NULL DEFAULT 1, acquired_at date, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());
-CREATE TABLE attachments (id uuid PRIMARY KEY, item_id uuid NOT NULL REFERENCES items(id) ON DELETE CASCADE, filename text NOT NULL, content_type text, size bigint NOT NULL DEFAULT 0, storage_key text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());`;
+const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
 
-const TASKS_SQL = `CREATE TABLE tasks (id uuid PRIMARY KEY, title text NOT NULL, description text, status text NOT NULL DEFAULT 'todo', due_at timestamptz, completed_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());`;
+// Real shipped migrations keep the fixture schema in sync with the app code.
+const readMigrations = (appId: string): string[] => {
+  const dir = join(repoRoot, "apps", appId, "migrations");
+  return readdirSync(dir)
+    .sort()
+    .map((file) => readFileSync(join(dir, file), "utf8"));
+};
 
-const MINI_GAME_SQL = `CREATE TABLE saves (id text PRIMARY KEY, score integer NOT NULL DEFAULT 0, board jsonb NOT NULL DEFAULT '[]'::jsonb, updated_at timestamptz NOT NULL DEFAULT now());
-ALTER TABLE saves ADD COLUMN high_score integer NOT NULL DEFAULT 0;
-ALTER TABLE saves ADD COLUMN revision integer NOT NULL DEFAULT 0;`;
+const ASSETS_MIGRATIONS = readMigrations("assets");
+const TASKS_MIGRATIONS = readMigrations("tasks");
+const MINI_GAME_MIGRATIONS = readMigrations("mini_game");
 
 interface CompletedPayload {
   id: string;
@@ -77,17 +82,17 @@ before(async () => {
     {
       id: "assets",
       yaml: appYaml("assets", ["database", "storage"]),
-      migrations: [ASSETS_SQL],
+      migrations: ASSETS_MIGRATIONS,
     },
     {
       id: "tasks",
       yaml: appYaml("tasks", ["database", "scheduler", "events"]),
-      migrations: [TASKS_SQL],
+      migrations: TASKS_MIGRATIONS,
     },
     {
       id: "mini_game",
       yaml: appYaml("mini_game", ["database", "events"]),
-      migrations: [MINI_GAME_SQL],
+      migrations: MINI_GAME_MIGRATIONS,
     },
     {
       id: "spy",
