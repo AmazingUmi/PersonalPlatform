@@ -106,3 +106,21 @@ export function keyToDirection(key: string): Direction | undefined {
   };
   return keyMap[key];
 }
+
+/** A tile is either empty (0) or a power of two (2, 4, 8, ...). */
+function isTileValue(value: unknown): value is number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) return false;
+  if (value === 0) return true;
+  return (value & (value - 1)) === 0;
+}
+
+/**
+ * Defensive save validation (FP-13.2): 4×4 integers, each 0 or a power of
+ * two. Corrupted or hand-crafted server data is rejected instead of rendered.
+ */
+export function isValidBoard(board: unknown): board is Board {
+  if (!Array.isArray(board) || board.length !== SIZE) return false;
+  return board.every(
+    (row) => Array.isArray(row) && row.length === SIZE && row.every((value) => isTileValue(value)),
+  );
+}

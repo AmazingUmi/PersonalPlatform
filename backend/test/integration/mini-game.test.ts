@@ -74,9 +74,22 @@ function putSave(body: { score: number; board: number[][]; revision: number }) {
   });
 }
 
+/** Valid 4x4 boards (FP-13.2 made the shape a hard contract). */
+const zeros = () => Array.from({ length: 4 }, () => [0, 0, 0, 0]);
+function withTile(row: number, col: number, value: number): number[][] {
+  const board = zeros();
+  board[row]![col] = value;
+  return board;
+}
+const BOARD_TWO = withTile(0, 0, 2);
+const BOARD_FRESH = withTile(0, 2, 2);
+const BOARD_TWOS = Array.from({ length: 4 }, () => [2, 2, 2, 2]);
+const BOARD_FOURS = Array.from({ length: 4 }, () => [4, 4, 4, 4]);
+const BOARD_EIGHTS = Array.from({ length: 4 }, () => [8, 8, 8, 8]);
+
 describe("2048 save semantics (FP-2A.3 / FP-2A.4)", () => {
   it("accepts the first save and records the score as high score", async () => {
-    const response = await putSave({ score: 100, board: [[2, 0, 0, 0]], revision: 1 });
+    const response = await putSave({ score: 100, board: BOARD_TWO, revision: 1 });
     assert.equal(response.statusCode, 200);
     const body = response.json();
     assert.equal(body.accepted, true);
@@ -86,7 +99,7 @@ describe("2048 save semantics (FP-2A.3 / FP-2A.4)", () => {
   });
 
   it("keeps the historical high score after a New Game reset (score 0)", async () => {
-    const response = await putSave({ score: 0, board: [[0, 0, 2, 0]], revision: 2 });
+    const response = await putSave({ score: 0, board: BOARD_FRESH, revision: 2 });
     assert.equal(response.statusCode, 200);
     const body = response.json();
     assert.equal(body.accepted, true);
@@ -102,14 +115,14 @@ describe("2048 save semantics (FP-2A.3 / FP-2A.4)", () => {
 
   it("rejects a stale save so an older board can never overwrite a newer one", async () => {
     // Server is at revision 2. A delayed write from revision 1 arrives last.
-    const stale = await putSave({ score: 999, board: [[8, 8, 8, 8]], revision: 1 });
+    const stale = await putSave({ score: 999, board: BOARD_EIGHTS, revision: 1 });
     assert.equal(stale.statusCode, 200);
     const body = stale.json();
     assert.equal(body.accepted, false, "stale revision must be rejected");
     assert.equal(body.save.score, 0, "server state is unchanged");
 
     // Repeating the current revision is an idempotent no-op, also not accepted.
-    const repeat = await putSave({ score: 999, board: [[8, 8, 8, 8]], revision: 2 });
+    const repeat = await putSave({ score: 999, board: BOARD_EIGHTS, revision: 2 });
     assert.equal(repeat.json().accepted, false);
 
     const row = await db
@@ -122,7 +135,7 @@ describe("2048 save semantics (FP-2A.3 / FP-2A.4)", () => {
   });
 
   it("accepts the next monotonic revision", async () => {
-    const response = await putSave({ score: 40, board: [[2, 2, 0, 0]], revision: 3 });
+    const response = await putSave({ score: 40, board: BOARD_TWOS, revision: 3 });
     const body = response.json();
     assert.equal(body.accepted, true);
     assert.equal(body.save.score, 40);
@@ -136,7 +149,7 @@ describe("2048 save semantics (FP-2A.3 / FP-2A.4)", () => {
     // score 40 (below record) — none of these may publish.
     assert.equal(highScoreEvents.length, 0);
 
-    const beaten = await putSave({ score: 250, board: [[4, 4, 4, 4]], revision: 4 });
+    const beaten = await putSave({ score: 250, board: BOARD_FOURS, revision: 4 });
     assert.equal(beaten.json().accepted, true);
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(highScoreEvents.length, 1, "exceeding the record publishes exactly once");
@@ -144,7 +157,7 @@ describe("2048 save semantics (FP-2A.3 / FP-2A.4)", () => {
     assert.equal(highScoreEvents[0]!.previous, 100);
 
     // Beating the current run's score but not the record publishes nothing.
-    const below = await putSave({ score: 200, board: [[2, 2, 2, 2]], revision: 5 });
+    const below = await putSave({ score: 200, board: BOARD_TWOS, revision: 5 });
     assert.equal(below.json().save.highScore, 250);
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(highScoreEvents.length, 1);
@@ -165,5 +178,67 @@ describe("2048 save semantics (FP-2A.3 / FP-2A.4)", () => {
       payload: { score: -5, board: [], revision: 6 },
     });
     assert.equal(bad.statusCode, 400);
+  });
+});
+
+describe("board validation (FP-13.2)", () => {
+  it("accepts a well-formed 4x4 board of zeros and powers of two", async () => {
+    const good = await putSave({ score: 12, board: withTile(3, 3, 2048), revision: 10 });
+    assert.equal(good.statusCode, 200);
+    assert.equal(good.json().accepted, true);
+  });
+
+  it("rejects wrong outer length with 400 validation_error", async () => {
+    const threeRows = [zeros()[0]!, zeros()[1]!, zeros()[2]!];
+    const response = await putSave({ score: 0, board: threeRows, revision: 11 });
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error.code, "validation_error");
+  });
+
+  it("rejects wrong row length with 400 validation_error", async () => {
+    const fiveWide = zeros();
+    fiveWide[0] = [0, 0, 0, 0, 0];
+    const response = await putSave({ score: 0, board: fiveWide, revision: 11 });
+    assert.equal(response.statusCode, 400);
+  });
+
+  it("rejects non-integer and negative tiles with 400", async () => {
+    const fractional = zeros();
+    fractional[0] = [0.5, 0, 0, 0];
+    const nonInteger = await platform.app.inject({
+      method: "PUT",
+      url: "/api/apps/mini_game/saves",
+      payload: { score: 0, board: fractional, revision: 11 },
+    });
+    assert.equal(nonInteger.statusCode, 400);
+
+    const negative = zeros();
+    negative[0] = [-2, 0, 0, 0];
+    const neg = await platform.app.inject({
+      method: "PUT",
+      url: "/api/apps/mini_game/saves",
+      payload: { score: 0, board: negative, revision: 11 },
+    });
+    assert.equal(neg.statusCode, 400);
+  });
+
+  it("rejects non-power-of-two tiles with a clean 422 domain error", async () => {
+    for (const bad of [3, 6, 12]) {
+      const board = zeros();
+      board[0] = [bad, 0, 0, 0];
+      const response = await putSave({ score: 0, board, revision: 11 });
+      assert.equal(response.statusCode, 422, `tile ${bad} must be rejected`);
+      assert.equal(response.json().error.code, "invalid_board");
+      assert.match(response.json().error.message, /power of two/);
+    }
+  });
+
+  it("GET /saves reports a poisoned stored board as no save instead of serving it", async () => {
+    await db.context().query(
+      `UPDATE mini_game.saves SET board = '[[3,3,3,3],[3,3,3,3],[3,3,3,3],[3,3,3,3]]'::jsonb WHERE id = 'current'`,
+    );
+    const response = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves" });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().save, null, "corrupted board is masked as no save");
   });
 });

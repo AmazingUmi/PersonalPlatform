@@ -14,6 +14,31 @@ const SAVE_ID = "current";
 
 const id = "mini_game";
 
+const BOARD_SCHEMA = {
+  type: "array",
+  minItems: 4,
+  maxItems: 4,
+  items: {
+    type: "array",
+    minItems: 4,
+    maxItems: 4,
+    items: { type: "integer", minimum: 0 },
+  },
+};
+
+/** Every tile is empty (0) or a power of two (FP-13.2). */
+function isPowerOfTwoOrNull(value: number): boolean {
+  return value === 0 || (value & (value - 1)) === 0;
+}
+
+function isValidBoardShape(board: unknown): board is number[][] {
+  return (
+    Array.isArray(board) &&
+    board.length === 4 &&
+    board.every((row) => Array.isArray(row) && row.length === 4 && row.every((value) => isPowerOfTwoOrNull(value)))
+  );
+}
+
 function toSave(row: SaveRow) {
   return {
     id: row.id,
@@ -33,7 +58,9 @@ async function registerApi(ctx: AppContext): Promise<void> {
       "SELECT id, score, high_score, board, revision, updated_at FROM mini_game.saves WHERE id = $1",
       [SAVE_ID],
     );
-    if (!rows[0]) return { save: null };
+    // Defensive read (FP-13.2): a poisoned/stale row is reported as "no save"
+    // instead of feeding the client a broken board.
+    if (!rows[0] || !isValidBoardShape(rows[0].board)) return { save: null };
     return { save: toSave(rows[0]) };
   });
 
@@ -47,7 +74,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
           additionalProperties: false,
           properties: {
             score: { type: "integer", minimum: 0 },
-            board: { type: "array" },
+            board: BOARD_SCHEMA,
             revision: { type: "integer", minimum: 0 },
           },
         },
@@ -55,6 +82,17 @@ async function registerApi(ctx: AppContext): Promise<void> {
     },
     async (request) => {
       const body = request.body;
+
+      // Business validation on top of the JSON shape (FP-13.2): shape errors
+      // answer 400 validation_error, semantically impossible boards answer a
+      // clean 422 domain error.
+      if (!isValidBoardShape(body.board)) {
+        throw new AppError(
+          422,
+          "invalid_board",
+          "board must be 4x4 integers where every tile is 0 or a power of two",
+        );
+      }
 
       // Revision-guarded upsert: a stale write (server already holds a newer
       // revision) is rejected so rapid overlapping saves can never roll the

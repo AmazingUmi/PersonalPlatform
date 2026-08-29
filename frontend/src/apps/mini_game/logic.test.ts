@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canMove, keyToDirection, moveBoard, slideLine, type Board } from "./logic";
+import { canMove, isValidBoard, keyToDirection, moveBoard, slideLine, type Board } from "./logic";
 
 function board(rows: number[][]): Board {
   return rows.map((row) => [...row]);
@@ -187,5 +187,46 @@ describe("keyToDirection (FP-2A.2)", () => {
     expect(keyToDirection("x")).toBeUndefined();
     expect(keyToDirection("Enter")).toBeUndefined();
     expect(keyToDirection(" ")).toBeUndefined();
+  });
+});
+
+describe("isValidBoard (FP-13.2)", () => {
+  it("accepts a 4x4 board of zeros and powers of two", () => {
+    const board = [
+      [2, 4, 8, 2048],
+      [0, 0, 2, 4],
+      [0, 0, 0, 0],
+      [1024, 512, 256, 128],
+    ];
+    expect(isValidBoard(board)).toBe(true);
+  });
+
+  it("rejects wrong dimensions", () => {
+    expect(isValidBoard([[2, 0, 0, 0]])).toBe(false);
+    expect(isValidBoard([[], [], [], []])).toBe(false);
+    expect(isValidBoard([])).toBe(false);
+    expect(isValidBoard("nope")).toBe(false);
+    expect(isValidBoard(null)).toBe(false);
+  });
+
+  it("rejects non-integer, negative and non-power-of-two tiles", () => {
+    expect(isValidBoard([
+      [1.5, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+    ])).toBe(false);
+    expect(isValidBoard([
+      [-2, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+    ])).toBe(false);
+    expect(isValidBoard([
+      [3, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+    ])).toBe(false);
   });
 });

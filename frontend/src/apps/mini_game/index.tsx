@@ -11,6 +11,7 @@ import logo from "./assets/logo.svg";
 import {
   canMove,
   emptyBoard,
+  isValidBoard,
   keyToDirection,
   moveBoard,
   spawnTile,
@@ -24,9 +25,13 @@ interface SaveState {
   revision: number;
 }
 
-function Game2048() {
+export function Game2048() {
   const displayName = useAppDisplayName({ id: "mini_game", name: "Mini Game (2048)" });
-  const [board, setBoard] = useState<Board>(() => spawnTile(spawnTile(emptyBoard())));
+  // Loading gate (FP-13.1): the initial board is NOT randomized until the
+  // save round-trip finishes, and moves / New Game are blocked while loading
+  // so user input can never interleave with the async load.
+  const [phase, setPhase] = useState<"loading" | "ready">("loading");
+  const [board, setBoard] = useState<Board>(emptyBoard);
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
   const [over, setOver] = useState(false);
@@ -37,13 +42,25 @@ function Game2048() {
   const revision = useRef(0);
 
   const loadSave = useCallback(async () => {
-    const body = await api<{ save: SaveState | null }>("/api/apps/mini_game/saves");
-    if (body.save && body.save.board.length === 4) {
-      setBoard(body.save.board);
-      setScore(body.save.score);
-      setHighScore(body.save.highScore);
-      revision.current = body.save.revision;
+    try {
+      const body = await api<{ save: SaveState | null }>("/api/apps/mini_game/saves");
+      // Defensive validation (FP-13.2): a corrupted board never renders; the
+      // player simply gets a fresh run.
+      if (body.save && isValidBoard(body.save.board)) {
+        setBoard(body.save.board);
+        setScore(body.save.score);
+        setHighScore(body.save.highScore);
+        revision.current = body.save.revision;
+        setPhase("ready");
+        return;
+      }
+    } catch {
+      // Offline / error: fall through to a fresh local run.
     }
+    setBoard(spawnTile(spawnTile(emptyBoard())));
+    setScore(0);
+    setOver(false);
+    setPhase("ready");
   }, []);
 
   const save = useCallback(async (nextBoard: Board, nextScore: number) => {
@@ -67,13 +84,13 @@ function Game2048() {
   }, []);
 
   useEffect(() => {
-    void loadSave().catch(() => undefined);
+    void loadSave();
   }, [loadSave]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       const direction = keyToDirection(event.key);
-      if (!direction || over) return;
+      if (!direction || over || phase !== "ready") return;
       event.preventDefault();
       const result = moveBoard(board, direction);
       if (!result.moved) return;
@@ -87,9 +104,10 @@ function Game2048() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [board, score, over, save]);
+  }, [board, score, over, phase, save]);
 
   function newGame() {
+    if (phase !== "ready") return;
     const fresh = spawnTile(spawnTile(emptyBoard()));
     setBoard(fresh);
     setScore(0);
@@ -115,7 +133,9 @@ function Game2048() {
           <span className="game__score-label">Best</span>
           <span className="game__score-value">{highScore}</span>
         </div>
-        <PixelButton onClick={newGame}>New Game</PixelButton>
+        <PixelButton onClick={newGame} disabled={phase !== "ready"}>
+          New Game
+        </PixelButton>
         <PixelBadge
           tone={saveState === "error" ? "danger" : saveState === "saved" ? "success" : "neutral"}
         >
@@ -128,6 +148,9 @@ function Game2048() {
                 : "Idle"}
         </PixelBadge>
       </div>
+      {phase === "loading" ? (
+        <LoadingState label="Loading save…" />
+      ) : (
       <div className="game__board">
         {board.map((row, r) => (
           <div key={r} className="game__row">
@@ -139,6 +162,7 @@ function Game2048() {
           </div>
         ))}
       </div>
+      )}
       {over && (
         <StatusMessage tone="warning" className="game__over">
           <p>Game over — press New Game.</p>
