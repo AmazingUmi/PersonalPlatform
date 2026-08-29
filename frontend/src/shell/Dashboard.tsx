@@ -349,6 +349,10 @@ function SortableCard({
           }}
           onKeyDown={(event) => {
             if (event.key !== "Enter" && event.key !== " ") return;
+            // Same guard as the click path (FP-14.1): Enter/Space pressed on
+            // an inner control (hide button, drag handle) must not also
+            // navigate to the app.
+            if (isInteractiveTarget(event.target)) return;
             event.preventDefault();
             onNavigate(resolved);
           }}

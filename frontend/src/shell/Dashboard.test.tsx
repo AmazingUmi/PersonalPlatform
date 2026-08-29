@@ -202,6 +202,32 @@ describe("Dashboard interaction (FP-5.2 / FP-5.3 / FP-5.4)", () => {
     await waitFor(() => expect(screen.getByTestId("location").textContent).toBe("/alpha"));
   });
 
+  it("Enter on an inner control does not also navigate the card (FP-14.1)", async () => {
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Alpha Widget");
+
+    // The hide button lives inside the role=button card wrapper. Enter on it
+    // must trigger the hide action only — never the card navigation.
+    fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
+    const hideButton = screen.getByRole("button", { name: /hide alpha widget/i });
+    fireEvent.keyDown(hideButton, { key: "Enter" });
+    fireEvent.click(hideButton);
+
+    expect(screen.getByTestId("location").textContent).toBe("/");
+    fireEvent.click(screen.getByRole("button", { name: /^done$/i }));
+    await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalled());
+    expect(vi.mocked(putSetting).mock.calls[0]![1]).toEqual(["beta:w2"]);
+  });
+
+  it("Space on an inner control does not navigate the card either", async () => {
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Alpha Widget");
+
+    fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
+    fireEvent.keyDown(screen.getByRole("button", { name: /hide alpha widget/i }), { key: " " });
+    expect(screen.getByTestId("location").textContent).toBe("/");
+  });
+
   it("edit mode: hiding a widget and pressing Done persists the layout", async () => {
     renderDashboard([app("alpha"), app("beta")]);
     await screen.findByText("Alpha Widget");

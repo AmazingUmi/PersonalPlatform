@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { fetchApps, getSetting, type AppInfo } from "../shared/api";
 import { PresentationProvider } from "../shared/PresentationContext";
@@ -19,21 +19,35 @@ import { enabledAppModules, resolveRoutes } from "./routes";
 
 export function App() {
   const [apps, setApps] = useState<AppInfo[] | null>(null);
+  // Initial-load error (no data at all) gets the full boot error screen.
   const [error, setError] = useState<string | null>(null);
+  // Refresh error keeps the stale data visible with a non-blocking banner
+  // and a retry (FP-14.2) — never a silent fallback to old data.
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [overrides, setOverrides] = useState<PresentationOverrides>({});
+  const everLoaded = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
+    setRefreshing(true);
     fetchApps()
       .then((items) => {
-        if (!cancelled) {
-          setApps(items);
-          setError(null);
-        }
+        if (cancelled) return;
+        everLoaded.current = true;
+        setApps(items);
+        setError(null);
+        setRefreshError(null);
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : String(err);
+        if (everLoaded.current) setRefreshError(message);
+        else setError(message);
+      })
+      .finally(() => {
+        if (!cancelled) setRefreshing(false);
       });
     return () => {
       cancelled = true;
@@ -94,6 +108,7 @@ export function App() {
   const modules = enabledAppModules(apps);
   const routes = resolveRoutes(modules, apps);
   const enabled = apps.filter((app) => app.status === "enabled");
+  const retryRefresh = () => setRefreshKey((key) => key + 1);
 
   return (
     <BrowserRouter>
@@ -105,7 +120,19 @@ export function App() {
           <TopBar apps={apps} />
           <div className="shell__workspace">
             <AppDock apps={enabled} presentation={overrides} />
-            <main className="shell__content" id="shell-content" tabIndex={-1}>
+            <main className="shell__content" id="shell-content" tabIndex={-1} aria-busy={refreshing}>
+              {refreshError ? (
+                <StatusMessage tone="error">
+                  <p>Refresh failed: {refreshError} — showing previously loaded data.</p>
+                  <PixelButton variant="secondary" size="sm" onClick={retryRefresh}>
+                    Retry
+                  </PixelButton>
+                </StatusMessage>
+              ) : refreshing ? (
+                <p className="muted" role="status">
+                  Refreshing…
+                </p>
+              ) : null}
               <Routes>
                 <Route path="/" element={<Dashboard apps={apps} presentation={overrides} />} />
                 <Route
