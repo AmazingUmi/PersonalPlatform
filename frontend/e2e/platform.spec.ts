@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { expect, test, type Page } from "@playwright/test";
 
 /**
@@ -141,4 +142,86 @@ test("app center lists all apps with status and toggles", async ({ page }) => {
   await expect(assetsCard.getByText("disabled")).toBeVisible();
   await assetsCard.getByRole("button", { name: "Enable" }).click();
   await expect(assetsCard.getByText("enabled")).toBeVisible();
+});
+
+test("dashboard: clicking a widget card navigates to its app", async ({ page }) => {
+  await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
+    data: { value: ["assets:summary", "mini_game:highscore", "tasks:today"] },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /open 2048 high score/i }).click();
+  await expect(page).toHaveURL(/\/mini_game$/);
+});
+
+test("dashboard: drag reorder persists after reload", async ({ page }) => {
+  // Deterministic baseline: reset the persisted layout via the settings API.
+  await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
+    data: { value: ["assets:summary", "mini_game:highscore", "tasks:today"] },
+  });
+  await page.goto("/");
+  await expect(page.locator(".dashboard-card [data-widget-key]")).toHaveCount(3);
+  const orderBefore = await page
+    .locator(".dashboard-card [data-widget-key]")
+    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-widget-key")));
+
+  await page.getByRole("button", { name: /edit layout/i }).click();
+  // Drag the first card's handle below the last card via pointer events.
+  const handles = page.locator(".drag-handle");
+  const sourceBox = await handles.first().boundingBox();
+  const targetBox = await handles.last().boundingBox();
+  assert(sourceBox && targetBox, "drag handle boxes resolved");
+  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2 + 40, {
+    steps: 15,
+  });
+  await page.mouse.up();
+
+  // Let the dnd-kit drop animation settle, then read the new order.
+  await page.waitForTimeout(600);
+  const orderAfterDrag = (await page
+    .locator(".dashboard-card [data-widget-key]")
+    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-widget-key")))) as string[];
+  assert.notDeepEqual(orderAfterDrag, orderBefore, "drag actually reordered the widgets");
+  assert.equal(orderAfterDrag.length, 3);
+
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  // Done persists asynchronously; wait until the shell returns to normal mode
+  // so the reload cannot cancel the PUT mid-flight.
+  await expect(page.getByRole("button", { name: /edit layout/i })).toBeVisible();
+  await page.reload();
+  await expect(page.locator(".dashboard-card [data-widget-key]")).toHaveCount(3);
+  const orderAfterReload = await page
+    .locator(".dashboard-card [data-widget-key]")
+    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-widget-key")));
+  expect(orderAfterReload).toEqual(orderAfterDrag);
+
+  // Reset the persisted layout for the following tests (no hidden widgets ->
+  // no in-page restore button, so reset through the settings API).
+  await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
+    data: { value: ["assets:summary", "mini_game:highscore", "tasks:today"] },
+  });
+});
+
+test("dashboard: hide and show widgets persist after reload", async ({ page }) => {
+  await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
+    data: { value: ["assets:summary", "mini_game:highscore", "tasks:today"] },
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /edit layout/i }).click();
+  await page.getByRole("button", { name: /hide asset summary/i }).click();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(page.getByRole("button", { name: /edit layout/i })).toBeVisible();
+
+  await page.reload();
+  await expect(page.locator('[data-widget-key="assets:summary"]')).toHaveCount(0);
+  await expect(page.getByText(/1 widget\(s\) hidden/)).toBeVisible();
+
+  // Show it again through edit mode.
+  await page.getByRole("button", { name: /edit layout/i }).click();
+  await page.getByRole("button", { name: /asset summary/i }).click();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(page.getByRole("button", { name: /edit layout/i })).toBeVisible();
+  await page.reload();
+  await expect(page.locator('[data-widget-key="assets:summary"]')).toHaveCount(1);
 });

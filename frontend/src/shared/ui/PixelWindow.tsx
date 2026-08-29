@@ -18,6 +18,8 @@ interface PixelWindowProps extends Omit<HTMLAttributes<HTMLElement>, "title"> {
   accent?: PixelAccent;
   headingLevel?: 1 | 2 | 3;
   actions?: ReactNode;
+  /** Rendered before the icon — e.g. the dashboard drag handle in edit mode. */
+  headerPrefix?: ReactNode;
   children: ReactNode;
 }
 
@@ -29,6 +31,7 @@ export function PixelWindow({
   accent,
   headingLevel = 2,
   actions,
+  headerPrefix,
   children,
   className = "",
   ...rest
@@ -40,6 +43,7 @@ export function PixelWindow({
       {...rest}
     >
       <header className="px-window__header">
+        {headerPrefix}
         {icon ? <PixelIcon name={icon} /> : null}
         <Heading className="px-window__title">{title}</Heading>
         {actions ? <div className="px-window__actions">{actions}</div> : null}

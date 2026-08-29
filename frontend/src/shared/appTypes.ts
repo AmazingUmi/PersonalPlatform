@@ -16,6 +16,8 @@ export interface WidgetDefinition {
   /** Matches a widget id declared in apps/<app_id>/app.yaml. */
   id: string;
   title: string;
+  /** Deep link for dashboard card clicks; falls back to the app root route. */
+  href?: string;
   /** Rendered inside the dashboard grid with its own error boundary. */
   render: () => ReactNode;
 }

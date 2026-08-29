@@ -401,3 +401,41 @@
     border-color: var(--px-border);
   }
 }
+
+/* ---------- Dashboard cards: navigation + edit-mode drag (FP-5) ---------- */
+
+.dashboard-card {
+  position: relative;
+}
+
+.dashboard-card--dragging {
+  z-index: 40;
+  opacity: 0.85;
+}
+
+.dashboard-card__hit {
+  cursor: pointer;
+  height: 100%;
+}
+
+.dashboard-card__hit:focus-visible {
+  outline: var(--border-2) solid var(--px-primary);
+  outline-offset: 2px;
+}
+
+.drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: var(--border-1) solid var(--px-border);
+  background: var(--px-surface);
+  color: var(--px-ink-soft);
+  cursor: grab;
+  touch-action: none;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
