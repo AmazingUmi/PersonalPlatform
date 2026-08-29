@@ -57,6 +57,9 @@ export function createAppContext(options: CreateAppContextOptions): AppContext {
     list: async () => {
       throw new CapabilityError(appId, "storage");
     },
+    exists: async () => {
+      throw new CapabilityError(appId, "storage");
+    },
   });
 
   const unavailableEvents = (): AppEventBus => ({

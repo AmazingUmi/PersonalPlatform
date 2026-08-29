@@ -12,6 +12,7 @@ import type { Platform } from "../../src/core/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 import { buildFixturePlatform, type FixtureManifest } from "../helpers/platform.js";
 import { localDayRangeUtc } from "../../src/core/time/index.js";
+import { multipartBody } from "../helpers/multipart.js";
 
 let db: Database;
 let platform: Platform;
@@ -82,7 +83,7 @@ before(async () => {
   const manifests: FixtureManifest[] = [
     {
       id: "assets",
-      yaml: appYaml("assets", ["database", "storage", "events"]),
+      yaml: appYaml("assets", ["database", "storage", "scheduler", "events"]),
       migrations: ASSETS_MIGRATIONS,
     },
     {
@@ -333,11 +334,7 @@ describe("assets app API", () => {
     const upload = await platform.app.inject({
       method: "POST",
       url: `/api/apps/assets/items/${itemId}/attachments`,
-      payload: {
-        filename: "receipt.txt",
-        contentType: "text/plain",
-        dataBase64: Buffer.from(content, "utf8").toString("base64"),
-      },
+      ...multipartBody([{ name: "file", filename: "receipt.txt", contentType: "text/plain", data: content }]),
     });
     assert.equal(upload.statusCode, 201);
     assert.equal(upload.json().filename, "receipt.txt");

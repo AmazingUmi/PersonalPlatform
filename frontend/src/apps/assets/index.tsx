@@ -733,6 +733,9 @@ function AssetsPage() {
   );
 }
 
+/** Mirrors the backend upload cap (FP-12.2). */
+const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+
 function AssetDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -762,14 +765,19 @@ function AssetDetailPage() {
   });
 
   const upload = async (file: File) => {
-    const dataBase64 = await fileToBase64(file);
     setUploading(true);
     setUploadError(null);
     try {
+      if (file.size > ATTACHMENT_MAX_BYTES) {
+        throw new Error(`${file.name} is larger than the 10 MB attachment limit`);
+      }
+      // Multipart upload (FP-12.2): no Base64 inflation, one streaming part.
+      const form = new FormData();
+      form.append("file", file, file.name);
+      // Let the browser set content-type (it must include the boundary).
       await api(`/api/apps/assets/items/${id}/attachments`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ filename: file.name, contentType: file.type, dataBase64 }),
+        body: form,
       });
       refresh();
     } catch (error) {
@@ -986,15 +994,6 @@ function AssetSummaryWidget() {
       </div>
     </div>
   );
-}
-
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result).split(",")[1] ?? "");
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
 }
 
 const app: FrontendAppModule = {

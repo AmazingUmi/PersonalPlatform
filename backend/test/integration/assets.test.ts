@@ -7,6 +7,7 @@ import assetsApp from "../../src/apps/assets/index.js";
 import type { Platform } from "../../src/core/platform.js";
 import { buildFixturePlatform } from "../helpers/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
+import { multipartBody } from "../helpers/multipart.js";
 import { runMigrations } from "../../src/core/database/migrate.js";
 
 const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
@@ -137,13 +138,13 @@ describe("attachment lifecycle and orphan cleanup (FP-2B.2)", () => {
   });
 
   it("uploads an attachment with a physical storage object", async () => {
-    const upload = await json<{ id: string }>("POST", `/api/apps/assets/items/${itemId}/attachments`, {
-      filename: "receipt.txt",
-      contentType: "text/plain",
-      dataBase64: Buffer.from("receipt-data").toString("base64"),
+    const upload = await platform.app.inject({
+      method: "POST",
+      url: `/api/apps/assets/items/${itemId}/attachments`,
+      ...multipartBody([{ name: "file", filename: "receipt.txt", contentType: "text/plain", data: "receipt-data" }]),
     });
-    assert.equal(upload.status, 201);
-    attachmentId = upload.body.id;
+    assert.equal(upload.statusCode, 201);
+    attachmentId = upload.json().id;
     assert.ok(existsSync(attachmentPath(itemId, attachmentId)), "physical file exists");
   });
 
@@ -164,16 +165,18 @@ describe("attachment lifecycle and orphan cleanup (FP-2B.2)", () => {
   });
 
   it("deleting the item removes row, attachment metadata and storage objects", async () => {
-    const upload1 = await json<{ id: string }>("POST", `/api/apps/assets/items/${itemId}/attachments`, {
-      filename: "a.txt",
-      dataBase64: Buffer.from("a").toString("base64"),
+    const upload1 = await platform.app.inject({
+      method: "POST",
+      url: `/api/apps/assets/items/${itemId}/attachments`,
+      ...multipartBody([{ name: "file", filename: "a.txt", data: "a" }]),
     });
-    const upload2 = await json<{ id: string }>("POST", `/api/apps/assets/items/${itemId}/attachments`, {
-      filename: "b.txt",
-      dataBase64: Buffer.from("b").toString("base64"),
+    const upload2 = await platform.app.inject({
+      method: "POST",
+      url: `/api/apps/assets/items/${itemId}/attachments`,
+      ...multipartBody([{ name: "file", filename: "b.txt", data: "b" }]),
     });
-    assert.ok(existsSync(attachmentPath(itemId, upload1.body.id)));
-    assert.ok(existsSync(attachmentPath(itemId, upload2.body.id)));
+    assert.ok(existsSync(attachmentPath(itemId, upload1.json().id)));
+    assert.ok(existsSync(attachmentPath(itemId, upload2.json().id)));
 
     const { status } = await json("DELETE", `/api/apps/assets/items/${itemId}`);
     assert.equal(status, 204);
@@ -185,8 +188,8 @@ describe("attachment lifecycle and orphan cleanup (FP-2B.2)", () => {
       [itemId],
     );
     assert.equal(attachments.rows.length, 0, "attachment metadata gone");
-    assert.ok(!existsSync(attachmentPath(itemId, upload1.body.id)), "first file gone");
-    assert.ok(!existsSync(attachmentPath(itemId, upload2.body.id)), "second file gone");
+    assert.ok(!existsSync(attachmentPath(itemId, upload1.json().id)), "first file gone");
+    assert.ok(!existsSync(attachmentPath(itemId, upload2.json().id)), "second file gone");
   });
 
   it("deleting an unknown item returns 404 without side effects", async () => {

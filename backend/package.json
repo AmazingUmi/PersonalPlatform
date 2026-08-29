@@ -12,6 +12,7 @@
     "test:integration": "node --import tsx --test --test-concurrency=1 \"test/integration/*.test.ts\""
   },
   "dependencies": {
+    "@fastify/multipart": "^10.1.1",
     "ajv": "^8.17.1",
     "fastify": "^5.2.1",
     "node-cron": "^4.6.0",

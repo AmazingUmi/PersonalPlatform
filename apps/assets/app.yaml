@@ -12,5 +12,5 @@ widgets:
 capabilities:
   database: true
   storage: true
-  scheduler: false
+  scheduler: true
   events: true

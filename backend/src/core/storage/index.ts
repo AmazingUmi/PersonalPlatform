@@ -4,6 +4,8 @@ export interface Storage {
   delete(key: string): Promise<void>;
   /** List object keys under `prefix`, relative to the storage root. */
   list(prefix?: string): Promise<string[]>;
+  /** Cheap existence check for reconciliation passes. */
+  exists(key: string): Promise<boolean>;
 }
 
 export class StorageError extends Error {

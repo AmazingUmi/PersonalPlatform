@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import multipart from "@fastify/multipart";
 import { AppError } from "../../core/api/errors.js";
 import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-registry/types.js";
+import type { JobHandle } from "../../core/scheduler/index.js";
 
 interface CategoryRow {
   id: string;
@@ -24,6 +26,32 @@ interface ItemRow {
   updated_at: string;
 }
 
+interface AttachmentRow {
+  id: string;
+  item_id: string;
+  filename: string;
+  content_type: string | null;
+  size: number;
+  storage_key: string;
+  created_at: string;
+}
+
+interface CleanupJobRow {
+  id: string;
+  kind: "delete_storage" | "drop_dangling_attachment";
+  storage_key: string | null;
+  attachment_id: string | null;
+  reason: string;
+  status: "pending" | "done" | "failed";
+  attempts: number;
+  last_error: string | null;
+}
+
+/** Hard upload cap, enforced server-side and mirrored in the frontend UI. */
+export const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
+
+const MAX_CLEANUP_ATTEMPTS = 5;
+
 const ITEM_COLUMNS = "id, category_id, name, description, quantity, acquired_at, target_location, created_at, updated_at";
 
 /** Explicit sort allowlist: request values never reach SQL as identifiers. */
@@ -40,6 +68,105 @@ const id = "assets";
 
 function isUniqueViolation(error: unknown): boolean {
   return (error as { code?: string }).code === "23505";
+}
+
+/**
+ * Storage/DB consistency compensation (FP-12.1): a failed cross-store step
+ * enqueues a retryable, idempotent cleanup job. Neither store can be "first"
+ * safely — the queue absorbs the mismatch until both sides agree again.
+ */
+async function enqueueCleanup(
+  ctx: AppContext,
+  job: Pick<CleanupJobRow, "kind" | "storage_key" | "attachment_id" | "reason">,
+): Promise<void> {
+  await ctx.database.query(
+    `INSERT INTO assets.cleanup_jobs (id, kind, storage_key, attachment_id, reason)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [randomUUID(), job.kind, job.storage_key, job.attachment_id, job.reason],
+  );
+}
+
+/**
+ * Work the queue once. Every action is idempotent: deleting an absent file or
+ * metadata row counts as success. Jobs that keep failing are marked `failed`
+ * after MAX_CLEANUP_ATTEMPTS and stay queryable for operators.
+ */
+async function processCleanupQueue(ctx: AppContext): Promise<{ processed: number; failed: number }> {
+  const { rows } = await ctx.database.query<CleanupJobRow>(
+    `SELECT id, kind, storage_key, attachment_id, reason, status, attempts, last_error
+     FROM assets.cleanup_jobs WHERE status = 'pending' ORDER BY created_at LIMIT 100`,
+  );
+  let failed = 0;
+  for (const job of rows) {
+    try {
+      if (job.kind === "delete_storage") {
+        if (job.storage_key === null) throw new Error("delete_storage job without storage_key");
+        await ctx.storage.delete(job.storage_key);
+      } else {
+        if (job.attachment_id === null) throw new Error("drop_dangling_attachment job without attachment_id");
+        await ctx.database.query("DELETE FROM assets.attachments WHERE id = $1", [job.attachment_id]);
+      }
+      await ctx.database.query(
+        "UPDATE assets.cleanup_jobs SET status = 'done', attempts = attempts + 1, last_error = NULL, updated_at = now() WHERE id = $1",
+        [job.id],
+      );
+    } catch (error) {
+      const attempts = job.attempts + 1;
+      const exhausted = attempts >= MAX_CLEANUP_ATTEMPTS;
+      await ctx.database.query(
+        `UPDATE assets.cleanup_jobs
+         SET attempts = $2, last_error = $3, status = $4, updated_at = now()
+         WHERE id = $1`,
+        [job.id, attempts, (error as Error).message, exhausted ? "failed" : "pending"],
+      );
+      if (exhausted) {
+        failed += 1;
+        ctx.log.error({ jobId: job.id, kind: job.kind, error }, "cleanup job permanently failed");
+      }
+    }
+  }
+  return { processed: rows.length, failed };
+}
+
+/**
+ * Full reconciliation: work the queue, then drop metadata whose backing file
+ * vanished (manual deletion, disk loss, crash between steps).
+ */
+async function reconcileStorage(ctx: AppContext): Promise<{
+  queue: { processed: number; failed: number };
+  danglingDropped: number;
+}> {
+  const queue = await processCleanupQueue(ctx);
+  const { rows } = await ctx.database.query<{ id: string; storage_key: string }>(
+    "SELECT id, storage_key FROM assets.attachments",
+  );
+  let danglingDropped = 0;
+  for (const attachment of rows) {
+    if (await ctx.storage.exists(attachment.storage_key)) continue;
+    await ctx.database.query("DELETE FROM assets.attachments WHERE id = $1", [attachment.id]);
+    danglingDropped += 1;
+    ctx.log.warn({ attachmentId: attachment.id }, "dropped attachment metadata with missing file");
+  }
+  return { queue, danglingDropped };
+}
+
+/** Enqueue and immediately try to drain: most compensations succeed inline. */
+async function compensate(
+  ctx: AppContext,
+  job: Parameters<typeof enqueueCleanup>[1],
+): Promise<void> {
+  await enqueueCleanup(ctx, job);
+  await processCleanupQueue(ctx).catch((error: unknown) => {
+    ctx.log.warn({ error, kind: job.kind }, "inline cleanup deferred to scheduler");
+  });
+}
+
+/** Convert the multipart plugin's size abort into a stable API error. */
+function attachmentTooLarge(cause: unknown): never {
+  if ((cause as { code?: string }).code === "FST_REQ_FILE_TOO_LARGE") {
+    throw new AppError(413, "attachment_too_large", `attachment exceeds the ${ATTACHMENT_MAX_BYTES} byte limit`);
+  }
+  throw cause;
 }
 
 async function registerApi(ctx: AppContext): Promise<void> {
@@ -336,53 +463,106 @@ async function registerApi(ctx: AppContext): Promise<void> {
   );
 
   ctx.api.delete<{ Params: { id: string } }>("/items/:id", async (request, reply) => {
-    // Collect attachment storage keys first and remove the physical objects;
-    // only then drop the row (which cascades attachment metadata). Storage
-    // failures abort the request so no orphan files are left behind (FP-2B.2).
-    const attachments = await db.query<{ storage_key: string }>(
-      "SELECT storage_key FROM assets.attachments WHERE item_id = $1",
+    // Collect attachment metadata first, remove the physical objects, then
+    // drop the row. Storage failures abort with metadata intact. If the DB
+    // delete fails after files are gone, the dangling metadata rows are
+    // enqueued for compensation (FP-12.1).
+    const attachments = await db.query<AttachmentRow>(
+      "SELECT id, item_id, filename, content_type, size, storage_key, created_at FROM assets.attachments WHERE item_id = $1",
       [request.params.id],
     );
+    const deletedFiles: AttachmentRow[] = [];
     for (const row of attachments.rows) {
-      await ctx.storage.delete(row.storage_key);
+      try {
+        await ctx.storage.delete(row.storage_key);
+        deletedFiles.push(row);
+      } catch (error) {
+        // Files already removed above must not keep dangling metadata, but
+        // the row stays (the item delete aborted), so enqueue the drop.
+        for (const done of deletedFiles) {
+          await compensate(ctx, {
+            kind: "drop_dangling_attachment",
+            storage_key: null,
+            attachment_id: done.id,
+            reason: "item delete aborted mid-file-removal",
+          });
+        }
+        throw error;
+      }
     }
-    const result = await db.query("DELETE FROM assets.items WHERE id = $1", [request.params.id]);
-    if (result.rowCount === 0) throw new AppError(404, "not_found", "item not found");
+    try {
+      const result = await db.query("DELETE FROM assets.items WHERE id = $1", [request.params.id]);
+      if (result.rowCount === 0) throw new AppError(404, "not_found", "item not found");
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      // Files are gone but the row remains: queue metadata drops.
+      for (const done of deletedFiles) {
+        await compensate(ctx, {
+          kind: "drop_dangling_attachment",
+          storage_key: null,
+          attachment_id: done.id,
+          reason: "item row delete failed after storage removal",
+        });
+      }
+      throw error;
+    }
     return reply.code(204).send();
   });
 
-  ctx.api.post<{ Params: { id: string }; Body: { filename: string; contentType?: string; dataBase64: string } }>(
+  // Multipart upload (FP-12.2): one `file` part, server-enforced size cap.
+  await ctx.api.register(multipart, {
+    attachFieldsToBody: false,
+    limits: { fileSize: ATTACHMENT_MAX_BYTES, files: 1, fields: 0 },
+  });
+  ctx.api.post<{ Params: { id: string } }>(
     "/items/:id/attachments",
-    {
-      schema: {
-        body: {
-          type: "object",
-          required: ["filename", "dataBase64"],
-          additionalProperties: false,
-          properties: {
-            filename: { type: "string", minLength: 1, maxLength: 300 },
-            contentType: { type: "string", maxLength: 200 },
-            dataBase64: { type: "string" },
-          },
-        },
-      },
-    },
     async (request, reply) => {
       const item = await db.query<ItemRow>("SELECT id FROM assets.items WHERE id = $1", [request.params.id]);
       if (!item.rows[0]) throw new AppError(404, "not_found", "item not found");
 
-      const data = Buffer.from(request.body.dataBase64, "base64");
+      // The plugin may abort an oversized part while opening or draining it.
+      const file = await request.file().catch(attachmentTooLarge);
+      if (!file) {
+        throw new AppError(400, "validation_error", "expected a multipart/form-data upload with a 'file' part");
+      }
+      if (file.fieldname !== "file") {
+        throw new AppError(400, "validation_error", `unexpected part '${file.fieldname}'; use field name 'file'`);
+      }
+      const data = await file.toBuffer().catch(attachmentTooLarge);
+      if (file.file.truncated || data.length > ATTACHMENT_MAX_BYTES) {
+        throw new AppError(
+          413,
+          "attachment_too_large",
+          `attachment exceeds the ${ATTACHMENT_MAX_BYTES} byte limit`,
+        );
+      }
+      const filename = (file.filename ?? "attachment").slice(0, 300);
+      if (filename.length === 0) {
+        throw new AppError(400, "validation_error", "file part must carry a filename");
+      }
+
       const attachmentId = randomUUID();
       const storageKey = `attachments/${request.params.id}/${attachmentId}`;
       await ctx.storage.save(storageKey, data);
-
-      const { rows } = await db.query(
-        `INSERT INTO assets.attachments (id, item_id, filename, content_type, size, storage_key)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         RETURNING id, item_id, filename, content_type, size, created_at`,
-        [attachmentId, request.params.id, request.body.filename, request.body.contentType ?? null, data.length, storageKey],
-      );
-      return reply.code(201).send(rows[0]);
+      try {
+        const { rows } = await db.query(
+          `INSERT INTO assets.attachments (id, item_id, filename, content_type, size, storage_key)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           RETURNING id, item_id, filename, content_type, size, created_at`,
+          [attachmentId, request.params.id, filename, file.mimetype || null, data.length, storageKey],
+        );
+        return reply.code(201).send(rows[0]);
+      } catch (error) {
+        // DB failed after the file landed: compensate so no orphan remains
+        // (enqueued + inline best-effort, hourly scheduler as backstop).
+        await compensate(ctx, {
+          kind: "delete_storage",
+          storage_key: storageKey,
+          attachment_id: null,
+          reason: "attachment metadata insert failed after storage save",
+        });
+        throw error;
+      }
     },
   );
 
@@ -411,18 +591,29 @@ async function registerApi(ctx: AppContext): Promise<void> {
     },
   );
 
-  // Delete one attachment: storage object first, metadata second, so a failure
-  // never leaves an orphaned file behind (FP-2B.2).
+  // Delete one attachment: storage object first, metadata second. If the DB
+  // delete fails after the file is gone, the dangling row is queued for
+  // compensation instead of silently pointing at nothing (FP-12.1).
   ctx.api.delete<{ Params: { id: string; attachmentId: string } }>(
     "/items/:id/attachments/:attachmentId",
     async (request, reply) => {
-      const { rows } = await db.query<{ storage_key: string }>(
-        "SELECT storage_key FROM assets.attachments WHERE id = $1 AND item_id = $2",
+      const { rows } = await db.query<{ id: string; storage_key: string }>(
+        "SELECT id, storage_key FROM assets.attachments WHERE id = $1 AND item_id = $2",
         [request.params.attachmentId, request.params.id],
       );
       if (!rows[0]) throw new AppError(404, "not_found", "attachment not found");
       await ctx.storage.delete(rows[0].storage_key);
-      await db.query("DELETE FROM assets.attachments WHERE id = $1", [request.params.attachmentId]);
+      try {
+        await db.query("DELETE FROM assets.attachments WHERE id = $1", [request.params.attachmentId]);
+      } catch (error) {
+        await compensate(ctx, {
+          kind: "drop_dangling_attachment",
+          storage_key: null,
+          attachment_id: rows[0].id,
+          reason: "attachment row delete failed after storage removal",
+        });
+        throw error;
+      }
       return reply.code(204).send();
     },
   );
@@ -437,6 +628,33 @@ async function registerApi(ctx: AppContext): Promise<void> {
       categories: Number(categories.rows[0]?.count ?? 0),
     };
   });
+
+  // Operator surface for the consistency machinery: run reconciliation on
+  // demand and observe the queue (also used by integration tests).
+  ctx.api.post("/maintenance/reconcile", async () => {
+    return reconcileStorage(ctx);
+  });
+  ctx.api.get("/maintenance/cleanup-jobs", async () => {
+    const { rows } = await db.query<CleanupJobRow>(
+      `SELECT id, kind, storage_key, attachment_id, reason, status, attempts, last_error, created_at, updated_at
+       FROM assets.cleanup_jobs ORDER BY created_at DESC LIMIT 100`,
+    );
+    return { items: rows };
+  });
+}
+
+async function registerJobs(ctx: AppContext): Promise<JobHandle[]> {
+  const reconcile = async () => {
+    const result = await reconcileStorage(ctx);
+    if (result.queue.processed > 0 || result.danglingDropped > 0) {
+      ctx.log.info(result, "storage reconciliation ran");
+    }
+  };
+  return [
+    ctx.scheduler.register({ id: "assets.storage_reconcile", schedule: { cron: "0 * * * *", timezone: ctx.time.timezone() }, run: reconcile }),
+    // One sweep shortly after boot catches anything left by a crash.
+    ctx.scheduler.register({ id: "assets.storage_reconcile_boot", schedule: { onceAfterMs: 1_000 }, run: reconcile }),
+  ];
 }
 
 async function healthcheck(ctx: AppContext): Promise<AppHealth> {
@@ -444,5 +662,5 @@ async function healthcheck(ctx: AppContext): Promise<AppHealth> {
   return { status: "ok", checks: { database: { status: "ok" } } };
 }
 
-const app: BackendAppModule = { id, registerApi, healthcheck };
+const app: BackendAppModule = { id, registerApi, registerJobs, healthcheck };
 export default app;

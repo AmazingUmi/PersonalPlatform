@@ -88,6 +88,17 @@ export class LocalStorageDriver implements Storage {
     return results.sort();
   }
 
+  async exists(key: string): Promise<boolean> {
+    try {
+      const fullPath = this.resolveKey(key);
+      await this.assertWithinRoot(fullPath);
+      const info = await stat(fullPath);
+      return info.isFile();
+    } catch {
+      return false;
+    }
+  }
+
   private async walk(dir: string, results: string[]): Promise<void> {
     let entries;
     try {
