@@ -2,7 +2,11 @@ import pg from "pg";
 import type { PoolClient, QueryResult, QueryResultRow } from "pg";
 import type { Logger } from "../logging/index.js";
 
-const { Pool } = pg;
+const { Pool, types } = pg;
+
+// DATE columns must cross the API as plain YYYY-MM-DD strings; pg's default
+// Date-object parsing shifts the calendar day depending on the server timezone.
+types.setTypeParser(1082, (value: string) => value);
 
 export interface DatabaseContext {
   query<R extends QueryResultRow = QueryResultRow>(

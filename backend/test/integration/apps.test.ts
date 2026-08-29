@@ -37,7 +37,9 @@ CREATE TABLE attachments (id uuid PRIMARY KEY, item_id uuid NOT NULL REFERENCES 
 
 const TASKS_SQL = `CREATE TABLE tasks (id uuid PRIMARY KEY, title text NOT NULL, description text, status text NOT NULL DEFAULT 'todo', due_at timestamptz, completed_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now());`;
 
-const MINI_GAME_SQL = `CREATE TABLE saves (id text PRIMARY KEY, score integer NOT NULL DEFAULT 0, board jsonb NOT NULL DEFAULT '[]'::jsonb, updated_at timestamptz NOT NULL DEFAULT now());`;
+const MINI_GAME_SQL = `CREATE TABLE saves (id text PRIMARY KEY, score integer NOT NULL DEFAULT 0, board jsonb NOT NULL DEFAULT '[]'::jsonb, updated_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE saves ADD COLUMN high_score integer NOT NULL DEFAULT 0;
+ALTER TABLE saves ADD COLUMN revision integer NOT NULL DEFAULT 0;`;
 
 interface CompletedPayload {
   id: string;
@@ -152,7 +154,7 @@ describe("assets app API", () => {
     const categories = await platform.app.inject({ method: "GET", url: "/api/apps/assets/categories" });
     const electronicsId = categories.json().items.find((c: { name: string }) => c.name === "Electronics").id as string;
 
-    const acquiredAt = new Date("2026-01-15T10:00:00.000Z").toISOString();
+    const acquiredAt = "2026-01-15";
     const created = await platform.app.inject({
       method: "POST",
       url: "/api/apps/assets/items",
@@ -261,7 +263,7 @@ describe("assets app API", () => {
     const itemId = created.json().id as string;
 
     const quantityUpdate = await platform.app.inject({
-      method: "PUT",
+      method: "PATCH",
       url: `/api/apps/assets/items/${itemId}`,
       payload: { quantity: 3 },
     });
@@ -270,7 +272,7 @@ describe("assets app API", () => {
     assert.equal(quantityUpdate.json().name, "Monitor", "untouched fields are preserved");
 
     const nameUpdate = await platform.app.inject({
-      method: "PUT",
+      method: "PATCH",
       url: `/api/apps/assets/items/${itemId}`,
       payload: { name: "Ultra Monitor" },
     });
@@ -279,7 +281,7 @@ describe("assets app API", () => {
     assert.equal(nameUpdate.json().quantity, 3);
 
     const missing = await platform.app.inject({
-      method: "PUT",
+      method: "PATCH",
       url: "/api/apps/assets/items/00000000-0000-0000-0000-000000000000",
       payload: { name: "Ghost" },
     });
@@ -557,7 +559,7 @@ describe("mini_game app API", () => {
     assert.deepEqual(empty.json(), { save: null });
   });
 
-  it("saves, loads and overwrites a board", async () => {
+  it("saves, loads and overwrites a board with monotonic revisions", async () => {
     const board = [
       [2, 4, 0, 0],
       [8, 16, 0, 0],
@@ -567,10 +569,12 @@ describe("mini_game app API", () => {
     const saved = await platform.app.inject({
       method: "PUT",
       url: "/api/apps/mini_game/saves",
-      payload: { score: 128, board },
+      payload: { score: 128, board, revision: 1 },
     });
     assert.equal(saved.statusCode, 200);
-    assert.equal(saved.json().score, 128);
+    assert.equal(saved.json().accepted, true);
+    assert.equal(saved.json().save.score, 128);
+    assert.equal(saved.json().save.highScore, 128);
 
     const loaded = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves" });
     assert.equal(loaded.statusCode, 200);
@@ -589,10 +593,11 @@ describe("mini_game app API", () => {
     const upgraded = await platform.app.inject({
       method: "PUT",
       url: "/api/apps/mini_game/saves",
-      payload: { score: 512, board: higherBoard },
+      payload: { score: 512, board: higherBoard, revision: 2 },
     });
     assert.equal(upgraded.statusCode, 200);
-    assert.equal(upgraded.json().score, 512);
+    assert.equal(upgraded.json().accepted, true);
+    assert.equal(upgraded.json().save.score, 512);
 
     const reloaded = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves" });
     assert.equal(reloaded.json().save.score, 512);
@@ -600,6 +605,15 @@ describe("mini_game app API", () => {
 
     const newSummary = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/summary" });
     assert.equal(newSummary.json().highScore, 512);
+
+    // A reset run (New Game) never lowers the historical high score.
+    const reset = await platform.app.inject({
+      method: "PUT",
+      url: "/api/apps/mini_game/saves",
+      payload: { score: 0, board, revision: 3 },
+    });
+    assert.equal(reset.json().save.score, 0);
+    assert.equal(reset.json().save.highScore, 512);
   });
 
   it("rejects invalid save payloads", async () => {
@@ -614,7 +628,7 @@ describe("mini_game app API", () => {
     const missingBoard = await platform.app.inject({
       method: "PUT",
       url: "/api/apps/mini_game/saves",
-      payload: { score: 10 },
+      payload: { score: 10, revision: 1 },
     });
     assert.equal(missingBoard.statusCode, 400);
     assert.equal(missingBoard.json().error.code, "validation_error");
@@ -622,7 +636,7 @@ describe("mini_game app API", () => {
     const missingScore = await platform.app.inject({
       method: "PUT",
       url: "/api/apps/mini_game/saves",
-      payload: { board: [] },
+      payload: { board: [], revision: 1 },
     });
     assert.equal(missingScore.statusCode, 400);
     assert.equal(missingScore.json().error.code, "validation_error");
@@ -630,7 +644,7 @@ describe("mini_game app API", () => {
     const negativeScore = await platform.app.inject({
       method: "PUT",
       url: "/api/apps/mini_game/saves",
-      payload: { score: -5, board: [] },
+      payload: { score: -5, board: [], revision: 1 },
     });
     assert.equal(negativeScore.statusCode, 400);
     assert.equal(negativeScore.json().error.code, "validation_error");

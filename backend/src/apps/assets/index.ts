@@ -85,7 +85,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
             name: { type: "string", minLength: 1, maxLength: 300 },
             description: { type: "string" },
             quantity: { type: "integer", minimum: 0 },
-            acquiredAt: { type: "string", format: "date-time" },
+            acquiredAt: { type: "string", format: "date" },
             categoryId: { type: "string" },
           },
         },
@@ -118,43 +118,81 @@ async function registerApi(ctx: AppContext): Promise<void> {
     return rows[0];
   });
 
-  ctx.api.put<{ Params: { id: string }; Body: { name?: string; description?: string; quantity?: number; acquiredAt?: string; categoryId?: string } }>(
-    "/items/:id",
-    {
-      schema: {
-        body: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            name: { type: "string", minLength: 1 },
-            description: { type: "string" },
-            quantity: { type: "integer", minimum: 0 },
-            acquiredAt: { type: "string", format: "date-time" },
-            categoryId: { type: "string" },
-          },
-        },
+  // Partial update with real nullable semantics (FP-2B.1): a missing property
+  // leaves the column unchanged, an explicit null clears it, a value updates it.
+  const itemPatchSchema = {
+    body: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        name: { type: "string", minLength: 1, maxLength: 300 },
+        description: { type: ["string", "null"], maxLength: 5000 },
+        quantity: { type: "integer", minimum: 0 },
+        acquiredAt: { type: ["string", "null"], format: "date" },
+        categoryId: { type: ["string", "null"] },
       },
     },
+  } as const;
+
+  ctx.api.patch<{ Params: { id: string }; Body: Record<string, unknown> }>(
+    "/items/:id",
+    { schema: itemPatchSchema },
     async (request) => {
-      const b = request.body;
-      const { rows } = await db.query<ItemRow>(
-        `UPDATE assets.items SET
-           name = COALESCE($2, name),
-           description = COALESCE($3, description),
-           quantity = COALESCE($4, quantity),
-           acquired_at = COALESCE($5, acquired_at),
-           category_id = COALESCE($6, category_id),
-           updated_at = now()
-         WHERE id = $1
-         RETURNING id, category_id, name, description, quantity, acquired_at, created_at, updated_at`,
-        [request.params.id, b.name ?? null, b.description ?? null, b.quantity ?? null, b.acquiredAt ?? null, b.categoryId ?? null],
-      );
-      if (!rows[0]) throw new AppError(404, "not_found", "item not found");
-      return rows[0];
+      const body = request.body as Record<string, unknown>;
+      const columns: Array<[string, string]> = [
+        ["name", "name"],
+        ["description", "description"],
+        ["quantity", "quantity"],
+        ["acquiredAt", "acquired_at"],
+        ["categoryId", "category_id"],
+      ];
+      const sets: string[] = [];
+      const params: unknown[] = [request.params.id];
+      for (const [key, column] of columns) {
+        if (!(key in body)) continue;
+        params.push(body[key]);
+        sets.push(`${column} = $${params.length}`);
+      }
+      if (sets.length === 0) {
+        const current = await db.query<ItemRow>(
+          "SELECT id, category_id, name, description, quantity, acquired_at, created_at, updated_at FROM assets.items WHERE id = $1",
+          [request.params.id],
+        );
+        if (!current.rows[0]) throw new AppError(404, "not_found", "item not found");
+        return current.rows[0];
+      }
+      sets.push("updated_at = now()");
+
+      let rows: { rows: ItemRow[] };
+      try {
+        rows = await db.query<ItemRow>(
+          `UPDATE assets.items SET ${sets.join(", ")}
+           WHERE id = $1
+           RETURNING id, category_id, name, description, quantity, acquired_at, created_at, updated_at`,
+          params,
+        );
+      } catch (error) {
+        if ((error as { code?: string }).code === "23503") {
+          throw new AppError(422, "invalid_reference", "categoryId does not reference an existing category");
+        }
+        throw error;
+      }
+      if (!rows.rows[0]) throw new AppError(404, "not_found", "item not found");
+      return rows.rows[0];
     },
   );
 
   ctx.api.delete<{ Params: { id: string } }>("/items/:id", async (request, reply) => {
+    // Collect attachment storage keys first and remove the physical objects;
+    // only then drop the row (which cascades attachment metadata). Storage
+    // failures abort the request so no orphan files are left behind (FP-2B.2).
+    const attachments = await db.query<{ storage_key: string }>(
+      "SELECT storage_key FROM assets.attachments WHERE item_id = $1",
+      [request.params.id],
+    );
+    for (const row of attachments.rows) {
+      await ctx.storage.delete(row.storage_key);
+    }
     const result = await db.query("DELETE FROM assets.items WHERE id = $1", [request.params.id]);
     if (result.rowCount === 0) throw new AppError(404, "not_found", "item not found");
     return reply.code(204).send();
@@ -217,6 +255,22 @@ async function registerApi(ctx: AppContext): Promise<void> {
         .type(rows[0].content_type ?? "application/octet-stream")
         .header("content-disposition", `inline; filename="${safeFilename}"`)
         .send(data);
+    },
+  );
+
+  // Delete one attachment: storage object first, metadata second, so a failure
+  // never leaves an orphaned file behind (FP-2B.2).
+  ctx.api.delete<{ Params: { id: string; attachmentId: string } }>(
+    "/items/:id/attachments/:attachmentId",
+    async (request, reply) => {
+      const { rows } = await db.query<{ storage_key: string }>(
+        "SELECT storage_key FROM assets.attachments WHERE id = $1 AND item_id = $2",
+        [request.params.attachmentId, request.params.id],
+      );
+      if (!rows[0]) throw new AppError(404, "not_found", "attachment not found");
+      await ctx.storage.delete(rows[0].storage_key);
+      await db.query("DELETE FROM assets.attachments WHERE id = $1", [request.params.attachmentId]);
+      return reply.code(204).send();
     },
   );
 

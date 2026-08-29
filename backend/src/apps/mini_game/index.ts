@@ -4,7 +4,9 @@ import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-reg
 interface SaveRow {
   id: string;
   score: number;
+  high_score: number;
   board: unknown;
+  revision: number;
   updated_at: string;
 }
 
@@ -12,66 +14,111 @@ const SAVE_ID = "current";
 
 const id = "mini_game";
 
+function toSave(row: SaveRow) {
+  return {
+    id: row.id,
+    score: row.score,
+    highScore: row.high_score,
+    board: row.board,
+    revision: row.revision,
+    updatedAt: row.updated_at,
+  };
+}
+
 async function registerApi(ctx: AppContext): Promise<void> {
   const db = ctx.database;
 
   ctx.api.get("/saves", async () => {
     const { rows } = await db.query<SaveRow>(
-      "SELECT id, score, board, updated_at FROM mini_game.saves WHERE id = $1",
+      "SELECT id, score, high_score, board, revision, updated_at FROM mini_game.saves WHERE id = $1",
       [SAVE_ID],
     );
     if (!rows[0]) return { save: null };
-    return { save: rows[0] };
+    return { save: toSave(rows[0]) };
   });
 
-  ctx.api.put<{ Body: { score: number; board: unknown } }>(
+  ctx.api.put<{ Body: { score: number; board: unknown; revision: number } }>(
     "/saves",
     {
       schema: {
         body: {
           type: "object",
-          required: ["score", "board"],
+          required: ["score", "board", "revision"],
           additionalProperties: false,
           properties: {
             score: { type: "integer", minimum: 0 },
             board: { type: "array" },
+            revision: { type: "integer", minimum: 0 },
           },
         },
       },
     },
     async (request) => {
-      const previous = await db.query<SaveRow>(
-        "SELECT score FROM mini_game.saves WHERE id = $1",
-        [SAVE_ID],
-      );
-      const prevScore = previous.rows[0]?.score ?? 0;
+      const body = request.body;
 
-      const { rows } = await db.query<SaveRow>(
-        `INSERT INTO mini_game.saves (id, score, board, updated_at)
-         VALUES ($1, $2, $3::jsonb, now())
-         ON CONFLICT (id) DO UPDATE
-           SET score = EXCLUDED.score, board = EXCLUDED.board, updated_at = now()
-         RETURNING id, score, board, updated_at`,
-        [SAVE_ID, request.body.score, JSON.stringify(request.body.board)],
-      );
+      // Revision-guarded upsert: a stale write (server already holds a newer
+      // revision) is rejected so rapid overlapping saves can never roll the
+      // board back to an older state (FP-2A.4). The row lock makes the
+      // previous-high-score read and the upsert atomic for concurrent moves.
+      const { row, prevHigh, existed } = await db.withTransaction(async (tx) => {
+        const prev = await tx.query<{ high_score: number }>(
+          "SELECT high_score FROM mini_game.saves WHERE id = $1 FOR UPDATE",
+          [SAVE_ID],
+        );
+        const { rows } = await tx.query<SaveRow>(
+          `INSERT INTO mini_game.saves (id, score, high_score, board, revision, updated_at)
+           VALUES ($1, $2, $2, $3::jsonb, $4, now())
+           ON CONFLICT (id) DO UPDATE
+             SET score = EXCLUDED.score,
+                 high_score = GREATEST(mini_game.saves.high_score, EXCLUDED.score),
+                 board = EXCLUDED.board,
+                 revision = EXCLUDED.revision,
+                 updated_at = now()
+           WHERE mini_game.saves.revision < EXCLUDED.revision
+           RETURNING id, score, high_score, board, revision, updated_at`,
+          [SAVE_ID, body.score, JSON.stringify(body.board), body.revision],
+        );
+        return {
+          row: rows[0],
+          prevHigh: prev.rows[0]?.high_score,
+          existed: prev.rows.length > 0,
+        };
+      });
 
-      if (request.body.score > prevScore && prevScore > 0) {
+      const accepted = row !== undefined;
+      // Either the write was stale or it repeated the current revision
+      // (idempotent no-op); return the authoritative server state.
+      if (!row) {
+        const existing = await db.query<SaveRow>(
+          "SELECT id, score, high_score, board, revision, updated_at FROM mini_game.saves WHERE id = $1",
+          [SAVE_ID],
+        );
+        if (!existing.rows[0]) throw new AppError(500, "save_failed", "save state could not be read back");
+        return { save: toSave(existing.rows[0]), accepted: false };
+      }
+
+      // The historical high score is monotonic: resetting the run (New Game)
+      // never lowers it. Publish only when the persisted record was actually
+      // exceeded (a first-ever score has no record to beat).
+      if (existed && body.score > (prevHigh ?? 0)) {
         ctx.events.publish(
           "mini_game.highscore.beaten.v1",
-          { score: request.body.score, previous: prevScore },
+          { score: row.high_score, previous: prevHigh },
           "mini_game",
         );
       }
-      return rows[0];
+      return { save: toSave(row), accepted };
     },
   );
 
   ctx.api.get("/summary", async () => {
-    const { rows } = await db.query<SaveRow>(
-      "SELECT score FROM mini_game.saves WHERE id = $1",
+    // The dashboard widget must show the HISTORICAL high score, not the
+    // current run's score (FP-2A.3).
+    const { rows } = await db.query<{ high_score: number }>(
+      "SELECT high_score FROM mini_game.saves WHERE id = $1",
       [SAVE_ID],
     );
-    return { highScore: rows[0]?.score ?? 0 };
+    return { highScore: rows[0]?.high_score ?? 0 };
   });
 }
 

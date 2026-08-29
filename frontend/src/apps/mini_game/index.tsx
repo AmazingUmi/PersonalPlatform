@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../shared/api";
 import type { FrontendAppModule } from "../../shared/appTypes";
 import { PixelBadge } from "../../shared/ui/PixelBadge";
@@ -7,105 +7,57 @@ import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { LoadingState } from "../../shared/ui/LoadingState";
 import { useAsync } from "../../shared/useAsync";
 import logo from "./assets/logo.svg";
+import {
+  canMove,
+  emptyBoard,
+  keyToDirection,
+  moveBoard,
+  spawnTile,
+  type Board,
+} from "./logic";
 
-type Board = number[][];
-type Direction = "left" | "right" | "up" | "down";
-
-const SIZE = 4;
-
-function emptyBoard(): Board {
-  return Array.from({ length: SIZE }, () => Array.from({ length: SIZE }, () => 0));
-}
-
-function slideLine(line: number[]): { line: number[]; gained: number } {
-  const values = line.filter((v) => v !== 0);
-  const merged: number[] = [];
-  let gained = 0;
-  for (let i = 0; i < values.length; i += 1) {
-    if (values[i] === values[i + 1]) {
-      const value = (values[i] ?? 0) * 2;
-      merged.push(value);
-      gained += value;
-      i += 1;
-    } else {
-      merged.push(values[i] ?? 0);
-    }
-  }
-  while (merged.length < SIZE) merged.push(0);
-  return { line: merged, gained };
-}
-
-function rotate(board: Board): Board {
-  return board[0]!.map((_, col) => board.map((row) => row[col]!).reverse());
-}
-
-function moveBoard(board: Board, direction: Direction): { board: Board; gained: number; moved: boolean } {
-  let work = board.map((row) => [...row]);
-  if (direction === "right") work = work.map((row) => [...row].reverse());
-  if (direction === "up") work = rotate(work);
-  if (direction === "down") work = rotate(rotate(rotate(work)));
-
-  let gained = 0;
-  let moved = false;
-  const slid = work.map((row) => {
-    const result = slideLine(row);
-    gained += result.gained;
-    if (result.line.join(",") !== row.join(",")) moved = true;
-    return result.line;
-  });
-
-  let out = slid;
-  if (direction === "right") out = out.map((row) => [...row].reverse());
-  if (direction === "up") out = rotate(rotate(rotate(out)));
-  if (direction === "down") out = rotate(out);
-
-  return { board: out, gained, moved };
-}
-
-function spawnTile(board: Board): Board {
-  const empty: Array<[number, number]> = [];
-  board.forEach((row, r) => row.forEach((value, c) => value === 0 && empty.push([r, c])));
-  if (empty.length === 0) return board;
-  const [r, c] = empty[Math.floor(Math.random() * empty.length)]!;
-  const next = board.map((row) => [...row]);
-  next[r]![c] = Math.random() < 0.9 ? 2 : 4;
-  return next;
-}
-
-function canMove(board: Board): boolean {
-  if (board.some((row) => row.some((value) => value === 0))) return true;
-  for (let r = 0; r < SIZE; r += 1) {
-    for (let c = 0; c < SIZE; c += 1) {
-      const value = board[r]![c]!;
-      if (r + 1 < SIZE && board[r + 1]![c] === value) return true;
-      if (c + 1 < SIZE && board[r]![c + 1] === value) return true;
-    }
-  }
-  return false;
+interface SaveState {
+  score: number;
+  highScore: number;
+  board: Board;
+  revision: number;
 }
 
 function Game2048() {
   const [board, setBoard] = useState<Board>(() => spawnTile(spawnTile(emptyBoard())));
   const [score, setScore] = useState(0);
+  const [highScore, setHighScore] = useState(0);
   const [over, setOver] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  // Monotonic local revision: every accepted local state bumps it, and the
+  // backend rejects writes whose revision is not newer, so a slow older save
+  // can never overwrite a newer board (FP-2A.4).
+  const revision = useRef(0);
 
   const loadSave = useCallback(async () => {
-    const body = await api<{ save: { score: number; board: Board } | null }>("/api/apps/mini_game/saves");
-    if (body.save && body.save.board.length === SIZE) {
+    const body = await api<{ save: SaveState | null }>("/api/apps/mini_game/saves");
+    if (body.save && body.save.board.length === 4) {
       setBoard(body.save.board);
       setScore(body.save.score);
+      setHighScore(body.save.highScore);
+      revision.current = body.save.revision;
     }
   }, []);
 
   const save = useCallback(async (nextBoard: Board, nextScore: number) => {
     setSaveState("saving");
+    const nextRevision = revision.current + 1;
+    revision.current = nextRevision;
     try {
-      await api("/api/apps/mini_game/saves", {
+      const body = await api<{ save: SaveState; accepted: boolean }>("/api/apps/mini_game/saves", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ score: nextScore, board: nextBoard }),
+        body: JSON.stringify({ score: nextScore, board: nextBoard, revision: nextRevision }),
       });
+      setHighScore(body.save.highScore);
+      // A rejected write means the server already holds a newer revision; keep
+      // the local (newer) state and continue numbering above the server.
+      if (!body.accepted) revision.current = Math.max(revision.current, body.save.revision);
       setSaveState("saved");
     } catch {
       setSaveState("error");
@@ -118,13 +70,7 @@ function Game2048() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      const keyMap: Record<string, Direction> = {
-        ArrowLeft: "left",
-        ArrowRight: "right",
-        ArrowUp: "up",
-        ArrowDown: "down",
-      };
-      const direction = keyMap[event.key];
+      const direction = keyToDirection(event.key);
       if (!direction || over) return;
       event.preventDefault();
       const result = moveBoard(board, direction);
@@ -133,6 +79,7 @@ function Game2048() {
       const nextScore = score + result.gained;
       setBoard(nextBoard);
       setScore(nextScore);
+      setHighScore((current) => Math.max(current, nextScore));
       setOver(!canMove(nextBoard));
       void save(nextBoard, nextScore);
     };
@@ -145,6 +92,7 @@ function Game2048() {
     setBoard(fresh);
     setScore(0);
     setOver(false);
+    // New Game resets the run only; the historical high score stays.
     void save(fresh, 0);
   }
 
@@ -160,6 +108,10 @@ function Game2048() {
         <div className="game__score" aria-label="Score">
           <span className="game__score-label">Score</span>
           <span className="game__score-value">{score}</span>
+        </div>
+        <div className="game__score" aria-label="High score">
+          <span className="game__score-label">Best</span>
+          <span className="game__score-value">{highScore}</span>
         </div>
         <PixelButton onClick={newGame}>New Game</PixelButton>
         <PixelBadge

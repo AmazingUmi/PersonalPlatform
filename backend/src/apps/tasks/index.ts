@@ -97,7 +97,16 @@ async function registerApi(ctx: AppContext): Promise<void> {
       const prev = await db.query<TaskRow>("SELECT status, title FROM tasks.tasks WHERE id = $1", [request.params.id]);
       if (!prev.rows[0]) throw new AppError(404, "not_found", "task not found");
 
-      const completedAt = b.status === "done" ? "now()" : b.status === "todo" ? "NULL" : "completed_at";
+      // Completion timestamp transitions (FP-2C.1):
+      //   todo -> done  => completed_at = now()
+      //   done -> done  => completed_at unchanged (no refresh on repeat)
+      //   done -> todo  => completed_at = null
+      const completedAt =
+        b.status === "done" && prev.rows[0].status !== "done"
+          ? "now()"
+          : b.status === "todo"
+            ? "NULL"
+            : "completed_at";
       const { rows } = await db.query<TaskRow>(
         `UPDATE tasks.tasks SET
            title = COALESCE($2, title),
