@@ -13,6 +13,8 @@ const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
 const assetsMigrations = [
   readFileSync(join(repoRoot, "apps/assets/migrations/20260101000001-init.sql"), "utf8"),
   readFileSync(join(repoRoot, "apps/assets/migrations/20260829000002-target-location.sql"), "utf8"),
+  readFileSync(join(repoRoot, "apps/assets/migrations/20260829000003-acquired-at-index.sql"), "utf8"),
+  readFileSync(join(repoRoot, "apps/assets/migrations/20260829000004-seed-default-categories.sql"), "utf8"),
 ];
 
 let db: Database;
@@ -369,5 +371,55 @@ describe("category CRUD (FP-3.2)", () => {
 
     const unknown = await json("DELETE", "/api/apps/assets/categories/55555555-5555-5555-5555-555555555555");
     assert.equal(unknown.status, 404);
+  });
+});
+
+describe("preset categories and category-name search", () => {
+  it("ships preset categories out of the box", async () => {
+    const { status, body } = await json<{ items: Array<{ name: string }> }>("GET", "/api/apps/assets/categories");
+    assert.equal(status, 200);
+    const names = body.items.map((category) => category.name);
+    for (const expected of ["电子设备", "工具", "服饰配件", "书籍资料", "文件证件", "其他"]) {
+      assert.ok(names.includes(expected), `preset category "${expected}" seeded`);
+    }
+  });
+
+  it("search q matches the assigned category name", async () => {
+    const categories = await json<{ items: Array<{ id: string; name: string }> }>("GET", "/api/apps/assets/categories");
+    const electronics = categories.body.items.find((category) => category.name === "电子设备")!;
+    await json("POST", "/api/apps/assets/items", { name: "Noise-Cancelling Headphones", categoryId: electronics.id });
+
+    const byCategoryName = await json<{ items: Array<{ name: string }> }>(
+      "GET",
+      `/api/apps/assets/items?q=${encodeURIComponent("电子")}`,
+    );
+    assert.ok(
+      byCategoryName.body.items.some((item) => item.name === "Noise-Cancelling Headphones"),
+      "q matches the category name",
+    );
+
+    // The explicit category filter still works server-side.
+    const byFilter = await json<{ items: Array<{ name: string }> }>(
+      "GET",
+      `/api/apps/assets/items?categoryId=${electronics.id}`,
+    );
+    assert.deepEqual(byFilter.body.items.map((item) => item.name), ["Noise-Cancelling Headphones"]);
+  });
+
+  it("acquired date stays optional while intake time is automatic", async () => {
+    const created = await json<{ id: string; acquired_at: string | null; created_at: string }>(
+      "POST",
+      "/api/apps/assets/items",
+      { name: "No-Acquire Item" },
+    );
+    assert.equal(created.status, 201);
+    assert.equal(created.body.acquired_at, null, "acquired time optional");
+    assert.ok(created.body.created_at, "intake time auto-populated");
+
+    const listed = await json<{ items: Array<{ name: string }> }>(
+      "GET",
+      "/api/apps/assets/items?sortBy=createdAt&order=desc",
+    );
+    assert.equal(listed.body.items[0]!.name, "No-Acquire Item");
   });
 });

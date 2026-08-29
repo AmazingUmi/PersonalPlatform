@@ -203,7 +203,7 @@ function ItemEditor({
           </div>
           <div className="px-form__grid">
             <label className="px-form__row">
-              <span className="px-form__label">Acquired</span>
+              <span className="px-form__label">Acquired date</span>
               <PixelInput
                 type="date"
                 value={form.acquiredAt}
@@ -221,6 +221,10 @@ function ItemEditor({
               />
             </label>
           </div>
+          <p className="px-form__hint">
+            Acquired date is optional — fill it in when you got the item (purchase, gift, …).
+            The intake time is recorded automatically.
+          </p>
           {save.error ? (
             <StatusMessage tone="error">
               <p>{save.error}</p>
@@ -375,7 +379,7 @@ function AssetsPage() {
           <div className="assets-search">
             <PixelIcon name="search" />
             <PixelInput
-              placeholder="Search items…"
+              placeholder="Search name or category…"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
               aria-label="Search items"
@@ -759,7 +763,7 @@ function AssetDetailPage() {
             <dd>{data.acquired_at ?? "—"}</dd>
           </div>
           <div>
-            <dt>Added</dt>
+            <dt>Added (auto)</dt>
             <dd>{formatTimestamp(data.created_at)}</dd>
           </div>
           <div>

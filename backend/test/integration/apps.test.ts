@@ -149,9 +149,14 @@ describe("assets app API", () => {
 
     const list = await platform.app.inject({ method: "GET", url: "/api/apps/assets/categories" });
     assert.equal(list.statusCode, 200);
+    const categoryNames = list.json().items.map((c: { name: string }) => c.name) as string[];
+    // Preset categories are seeded by migration; user-created ones join them.
+    assert.ok(categoryNames.includes("Electronics"));
+    assert.ok(categoryNames.includes("Furniture"));
     assert.deepEqual(
-      list.json().items.map((c: { name: string }) => c.name),
-      ["Electronics", "Furniture"],
+      [...categoryNames].sort((a, b) => a.localeCompare(b)),
+      categoryNames,
+      "categories are listed in name order",
     );
   });
 

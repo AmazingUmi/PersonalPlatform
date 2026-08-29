@@ -54,9 +54,9 @@ test("assets: create, search and see the item", async ({ page }) => {
   await createItemViaDialog(page, name);
   await expect(page.getByRole("link", { name })).toBeVisible();
 
-  await page.getByPlaceholder("Search items…").fill(name);
+  await page.getByPlaceholder("Search name or category…").fill(name);
   await expect(page.getByRole("link", { name })).toBeVisible();
-  await page.getByPlaceholder("Search items…").fill("definitely-no-such-item-xyz");
+  await page.getByPlaceholder("Search name or category…").fill("definitely-no-such-item-xyz");
   await expect(page.getByRole("link", { name })).toHaveCount(0);
 });
 

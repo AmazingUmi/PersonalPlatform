@@ -139,7 +139,14 @@ async function registerApi(ctx: AppContext): Promise<void> {
       const params: unknown[] = [];
       if (query.q) {
         params.push(`%${query.q}%`);
-        conditions.push(`(name ILIKE $${params.length} OR description ILIKE $${params.length})`);
+        // Search matches item name, description, or the assigned category's
+        // name (own schema only).
+        conditions.push(
+          `(name ILIKE $${params.length} OR description ILIKE $${params.length} OR EXISTS (
+             SELECT 1 FROM assets.categories c
+             WHERE c.id = items.category_id AND c.name ILIKE $${params.length}
+           ))`,
+        );
       }
       if (query.categoryId) {
         params.push(query.categoryId);
