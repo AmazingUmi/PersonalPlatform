@@ -50,9 +50,11 @@ before(async () => {
 });
 
 after(async () => {
-  await platform.stop();
-  cleanup();
-  await db.close();
+  // Setup may have failed partway; teardown must never turn that into a
+  // secondary "cannot read properties of undefined" error.
+  if (platform) await platform.stop();
+  cleanup?.();
+  if (db) await db.close();
 });
 
 describe("items PATCH nullable semantics (FP-2B.1)", () => {

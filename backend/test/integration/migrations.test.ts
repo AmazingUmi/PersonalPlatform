@@ -20,7 +20,8 @@ before(async () => {
 });
 
 after(async () => {
-  await db.close();
+  // resetDatabase() may have failed; teardown must stay safe.
+  if (db) await db.close();
   rmSync(tmpRoot, { recursive: true, force: true });
 });
 

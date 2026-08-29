@@ -21,7 +21,8 @@ before(async () => {
 });
 
 after(async () => {
-  await db.close();
+  // resetDatabase() may have failed; teardown must stay safe.
+  if (db) await db.close();
 });
 
 function makeRegistry(manifestsDir: string, configEnabled: Record<string, boolean> = {}) {

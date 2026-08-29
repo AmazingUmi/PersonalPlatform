@@ -6,8 +6,12 @@ import { runMigrations } from "../../src/core/database/migrate.js";
 import type { BackendAppModule } from "../../src/core/app-registry/types.js";
 import type { Platform } from "../../src/core/platform.js";
 import { buildFixturePlatform } from "../helpers/platform.js";
-import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
+import { registerTestSchemas, resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 import { join } from "node:path";
+
+// This file's migrations create the "lifecyc" schema; registering it lets
+// resetDatabase() clean leftovers from a previous run of this same file.
+registerTestSchemas("lifecyc");
 
 const log = createLogger("fatal");
 let db: Database;
@@ -74,9 +78,11 @@ before(async () => {
 });
 
 after(async () => {
-  await platform.stop();
-  cleanup();
-  await db.close();
+  // Setup may have failed partway; teardown must never turn that into a
+  // secondary "cannot read properties of undefined" error.
+  if (platform) await platform.stop();
+  cleanup?.();
+  if (db) await db.close();
 });
 
 describe("app lifecycle end to end", () => {

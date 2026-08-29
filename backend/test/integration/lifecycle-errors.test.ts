@@ -9,7 +9,11 @@ import { appMigrationTargets } from "../../src/core/database/startup-migrations.
 import type { BackendAppModule } from "../../src/core/app-registry/types.js";
 import type { Platform } from "../../src/core/platform.js";
 import { buildFixturePlatform, prepareFixtureRoot } from "../helpers/platform.js";
-import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
+import { registerTestSchemas, resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
+
+// The migration-lifecycle suite below creates the "latecol" schema; registering
+// it lets resetDatabase() clean leftovers from a previous run of this file.
+registerTestSchemas("latecol");
 
 const log = createLogger("fatal");
 
@@ -106,9 +110,13 @@ describe("app migration lifecycle (FP-1.1)", () => {
   });
 
   after(async () => {
-    await fixture.platform.stop();
-    fixture.cleanup();
-    await db.close();
+    // Setup may have failed partway; teardown must never turn that into a
+    // secondary "cannot read properties of undefined" error.
+    if (fixture) {
+      await fixture.platform.stop();
+      fixture.cleanup();
+    }
+    if (db) await db.close();
   });
 
   it("applies migrations for a disabled installed app at startup", async () => {
@@ -191,9 +199,13 @@ describe("activation failure state consistency (FP-1.2)", () => {
   });
 
   after(async () => {
-    await fixture.platform.stop();
-    fixture.cleanup();
-    await db.close();
+    // Setup may have failed partway; teardown must never turn that into a
+    // secondary "cannot read properties of undefined" error.
+    if (fixture) {
+      await fixture.platform.stop();
+      fixture.cleanup();
+    }
+    if (db) await db.close();
   });
 
   async function readAppRow(id: string): Promise<{ enabled: boolean; status: string; error_message: string | null }> {
