@@ -33,3 +33,4 @@ frontend/test-results/
 frontend/playwright-report/
 htmlcov/
 coverage/
+test-results/

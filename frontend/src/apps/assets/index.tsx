@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../shared/api";
 import { useAppDisplayName } from "../../shared/PresentationContext";
+import { ACCENT_OPTIONS } from "../../shared/presentation";
 import type { FrontendAppModule } from "../../shared/appTypes";
 import { useDebouncedValue } from "../../shared/useDebouncedValue";
 import { useMutation } from "../../shared/useMutation";
@@ -19,6 +20,7 @@ import { useAsync } from "../../shared/useAsync";
 interface Category {
   id: string;
   name: string;
+  color: string | null;
 }
 
 interface Item {
@@ -70,6 +72,13 @@ function itemsQueryString(params: URLSearchParams): string {
   }
   const text = query.toString();
   return text ? `?${text}` : "";
+}
+
+/** Filter keys that count towards the collapsed Filters-button badge. */
+const ASSETS_FILTER_KEYS = ["q", "categoryId", "targetLocation", "acquiredAfter", "acquiredBefore", "createdAfter", "createdBefore"];
+
+function countActiveFilters(params: URLSearchParams, keys: string[]): number {
+  return keys.reduce((count, key) => (params.get(key) ? count + 1 : count), 0);
 }
 
 interface ItemEditorState {
@@ -244,7 +253,9 @@ function ItemEditor({
   );
 }
 
-function RenameCategoryDialog({
+/** Edit category dialog (FP: manageability): rename + presentation color.
+ * Empty color = back to the default look (sent as explicit null). */
+function EditCategoryDialog({
   category,
   onClose,
   onSaved,
@@ -254,39 +265,57 @@ function RenameCategoryDialog({
   onSaved: () => void;
 }) {
   const [name, setName] = useState(category.name);
-  const rename = useMutation(async () => {
+  const [color, setColor] = useState<string>(category.color ?? "");
+  const save = useMutation(async () => {
     await api(`/api/apps/assets/categories/${category.id}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: name.trim() }),
+      body: JSON.stringify({ name: name.trim(), color: color === "" ? null : color }),
     });
   });
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!name.trim() || rename.busy) return;
-    if (await rename.mutate()) onSaved();
+    if (!name.trim() || save.busy) return;
+    if (await save.mutate()) onSaved();
   };
 
   return (
     <div className="px-dialog-backdrop" role="presentation">
-      <PixelWindow title="Rename Category" icon="box" className="px-dialog px-dialog--form">
-        <form className="px-form" onSubmit={submit} aria-label="Rename category">
+      <PixelWindow title="Edit Category" icon="palette" className="px-dialog px-dialog--form">
+        <form className="px-form" onSubmit={submit} aria-label="Edit category">
           <label className="px-form__row">
             <span className="px-form__label">Name</span>
             <PixelInput value={name} onChange={(e) => setName(e.target.value)} aria-label="Category name" autoFocus />
           </label>
-          {rename.error ? (
+          <label className="px-form__row">
+            <span className="px-form__label">Color</span>
+            <select
+              className="px-select"
+              value={color}
+              onChange={(e) => setColor(e.target.value)}
+              aria-label="Category color"
+            >
+              <option value="">Default</option>
+              {ACCENT_OPTIONS.map((accent) => (
+                <option key={accent} value={accent}>
+                  {accent}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="px-cat-dot px-cat-dot--preview" data-accent={(color || category.color) ?? ""} aria-hidden="true" />
+          {save.error ? (
             <StatusMessage tone="error">
-              <p>{rename.error}</p>
+              <p>{save.error}</p>
             </StatusMessage>
           ) : null}
           <div className="px-dialog__actions">
-            <PixelButton variant="secondary" size="sm" onClick={onClose} disabled={rename.busy}>
+            <PixelButton variant="secondary" size="sm" onClick={onClose} disabled={save.busy}>
               Cancel
             </PixelButton>
-            <PixelButton type="submit" size="sm" disabled={!name.trim() || rename.busy}>
-              {rename.busy ? "Saving…" : "Rename"}
+            <PixelButton type="submit" size="sm" disabled={!name.trim() || save.busy}>
+              {save.busy ? "Saving…" : "Save"}
             </PixelButton>
           </div>
         </form>
@@ -300,8 +329,15 @@ function AssetsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [reloadKey, setReloadKey] = useState(0);
   const [editorFor, setEditorFor] = useState<Item | null | undefined>(undefined);
-  const [categoryRename, setCategoryRename] = useState<Category | null>(null);
+  const [categoryEdit, setCategoryEdit] = useState<Category | null>(null);
   const [categoryDelete, setCategoryDelete] = useState<Category | null>(null);
+  // The expanded category chip reveals its manage actions; one at a time.
+  const [openCategoryId, setOpenCategoryId] = useState<string | null>(null);
+  // Filters collapse into a header button; a deep link with active filters
+  // starts expanded.
+  const [filtersOpen, setFiltersOpen] = useState(
+    () => countActiveFilters(new URLSearchParams(window.location.search), ASSETS_FILTER_KEYS) > 0,
+  );
 
   const refresh = () => setReloadKey((key) => key + 1);
   const setParam = (key: string, value: string) => {
@@ -356,7 +392,13 @@ function AssetsPage() {
     await api(`/api/apps/assets/categories/${categoryDelete.id}`, { method: "DELETE" });
   });
 
+  const resetFilters = () => {
+    setSearchParams(new URLSearchParams(), { replace: true });
+    setSearchInput("");
+  };
+
   const allItems = items.data?.items ?? [];
+  const activeFilterCount = countActiveFilters(searchParams, ASSETS_FILTER_KEYS);
   const hasFilters = Boolean(itemsQueryString(searchParams));
   const categoryNames = new Map((categories.data?.items ?? []).map((c) => [c.id, c.name]));
   const countFor = (id: string | null) =>
@@ -368,13 +410,27 @@ function AssetsPage() {
         <h1 className="page-header__title">{displayName}</h1>
         <p className="page-header__subtitle">Personal inventory</p>
         <div className="page-header__actions">
+          <PixelButton
+            size="sm"
+            variant="secondary"
+            aria-expanded={filtersOpen}
+            onClick={() => setFiltersOpen((open) => !open)}
+          >
+            <PixelIcon name="search" /> Filters
+            {activeFilterCount > 0 ? <PixelBadge tone="warning">{activeFilterCount}</PixelBadge> : null}
+          </PixelButton>
           <PixelButton size="sm" onClick={() => setEditorFor(null)}>
             <PixelIcon name="plus" /> New Item
           </PixelButton>
         </div>
       </header>
 
-      <PixelWindow title="Filters" icon="search" className="assets-filters">
+      {filtersOpen ? (
+      <PixelWindow title="Filters" icon="search" className="assets-filters" actions={
+        <PixelButton variant="ghost" size="sm" onClick={resetFilters} disabled={activeFilterCount === 0}>
+          Reset
+        </PixelButton>
+      }>
         <div className="assets-filters__row">
           <div className="assets-search">
             <PixelIcon name="search" />
@@ -443,6 +499,8 @@ function AssetsPage() {
               aria-label="Added before"
             />
           </label>
+        </div>
+        <div className="assets-filters__row">
           <select
             className="px-select"
             value={sortBy}
@@ -464,8 +522,13 @@ function AssetsPage() {
             <PixelIcon name={order === "asc" ? "up" : "down"} />
             {order === "asc" ? "Asc" : "Desc"}
           </PixelButton>
+          <span className="assets-filters__spacer" />
+          <PixelButton size="sm" variant="secondary" onClick={() => setFiltersOpen(false)}>
+            Close
+          </PixelButton>
         </div>
       </PixelWindow>
+      ) : null}
 
       <section className="assets-section" aria-labelledby="assets-categories">
         <h2 id="assets-categories" className="section-title">
@@ -481,39 +544,56 @@ function AssetsPage() {
             <span>All</span>
             <span className="px-chip__count">{countFor(null)}</span>
           </button>
-          {(categories.data?.items ?? []).map((category) => (
-            <span key={category.id} className="px-chip-group">
-              <button
-                type="button"
-                className="px-chip"
-                aria-pressed={activeCategory === category.id}
-                onClick={() => setParam("categoryId", category.id)}
-              >
-                <span>{category.name}</span>
-                <span className="px-chip__count">{countFor(category.id)}</span>
-              </button>
-              <span className="px-chip__tools">
-                <PixelButton
-                  variant="ghost"
-                  size="sm"
-                  className="px-button--icon"
-                  aria-label={`Rename category ${category.name}`}
-                  onClick={() => setCategoryRename(category)}
+          {(categories.data?.items ?? []).map((category) => {
+            const open = openCategoryId === category.id;
+            return (
+              <span key={category.id} className="px-chip-group">
+                <button
+                  type="button"
+                  className={`px-chip${open ? " px-chip--open" : ""}`}
+                  aria-expanded={open}
+                  onClick={() => setOpenCategoryId(open ? null : category.id)}
                 >
-                  <PixelIcon name="edit" />
-                </PixelButton>
-                <PixelButton
-                  variant="ghost"
-                  size="sm"
-                  className="px-button--icon"
-                  aria-label={`Delete category ${category.name}`}
-                  onClick={() => setCategoryDelete(category)}
-                >
-                  <PixelIcon name="trash" />
-                </PixelButton>
+                  {category.color ? (
+                    <span className="px-cat-dot" data-accent={category.color} aria-hidden="true" />
+                  ) : null}
+                  <span>{category.name}</span>
+                  <span className="px-chip__count">{countFor(category.id)}</span>
+                </button>
+                {open ? (
+                  <span className="px-chip__tools">
+                    <PixelButton
+                      variant="ghost"
+                      size="sm"
+                      className="px-button--icon"
+                      aria-label={`Filter by category ${category.name}`}
+                      onClick={() => setParam("categoryId", activeCategory === category.id ? "" : category.id)}
+                    >
+                      <PixelIcon name="search" />
+                    </PixelButton>
+                    <PixelButton
+                      variant="ghost"
+                      size="sm"
+                      className="px-button--icon"
+                      aria-label={`Rename category ${category.name}`}
+                      onClick={() => setCategoryEdit(category)}
+                    >
+                      <PixelIcon name="edit" />
+                    </PixelButton>
+                    <PixelButton
+                      variant="ghost"
+                      size="sm"
+                      className="px-button--icon"
+                      aria-label={`Delete category ${category.name}`}
+                      onClick={() => setCategoryDelete(category)}
+                    >
+                      <PixelIcon name="trash" />
+                    </PixelButton>
+                  </span>
+                ) : null}
               </span>
-            </span>
-          ))}
+            );
+          })}
           <form
             className="category-add"
             aria-label="Add a category"
@@ -618,12 +698,12 @@ function AssetsPage() {
           }}
         />
       ) : null}
-      {categoryRename ? (
-        <RenameCategoryDialog
-          category={categoryRename}
-          onClose={() => setCategoryRename(null)}
+      {categoryEdit ? (
+        <EditCategoryDialog
+          category={categoryEdit}
+          onClose={() => setCategoryEdit(null)}
           onSaved={() => {
-            setCategoryRename(null);
+            setCategoryEdit(null);
             refresh();
           }}
         />
@@ -637,6 +717,7 @@ function AssetsPage() {
           onConfirm={async () => {
             if (await deleteCategory.mutate()) {
               setCategoryDelete(null);
+              setOpenCategoryId(null);
               if (activeCategory === categoryDelete.id) setParam("categoryId", "");
               refresh();
             }

@@ -50,6 +50,13 @@ const STATUS_FILTERS = [
   { value: "done", label: "Done" },
 ] as const;
 
+/** Filter keys that count towards the collapsed Filters-button badge. */
+const TASKS_FILTER_KEYS = ["q", "status", "priority", "dueAfter", "dueBefore"];
+
+function countActiveFilters(params: URLSearchParams, keys: string[]): number {
+  return keys.reduce((count, key) => (params.get(key) ? count + 1 : count), 0);
+}
+
 function priorityMeta(priority: number) {
   return PRIORITIES.find((entry) => entry.value === priority) ?? PRIORITIES[1]!;
 }
@@ -261,6 +268,11 @@ function TasksPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const [editorFor, setEditorFor] = useState<Task | null | undefined>(undefined);
   const [deleting, setDeleting] = useState<Task | null>(null);
+  // Filters collapse into a header button; a deep link with active filters
+  // starts expanded.
+  const [filtersOpen, setFiltersOpen] = useState(
+    () => countActiveFilters(new URLSearchParams(window.location.search), TASKS_FILTER_KEYS) > 0,
+  );
 
   const refresh = () => setReloadKey((key) => key + 1);
   const setParam = (key: string, value: string) => {
@@ -315,7 +327,13 @@ function TasksPage() {
     await api(`/api/apps/tasks/tasks/${deleting.id}`, { method: "DELETE" });
   });
 
+  const resetFilters = () => {
+    setSearchParams(new URLSearchParams(), { replace: true });
+    setSearchInput("");
+  };
+
   const items = tasks.data?.items ?? [];
+  const activeFilterCount = countActiveFilters(searchParams, TASKS_FILTER_KEYS);
   const hasFilters = Boolean(tasksQueryString(searchParams));
 
   return (
@@ -324,13 +342,27 @@ function TasksPage() {
         <h1 className="page-header__title">{displayName}</h1>
         <p className="page-header__subtitle">Personal task manager</p>
         <div className="page-header__actions">
+          <PixelButton
+            size="sm"
+            variant="secondary"
+            aria-expanded={filtersOpen}
+            onClick={() => setFiltersOpen((open) => !open)}
+          >
+            <PixelIcon name="search" /> Filters
+            {activeFilterCount > 0 ? <PixelBadge tone="warning">{activeFilterCount}</PixelBadge> : null}
+          </PixelButton>
           <PixelButton size="sm" onClick={() => setEditorFor(null)}>
             <PixelIcon name="plus" /> New Task
           </PixelButton>
         </div>
       </header>
 
-      <PixelWindow title="Filters" icon="search" className="assets-filters">
+      {filtersOpen ? (
+      <PixelWindow title="Filters" icon="search" className="assets-filters" actions={
+        <PixelButton variant="ghost" size="sm" onClick={resetFilters} disabled={activeFilterCount === 0}>
+          Reset
+        </PixelButton>
+      }>
         <div className="assets-filters__row">
           <div className="assets-search">
             <PixelIcon name="search" />
@@ -412,8 +444,13 @@ function TasksPage() {
             <PixelIcon name={order === "asc" ? "up" : "down"} />
             {order === "asc" ? "Asc" : "Desc"}
           </PixelButton>
+          <span className="assets-filters__spacer" />
+          <PixelButton size="sm" variant="secondary" onClick={() => setFiltersOpen(false)}>
+            Close
+          </PixelButton>
         </div>
       </PixelWindow>
+      ) : null}
 
       {tasks.loading ? (
         <LoadingState label="Loading tasks…" />

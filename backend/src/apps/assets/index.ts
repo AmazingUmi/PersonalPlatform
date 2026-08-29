@@ -5,8 +5,12 @@ import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-reg
 interface CategoryRow {
   id: string;
   name: string;
+  color: string | null;
   created_at: string;
 }
+
+/** Chip/accent colors a category may use; mirrors the frontend PixelAccent set. */
+const CATEGORY_COLORS = ["primary", "success", "warning", "danger", "info", "mint", "yellow", "violet", "coral"] as const;
 
 interface ItemRow {
   id: string;
@@ -43,12 +47,12 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
   ctx.api.get("/categories", async () => {
     const { rows } = await db.query<CategoryRow>(
-      "SELECT id, name, created_at FROM assets.categories ORDER BY name",
+      "SELECT id, name, color, created_at FROM assets.categories ORDER BY name",
     );
     return { items: rows };
   });
 
-  ctx.api.post<{ Body: { name: string } }>(
+  ctx.api.post<{ Body: { name: string; color?: string } }>(
     "/categories",
     {
       schema: {
@@ -56,15 +60,18 @@ async function registerApi(ctx: AppContext): Promise<void> {
           type: "object",
           required: ["name"],
           additionalProperties: false,
-          properties: { name: { type: "string", minLength: 1, maxLength: 200 } },
+          properties: {
+            name: { type: "string", minLength: 1, maxLength: 200 },
+            color: { enum: [...CATEGORY_COLORS] },
+          },
         },
       },
     },
     async (request, reply) => {
       try {
         const { rows } = await db.query<CategoryRow>(
-          "INSERT INTO assets.categories (id, name) VALUES ($1, $2) RETURNING id, name, created_at",
-          [randomUUID(), request.body.name],
+          "INSERT INTO assets.categories (id, name, color) VALUES ($1, $2, $3) RETURNING id, name, color, created_at",
+          [randomUUID(), request.body.name, request.body.color ?? null],
         );
         return reply.code(201).send(rows[0]);
       } catch (error) {
@@ -76,29 +83,51 @@ async function registerApi(ctx: AppContext): Promise<void> {
     },
   );
 
-  ctx.api.patch<{ Params: { id: string }; Body: { name: string } }>(
+  // Partial update: absent fields stay unchanged, explicit null clears color.
+  ctx.api.patch<{ Params: { id: string }; Body: { name?: string; color?: string | null } }>(
     "/categories/:id",
     {
       schema: {
         body: {
           type: "object",
-          required: ["name"],
           additionalProperties: false,
-          properties: { name: { type: "string", minLength: 1, maxLength: 200 } },
+          properties: {
+            name: { type: "string", minLength: 1, maxLength: 200 },
+            color: { enum: [...CATEGORY_COLORS, null] },
+          },
         },
       },
     },
     async (request) => {
+      const body = request.body;
+      const sets: string[] = [];
+      const params: unknown[] = [request.params.id];
+      if (body.name !== undefined) {
+        params.push(body.name);
+        sets.push(`name = $${params.length}`);
+      }
+      if (body.color !== undefined) {
+        params.push(body.color);
+        sets.push(`color = $${params.length}`);
+      }
+      if (sets.length === 0) {
+        const current = await db.query<CategoryRow>(
+          "SELECT id, name, color, created_at FROM assets.categories WHERE id = $1",
+          [request.params.id],
+        );
+        if (!current.rows[0]) throw new AppError(404, "not_found", "category not found");
+        return current.rows[0];
+      }
       try {
         const { rows } = await db.query<CategoryRow>(
-          "UPDATE assets.categories SET name = $2 WHERE id = $1 RETURNING id, name, created_at",
-          [request.params.id, request.body.name],
+          `UPDATE assets.categories SET ${sets.join(", ")} WHERE id = $1 RETURNING id, name, color, created_at`,
+          params,
         );
         if (!rows[0]) throw new AppError(404, "not_found", "category not found");
         return rows[0];
       } catch (error) {
         if (isUniqueViolation(error)) {
-          throw new AppError(422, "category_name_taken", `a category named "${request.body.name}" already exists`);
+          throw new AppError(422, "category_name_taken", `a category named "${body.name}" already exists`);
         }
         throw error;
       }

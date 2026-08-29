@@ -15,6 +15,7 @@ const assetsMigrations = [
   readFileSync(join(repoRoot, "apps/assets/migrations/20260829000002-target-location.sql"), "utf8"),
   readFileSync(join(repoRoot, "apps/assets/migrations/20260829000003-acquired-at-index.sql"), "utf8"),
   readFileSync(join(repoRoot, "apps/assets/migrations/20260829000004-seed-default-categories.sql"), "utf8"),
+  readFileSync(join(repoRoot, "apps/assets/migrations/20260829000005-category-color.sql"), "utf8"),
 ];
 
 let db: Database;
@@ -421,5 +422,62 @@ describe("preset categories and category-name search", () => {
       "/api/apps/assets/items?sortBy=createdAt&order=desc",
     );
     assert.equal(listed.body.items[0]!.name, "No-Acquire Item");
+  });
+});
+
+describe("category color management", () => {
+  it("sets a color on create and updates it via PATCH", async () => {
+    const created = await json<{ id: string; color: string | null }>("POST", "/api/apps/assets/categories", {
+      name: "Colored",
+      color: "mint",
+    });
+    assert.equal(created.status, 201);
+    assert.equal(created.body.color, "mint");
+
+    const renamed = await json<{ name: string; color: string | null }>(
+      "PATCH",
+      `/api/apps/assets/categories/${created.body.id}`,
+      { name: "Colored Renamed" },
+    );
+    assert.equal(renamed.status, 200);
+    assert.equal(renamed.body.name, "Colored Renamed");
+    assert.equal(renamed.body.color, "mint", "absent color stays unchanged");
+
+    const recolored = await json<{ color: string | null }>(
+      "PATCH",
+      `/api/apps/assets/categories/${created.body.id}`,
+      { color: "coral" },
+    );
+    assert.equal(recolored.body.color, "coral");
+  });
+
+  it("clears the color with explicit null and rejects unknown values", async () => {
+    const created = await json<{ id: string }>("POST", "/api/apps/assets/categories", {
+      name: "Clearable Color",
+      color: "violet",
+    });
+    const cleared = await json<{ color: string | null }>(
+      "PATCH",
+      `/api/apps/assets/categories/${created.body.id}`,
+      { color: null },
+    );
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.body.color, null);
+
+    const invalid = await json("PATCH", `/api/apps/assets/categories/${created.body.id}`, { color: "hot-pink" });
+    assert.equal(invalid.status, 400);
+
+    const badCreate = await json("POST", "/api/apps/assets/categories", { name: "Bad Color", color: "neon" });
+    assert.equal(badCreate.status, 400);
+  });
+
+  it("lists categories with their colors", async () => {
+    const { body } = await json<{ items: Array<{ name: string; color: string | null }> }>(
+      "GET",
+      "/api/apps/assets/categories",
+    );
+    const colored = body.items.find((category) => category.name === "Colored Renamed");
+    assert.equal(colored!.color, "coral");
+    assert.equal(body.items.every((category) => "color" in category), true);
   });
 });

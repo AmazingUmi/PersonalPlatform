@@ -749,3 +749,52 @@
 .app-card__icon[data-accent="violet"] { color: var(--px-violet); }
 .app-card__icon[data-accent="coral"] { color: var(--px-coral); }
 .app-card__icon[data-accent="primary"] { color: var(--px-primary); }
+
+/* ---------- Category chips: color dot + click-to-manage ---------- */
+
+.px-cat-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: var(--border-1) solid var(--px-border);
+  background: var(--px-surface);
+  flex: none;
+}
+
+.px-cat-dot--preview {
+  width: 48px;
+  height: 16px;
+}
+
+.px-cat-dot[data-accent="primary"] { background: var(--px-primary); }
+.px-cat-dot[data-accent="success"] { background: var(--px-success); }
+.px-cat-dot[data-accent="warning"] { background: var(--px-warning); }
+.px-cat-dot[data-accent="danger"] { background: var(--px-danger); }
+.px-cat-dot[data-accent="info"] { background: var(--px-info); }
+.px-cat-dot[data-accent="mint"] { background: var(--px-mint); }
+.px-cat-dot[data-accent="yellow"] { background: var(--px-yellow); }
+.px-cat-dot[data-accent="violet"] { background: var(--px-violet); }
+.px-cat-dot[data-accent="coral"] { background: var(--px-coral); }
+
+.px-chip--open {
+  background: var(--px-ink);
+  border-color: var(--px-border);
+  color: var(--px-inverse);
+  box-shadow: var(--shadow-pixel-sm);
+}
+
+.px-chip--open .px-chip__count {
+  border-color: currentColor;
+}
+
+.px-chip__tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* ---------- Filters panel spacing ---------- */
+
+.assets-filters__spacer {
+  flex: 1 1 auto;
+}

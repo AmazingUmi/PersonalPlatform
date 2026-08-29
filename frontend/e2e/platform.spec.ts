@@ -54,6 +54,8 @@ test("assets: create, search and see the item", async ({ page }) => {
   await createItemViaDialog(page, name);
   await expect(page.getByRole("link", { name })).toBeVisible();
 
+  // The search box lives in the collapsed filters panel; expand it first.
+  await page.getByRole("button", { name: /filters/i }).click();
   await page.getByPlaceholder("Search name or category…").fill(name);
   await expect(page.getByRole("link", { name })).toBeVisible();
   await page.getByPlaceholder("Search name or category…").fill("definitely-no-such-item-xyz");
@@ -75,7 +77,8 @@ test("tasks: create a task and complete it", async ({ page }) => {
   await row.getByRole("checkbox").click();
   await expect(page.getByRole("listitem").filter({ hasText: title })).toHaveClass(/task--done/);
 
-  // Filter keeps it under "Done".
+  // Filters live behind the collapsed header button; open, then filter Done.
+  await page.getByRole("button", { name: /filters/i }).click();
   await page.getByRole("button", { name: "Done", exact: true }).click();
   await expect(page.getByRole("listitem").filter({ hasText: title })).toBeVisible();
 

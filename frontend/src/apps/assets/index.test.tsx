@@ -72,13 +72,33 @@ describe("AssetsPage", () => {
     });
   });
 
-  it("shows category rename and delete controls", async () => {
+  it("reveals category manage actions after clicking the chip", async () => {
     setupFetch();
     renderPage();
 
-    await waitFor(() => expect(screen.getAllByText("Books").length).toBeGreaterThan(0));
+    const chip = await screen.findByRole("button", { name: /books/i });
+    // Actions are hidden until the chip is clicked.
+    expect(screen.queryByRole("button", { name: /rename category books/i })).toBeNull();
+
+    fireEvent.click(chip);
     expect(screen.getByRole("button", { name: /rename category books/i })).toBeDefined();
     expect(screen.getByRole("button", { name: /delete category books/i })).toBeDefined();
+    expect(screen.getByRole("button", { name: /filter by category books/i })).toBeDefined();
+  });
+
+  it("collapses filters behind a header button and opens on demand", async () => {
+    const fetchMock = setupFetch();
+    renderPage();
+
+    // Panel is collapsed by default.
+    expect(screen.queryByLabelText("Search items")).toBeNull();
+    expect(screen.getByRole("button", { name: /filters/i })).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: /filters/i }));
+    expect(screen.getByLabelText("Search items")).toBeDefined();
+    // Opening filters does not fire an extra items request beyond the initial one.
+    const itemRequests = fetchMock.mock.calls.filter(([url]) => String(url).includes("/api/apps/assets/items"));
+    expect(itemRequests.length).toBe(1);
   });
 
   it("differentiates empty inventory from no matches", async () => {
