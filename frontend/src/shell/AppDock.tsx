@@ -1,5 +1,6 @@
 import { NavLink } from "react-router-dom";
 import type { AppInfo } from "../shared/api";
+import { resolvePresentation, type PresentationOverrides } from "../shared/presentation";
 import { appIconName } from "../shared/ui/appIcons";
 import { PixelIcon } from "../shared/ui/PixelIcon";
 
@@ -11,9 +12,10 @@ const CORE_ITEMS = [
 
 /**
  * Left application dock (guide §10): CORE entries are static, APPS entries
- * are generated from the enabled app list reported by core.
+ * are generated from the enabled app list reported by core. Names and accents
+ * come from the resolved presentation (FP-6).
  */
-export function AppDock({ apps }: { apps: AppInfo[] }) {
+export function AppDock({ apps, presentation }: { apps: AppInfo[]; presentation?: PresentationOverrides }) {
   return (
     <nav className="dock" aria-label="App navigation">
       <section className="dock__section">
@@ -32,19 +34,22 @@ export function AppDock({ apps }: { apps: AppInfo[] }) {
       <section className="dock__section">
         <span className="dock__label">Apps</span>
         <ul className="dock__list">
-          {apps.map((app) => (
-            <li key={app.id}>
-              <NavLink
-                to={app.route}
-                className="dock__item"
-                aria-label={app.name}
-                title={app.name}
-              >
-                <PixelIcon name={appIconName(app.id)} />
-                <span className="dock__item-label">{app.name}</span>
-              </NavLink>
-            </li>
-          ))}
+          {apps.map((app) => {
+            const resolved = resolvePresentation(app, presentation ?? {});
+            return (
+              <li key={app.id}>
+                <NavLink
+                  to={app.route}
+                  className="dock__item"
+                  aria-label={resolved.displayName}
+                  title={resolved.displayName}
+                >
+                  <PixelIcon name={appIconName(app.id)} />
+                  <span className="dock__item-label">{resolved.displayName}</span>
+                </NavLink>
+              </li>
+            );
+          })}
         </ul>
       </section>
     </nav>

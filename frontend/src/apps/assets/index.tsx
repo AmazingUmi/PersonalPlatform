@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../shared/api";
+import { useAppDisplayName } from "../../shared/PresentationContext";
 import type { FrontendAppModule } from "../../shared/appTypes";
 import { useDebouncedValue } from "../../shared/useDebouncedValue";
 import { useMutation } from "../../shared/useMutation";
@@ -291,6 +292,7 @@ function RenameCategoryDialog({
 }
 
 function AssetsPage() {
+  const displayName = useAppDisplayName({ id: "assets", name: "Assets" });
   const [searchParams, setSearchParams] = useSearchParams();
   const [reloadKey, setReloadKey] = useState(0);
   const [editorFor, setEditorFor] = useState<Item | null | undefined>(undefined);
@@ -359,7 +361,7 @@ function AssetsPage() {
   return (
     <div className="page" data-app="assets">
       <header className="page-header">
-        <h1 className="page-header__title">Assets</h1>
+        <h1 className="page-header__title">{displayName}</h1>
         <p className="page-header__subtitle">Personal inventory</p>
         <div className="page-header__actions">
           <PixelButton size="sm" onClick={() => setEditorFor(null)}>

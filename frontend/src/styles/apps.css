@@ -711,3 +711,41 @@
   flex-wrap: wrap;
   gap: var(--space-1);
 }
+
+.px-form__hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+}
+
+.app-accent-swatch {
+  display: inline-block;
+  width: 48px;
+  height: 16px;
+  border: var(--border-2) solid var(--px-border);
+  background: var(--px-primary);
+}
+
+.app-accent-swatch[data-accent="primary"] { background: var(--px-primary); }
+.app-accent-swatch[data-accent="success"] { background: var(--px-success); }
+.app-accent-swatch[data-accent="warning"] { background: var(--px-warning); }
+.app-accent-swatch[data-accent="danger"] { background: var(--px-danger); }
+.app-accent-swatch[data-accent="info"] { background: var(--px-info); }
+.app-accent-swatch[data-accent="mint"] { background: var(--px-mint); }
+.app-accent-swatch[data-accent="yellow"] { background: var(--px-yellow); }
+.app-accent-swatch[data-accent="violet"] { background: var(--px-violet); }
+.app-accent-swatch[data-accent="coral"] { background: var(--px-coral); }
+
+.app-card__icon {
+  color: var(--app-accent, var(--px-primary));
+}
+
+.app-card__icon[data-accent="success"] { color: var(--px-success); }
+.app-card__icon[data-accent="warning"] { color: var(--px-warning); }
+.app-card__icon[data-accent="danger"] { color: var(--px-danger); }
+.app-card__icon[data-accent="info"] { color: var(--px-info); }
+.app-card__icon[data-accent="mint"] { color: var(--px-mint); }
+.app-card__icon[data-accent="yellow"] { color: var(--px-yellow); }
+.app-card__icon[data-accent="violet"] { color: var(--px-violet); }
+.app-card__icon[data-accent="coral"] { color: var(--px-coral); }
+.app-card__icon[data-accent="primary"] { color: var(--px-primary); }

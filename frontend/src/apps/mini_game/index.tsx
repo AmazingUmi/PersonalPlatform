@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../shared/api";
+import { useAppDisplayName } from "../../shared/PresentationContext";
 import type { FrontendAppModule } from "../../shared/appTypes";
 import { PixelBadge } from "../../shared/ui/PixelBadge";
 import { PixelButton } from "../../shared/ui/PixelButton";
@@ -24,6 +25,7 @@ interface SaveState {
 }
 
 function Game2048() {
+  const displayName = useAppDisplayName({ id: "mini_game", name: "Mini Game (2048)" });
   const [board, setBoard] = useState<Board>(() => spawnTile(spawnTile(emptyBoard())));
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
@@ -102,7 +104,7 @@ function Game2048() {
         <h1 className="game__title page-header__title">
           <img src={logo} alt="" width={36} height={36} className="game__logo" /> 2048
         </h1>
-        <p className="page-header__subtitle">Mini Game</p>
+        <p className="page-header__subtitle">{displayName}</p>
       </header>
       <div className="game__bar">
         <div className="game__score" aria-label="Score">

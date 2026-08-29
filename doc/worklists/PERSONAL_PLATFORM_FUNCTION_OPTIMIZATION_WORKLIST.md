@@ -810,6 +810,8 @@ Do not introduce a second competing layout store unless needed.
 
 **Priority: P1/P2**
 
+**Status: DONE** — overrides stored in core.settings `apps.presentation` (validated against the PixelAccent allowlist); one shared resolver (shared/presentation.ts) feeds App Center, App Dock, Mobile Nav, Dashboard widget accents and app page headers; App Center editor supports nickname + accent + reset-to-default with a live swatch. Manifest identity is never touched.
+
 ## FP-6.1 Storage model
 
 Do not modify `app.yaml` at runtime.

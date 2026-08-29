@@ -225,3 +225,37 @@ test("dashboard: hide and show widgets persist after reload", async ({ page }) =
   await page.reload();
   await expect(page.locator('[data-widget-key="assets:summary"]')).toHaveCount(1);
 });
+
+test("app center: nickname and accent persist and reach the dock", async ({ page }) => {
+  // Clean slate for the presentation setting.
+  await page.request.put(`${CORE}/api/core/settings/apps.presentation`, { data: { value: {} } });
+
+  await page.goto("/apps");
+  const card = page.locator('.app-card[data-app="assets"]');
+  await card.getByRole("button", { name: /customize assets/i }).click();
+
+  const editor = page.getByTestId("presentation-editor");
+  await expect(editor).toBeVisible();
+  await editor.getByLabel("App nickname").fill("My Inventory");
+  await editor.getByLabel("Accent color").selectOption("mint");
+  await editor.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+
+  // Card reflects the nickname; the dock label follows the same override.
+  await expect(card.getByText("My Inventory")).toBeVisible();
+  await page.goto("/");
+  await expect(page.getByRole("link", { name: "My Inventory", exact: true })).toBeVisible();
+
+  // Survives a reload.
+  await page.reload();
+  await expect(page.getByRole("link", { name: "My Inventory", exact: true })).toBeVisible();
+
+  // Reset to default restores the manifest name everywhere.
+  await page.goto("/apps");
+  await page.locator('.app-card[data-app="assets"]').getByRole("button", { name: /customize my inventory/i }).click();
+  const resetEditor = page.getByTestId("presentation-editor");
+  await resetEditor.getByRole("button", { name: /reset to default/i }).click();
+  await expect(resetEditor).toHaveCount(0);
+  await page.goto("/");
+  await expect(page.getByRole("link", { name: "Assets", exact: true })).toBeVisible();
+});

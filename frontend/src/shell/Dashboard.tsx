@@ -19,6 +19,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { ErrorBoundary } from "../shared/ErrorBoundary";
 import { getSetting, putSetting, type AppInfo } from "../shared/api";
+import { resolvePresentation, type PresentationOverrides } from "../shared/presentation";
 import { EmptyState } from "../shared/ui/EmptyState";
 import { LoadingState } from "../shared/ui/LoadingState";
 import { PixelButton } from "../shared/ui/PixelButton";
@@ -41,11 +42,15 @@ function isInteractiveTarget(target: EventTarget | null): boolean {
  * app modules; the visible set and its ORDER are persisted in core.settings
  * under "dashboard.widgets" (default: every available widget in module order).
  */
-export function Dashboard({ apps }: { apps: AppInfo[] }) {
+export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentation?: PresentationOverrides }) {
   const navigate = useNavigate();
   const modules = enabledAppModules(apps);
   const available = useMemo(() => resolveWidgets(modules), [modules]);
   const routesById = useMemo(() => new Map(apps.map((app) => [app.id, app.route])), [apps]);
+  const presentations = useMemo(
+    () => new Map(apps.map((app) => [app.id, resolvePresentation(app, presentation ?? {})])),
+    [apps, presentation],
+  );
 
   const [layout, setLayout] = useState<string[] | null | "loading">("loading");
   const [editMode, setEditMode] = useState(false);
@@ -195,7 +200,12 @@ export function Dashboard({ apps }: { apps: AppInfo[] }) {
                 <ErrorBoundary
                   key={widgetKey(resolved)}
                   fallback={
-                    <SortableCard resolved={resolved} editMode={editMode} onNavigate={openWidget} errorFallback>
+                    <SortableCard
+                      resolved={resolved}
+                      editMode={editMode}
+                      onNavigate={openWidget}
+                      errorFallback
+                    >
                       <p className="dashboard-widget-error">Widget failed to render.</p>
                     </SortableCard>
                   }
@@ -203,6 +213,7 @@ export function Dashboard({ apps }: { apps: AppInfo[] }) {
                   <SortableCard
                     resolved={resolved}
                     editMode={editMode}
+                    accent={presentations.get(resolved.appId)?.accent}
                     onNavigate={openWidget}
                     onHide={
                       editMode
@@ -258,6 +269,7 @@ export function Dashboard({ apps }: { apps: AppInfo[] }) {
 interface SortableCardProps {
   resolved: ResolvedWidget;
   editMode: boolean;
+  accent?: ReturnType<typeof resolvePresentation>["accent"];
   onNavigate: (resolved: ResolvedWidget) => void;
   onHide?: () => void;
   errorFallback?: boolean;
@@ -270,7 +282,15 @@ interface SortableCardProps {
  * grip handle in the window header, so card clicks and widget content stay
  * unaffected (FP-5.2/FP-5.3).
  */
-function SortableCard({ resolved, editMode, onNavigate, onHide, errorFallback, children }: SortableCardProps) {
+function SortableCard({
+  resolved,
+  editMode,
+  accent,
+  onNavigate,
+  onHide,
+  errorFallback,
+  children,
+}: SortableCardProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: widgetKey(resolved),
     disabled: !editMode,
@@ -281,7 +301,7 @@ function SortableCard({ resolved, editMode, onNavigate, onHide, errorFallback, c
     <PixelWindow
       title={resolved.widget.title}
       icon={errorFallback ? "warning" : appIconName(resolved.appId)}
-      accent={errorFallback ? "danger" : appAccent(resolved.appId)}
+      accent={errorFallback ? "danger" : accent}
       data-widget-key={widgetKey(resolved)}
       headerPrefix={
         editMode && !errorFallback ? (

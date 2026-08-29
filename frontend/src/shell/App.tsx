@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
-import { fetchApps, type AppInfo } from "../shared/api";
+import { fetchApps, getSetting, type AppInfo } from "../shared/api";
+import { PresentationProvider } from "../shared/PresentationContext";
+import { normalizeOverrides, PRESENTATION_KEY, type PresentationOverrides } from "../shared/presentation";
 import { LoadingState } from "../shared/ui/LoadingState";
 import { PixelButton } from "../shared/ui/PixelButton";
 import { PixelIcon } from "../shared/ui/PixelIcon";
@@ -19,6 +21,7 @@ export function App() {
   const [apps, setApps] = useState<AppInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [overrides, setOverrides] = useState<PresentationOverrides>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -31,6 +34,22 @@ export function App() {
       })
       .catch((err: unknown) => {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshKey]);
+
+  // Presentation overrides (apps.presentation in core.settings) travel with
+  // the same refresh cycle so App Center edits reflect everywhere at once.
+  useEffect(() => {
+    let cancelled = false;
+    getSetting(PRESENTATION_KEY)
+      .then((value) => {
+        if (!cancelled) setOverrides(normalizeOverrides(value));
+      })
+      .catch(() => {
+        if (!cancelled) setOverrides({});
       });
     return () => {
       cancelled = true;
@@ -78,30 +97,38 @@ export function App() {
 
   return (
     <BrowserRouter>
-      <div className="shell">
-        <a className="skip-link" href="#shell-content">
-          Skip to content
-        </a>
-        <TopBar apps={apps} />
-        <div className="shell__workspace">
-          <AppDock apps={enabled} />
-          <main className="shell__content" id="shell-content" tabIndex={-1}>
-            <Routes>
-              <Route path="/" element={<Dashboard apps={apps} />} />
-              <Route
-                path="/apps"
-                element={<AppCenter apps={apps} onChanged={() => setRefreshKey((key) => key + 1)} />}
-              />
-              <Route path="/settings" element={<Settings apps={apps} />} />
-              {routes.map((route) => (
-                <Route key={route.path} path={route.path} element={route.element} />
-              ))}
-              <Route path="*" element={<NotFound />} />
-            </Routes>
-          </main>
+      <PresentationProvider value={overrides}>
+        <div className="shell">
+          <a className="skip-link" href="#shell-content">
+            Skip to content
+          </a>
+          <TopBar apps={apps} />
+          <div className="shell__workspace">
+            <AppDock apps={enabled} presentation={overrides} />
+            <main className="shell__content" id="shell-content" tabIndex={-1}>
+              <Routes>
+                <Route path="/" element={<Dashboard apps={apps} presentation={overrides} />} />
+                <Route
+                  path="/apps"
+                  element={
+                    <AppCenter
+                      apps={apps}
+                      presentation={overrides}
+                      onChanged={() => setRefreshKey((key) => key + 1)}
+                    />
+                  }
+                />
+                <Route path="/settings" element={<Settings apps={apps} />} />
+                {routes.map((route) => (
+                  <Route key={route.path} path={route.path} element={route.element} />
+                ))}
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+            </main>
+          </div>
+          <MobileNav apps={enabled} presentation={overrides} />
         </div>
-        <MobileNav apps={enabled} />
-      </div>
+      </PresentationProvider>
     </BrowserRouter>
   );
 }

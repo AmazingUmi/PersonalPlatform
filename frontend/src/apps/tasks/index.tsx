@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../../shared/api";
+import { useAppDisplayName } from "../../shared/PresentationContext";
 import type { FrontendAppModule } from "../../shared/appTypes";
 import { useDebouncedValue } from "../../shared/useDebouncedValue";
 import { useMutation } from "../../shared/useMutation";
@@ -255,6 +256,7 @@ function TaskEditor({
 }
 
 function TasksPage() {
+  const displayName = useAppDisplayName({ id: "tasks", name: "Tasks" });
   const [searchParams, setSearchParams] = useSearchParams();
   const [reloadKey, setReloadKey] = useState(0);
   const [editorFor, setEditorFor] = useState<Task | null | undefined>(undefined);
@@ -319,7 +321,7 @@ function TasksPage() {
   return (
     <div className="page" data-app="tasks">
       <header className="page-header">
-        <h1 className="page-header__title">Tasks</h1>
+        <h1 className="page-header__title">{displayName}</h1>
         <p className="page-header__subtitle">Personal task manager</p>
         <div className="page-header__actions">
           <PixelButton size="sm" onClick={() => setEditorFor(null)}>

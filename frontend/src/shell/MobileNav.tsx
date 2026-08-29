@@ -1,15 +1,16 @@
 import { useEffect, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import type { AppInfo } from "../shared/api";
+import { resolvePresentation, type PresentationOverrides } from "../shared/presentation";
 import { appIconName } from "../shared/ui/appIcons";
 import { PixelIcon } from "../shared/ui/PixelIcon";
 
 /**
  * Mobile bottom navigation (guide §10): Dashboard | Apps | More. Enabled apps
  * and Settings live behind the "More" launcher so 320px screens never try to
- * fit every app into the bar.
+ * fit every app into the bar. Names follow the resolved presentation (FP-6).
  */
-export function MobileNav({ apps }: { apps: AppInfo[] }) {
+export function MobileNav({ apps, presentation }: { apps: AppInfo[]; presentation?: PresentationOverrides }) {
   const [open, setOpen] = useState(false);
   const location = useLocation();
 
@@ -44,14 +45,17 @@ export function MobileNav({ apps }: { apps: AppInfo[] }) {
                   Settings
                 </NavLink>
               </li>
-              {apps.map((app) => (
-                <li key={app.id}>
-                  <NavLink to={app.route} className="mobile-nav__panel-link">
-                    <PixelIcon name={appIconName(app.id)} />
-                    {app.name}
-                  </NavLink>
-                </li>
-              ))}
+              {apps.map((app) => {
+                const resolved = resolvePresentation(app, presentation ?? {});
+                return (
+                  <li key={app.id}>
+                    <NavLink to={app.route} className="mobile-nav__panel-link">
+                      <PixelIcon name={appIconName(app.id)} />
+                      {resolved.displayName}
+                    </NavLink>
+                  </li>
+                );
+              })}
             </ul>
           </div>
         </>
