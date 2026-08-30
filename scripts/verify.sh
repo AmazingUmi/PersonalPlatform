@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Full local acceptance run for Personal Platform v0.1.
 # Runs install, generate, check, build, unit + integration tests, migrations,
-# then boots the backend and smoke-tests the health endpoints and the three
-# validation apps. DB-dependent steps are skipped (with a clear message) when
-# PostgreSQL is not reachable.
+# then boots the backend and smoke-tests the health endpoints and all installed
+# apps (scanned from apps/*/app.yaml, no hardcoded list). DB-dependent steps
+# are skipped (with a clear message) when PostgreSQL is not reachable.
 #
 #   SKIP_INSTALL=1 scripts/verify.sh   # skip `npm ci` if already installed
 set -euo pipefail
@@ -70,9 +70,20 @@ echo ""
 APPS_JSON="$(curl -fsS "http://localhost:$BACKEND_PORT/api/core/apps")"
 echo "$APPS_JSON"
 node -e '
+  const { existsSync, readdirSync } = require("node:fs");
+  const { join } = require("node:path");
   const body = JSON.parse(process.argv[1]);
   const ids = body.items.map((a) => a.id).sort();
-  const expect = ["assets", "focus", "mini_game", "tasks"];
+  // Disk-derived app list (same rule as the manifest scanner): every direct
+  // subdirectory of apps/ with an app.yaml, except _-prefixed (template) and
+  // dot-prefixed dirs. verify.sh already ran generate:apps above, so disk
+  // must equal the registry exactly.
+  const expect = readdirSync("apps", { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .filter((e) => !e.name.startsWith("_") && !e.name.startsWith("."))
+    .filter((e) => existsSync(join("apps", e.name, "app.yaml")))
+    .map((e) => e.name)
+    .sort();
   if (JSON.stringify(ids) !== JSON.stringify(expect)) {
     console.error(`expected apps ${expect}, got ${ids}`);
     process.exit(1);
@@ -81,7 +92,7 @@ node -e '
     console.error("expected all apps enabled");
     process.exit(1);
   }
-  console.log("OK: four validation apps enabled");
+  console.log("OK: all installed apps enabled");
 ' "$APPS_JSON"
 
 kill "$BACKEND_PID" 2>/dev/null || true

@@ -29,7 +29,10 @@ import { registerTestSchemas, resetDatabase, TEST_DATABASE_URL } from "../helper
  *
  * The suite iterates the live registry instead of a hardcoded app list, so it
  * stays green when apps are added or removed, as long as each new app keeps
- * the contract (and gets a KNOWN_ROUTES entry).
+ * the contract. KNOWN_ROUTES pins one business GET route per shipped app;
+ * apps without an entry are probed on the scaffold contract
+ * `GET /api/apps/<id>/ping` (the create-app backend stub), so landing a new
+ * app never requires editing this file.
  */
 
 const log = createLogger("fatal");
@@ -38,11 +41,12 @@ const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
 const appsDir = join(repoRoot, "apps");
 
 /**
- * One stable public GET route per app. Iterating the registry against this
- * table forces every new app to explicitly register a probe route here —
- * a missing entry fails the suite, so a new app can never silently ship
- * without pinned, tested HTTP surface.
- * "focus" is pre-registered for the app currently under development.
+ * Pinned business GET route per shipped app. The route probe uses
+ * `KNOWN_ROUTES[app.id] ?? probeRoute(app.id)`: apps registered here are
+ * probed on their real business surface; apps without an entry fall back to
+ * the scaffold contract `GET /api/apps/<id>/ping` (the create-app backend
+ * stub), so a new app never needs an edit to this file. Add an entry only to
+ * pin an app's business route.
  */
 const KNOWN_ROUTES: Record<string, string> = {
   tasks: "/api/apps/tasks/tasks",
@@ -51,14 +55,23 @@ const KNOWN_ROUTES: Record<string, string> = {
   focus: "/api/apps/focus/state",
 };
 
+/** Probe route: the pinned business route, else the scaffold-contract /ping. */
+function probeRoute(appId: string): string {
+  return KNOWN_ROUTES[appId] ?? `/api/apps/${appId}/ping`;
+}
+
 /** App id rule from the manifest JSON schema (app-registry/manifest.ts). */
 const APP_ID_PATTERN = /^[a-z][a-z0-9_]*$/;
 
-// Real app schemas this file replays migrations for. Derived from KNOWN_ROUTES
-// (which the suite proves covers the whole registry) so resetDatabase() also
-// drops schemas that are not yet in db.ts's APP_SCHEMAS allowlist — e.g. an
-// app that is still being developed in parallel.
-registerTestSchemas(...Object.keys(KNOWN_ROUTES));
+// Real app schemas this file replays migrations for. Derived from the valid
+// manifests on disk (not from KNOWN_ROUTES) so resetDatabase() also drops
+// schemas of apps that have no KNOWN_ROUTES entry — e.g. an app still being
+// developed in parallel, or one that only ships the scaffold /ping contract.
+registerTestSchemas(
+  ...scanApps(appsDir)
+    .filter((scanned) => scanned.manifest !== null && scanned.errors.length === 0)
+    .map((scanned) => scanned.id),
+);
 
 let db: Database;
 let platform: Platform;
@@ -154,23 +167,17 @@ describe("App Contract V1: manifest <-> registry consistency", () => {
   });
 });
 
-describe("App Contract V1: known routes", () => {
-  it("requires a KNOWN_ROUTES entry for every registered app", async () => {
+describe("App Contract V1: probe routes", () => {
+  it("has an available probe route for every registered app", async () => {
     for (const app of await coreApps()) {
-      assert.ok(
-        KNOWN_ROUTES[app.id] !== undefined,
-        `app "${app.id}" has no KNOWN_ROUTES entry — register one of its public GET routes in app-contract.test.ts`,
-      );
-    }
-  });
-
-  it("answers a known GET route with 200 for every app with a compiled backend", async () => {
-    for (const app of await coreApps()) {
-      // A manifest whose backend module has not been generated yet cannot
-      // serve traffic (platform registers routes only for compiled modules);
-      // the probe applies as soon as the module exists.
+      // Registered apps are probed on their pinned business route; apps
+      // without a KNOWN_ROUTES entry use the scaffold-contract /ping, so a
+      // new app never needs an edit to this file to be probed. A manifest
+      // whose backend module has not been generated yet cannot serve traffic
+      // (platform registers routes only for compiled modules); the probe
+      // applies as soon as the module exists.
       if (!app.hasBackend) continue;
-      const route = KNOWN_ROUTES[app.id]!;
+      const route = probeRoute(app.id);
       const res = await platform.app.inject({ method: "GET", url: route });
       assert.equal(res.statusCode, 200, `GET ${route} for app "${app.id}"`);
     }
@@ -194,9 +201,13 @@ describe("App Contract V1: per-app database schemas", () => {
 describe("App Contract V1: lifecycle guard", () => {
   it("disable 404s the app API, re-enable restores it, others stay enabled", async () => {
     const items = await coreApps();
-    const target = items.find((app) => app.hasBackend);
+    // Prefer an app with a pinned KNOWN_ROUTES entry so the guard exercises a
+    // real business route; apps without one fall back to the scaffold /ping.
+    const target =
+      items.find((app) => app.hasBackend && KNOWN_ROUTES[app.id] !== undefined) ??
+      items.find((app) => app.hasBackend);
     assert.ok(target, "at least one registered app must have a compiled backend");
-    const targetRoute = KNOWN_ROUTES[target.id]!;
+    const targetRoute = probeRoute(target.id);
 
     const disable = await platform.app.inject({
       method: "PUT",
