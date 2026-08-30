@@ -193,16 +193,29 @@ export async function updateSessionRow(tx: Db, row: SessionRow): Promise<number>
   return result.rowCount ?? 0;
 }
 
+/** Result of reconcileActive: the live row plus what this call closed. */
+export interface ReconcileResult {
+  /** The still-live active row after reconciliation, or null when there is none. */
+  row: SessionRow | null;
+  /**
+   * The row THIS call closed by natural completion (expired running session),
+   * or null. The API layer publishes focus.session.completed.v1 from it — but
+   * only after the caller's transaction commits.
+   */
+  completed: SessionRow | null;
+}
+
 /**
  * Row-atomic "close an expired session" primitive. Inside one transaction
  * (the caller's): lock the active row, and if its planned end has passed,
- * apply the timer's natural completion and persist it. Returns the still-live
- * active row, or null when there is none (never had one, or just expired).
+ * apply the timer's natural completion and persist it. `row` is the still-live
+ * active row, or null when there is none (never had one, or just expired —
+ * in which case `completed` carries the closed row).
  */
-export async function reconcileActive(tx: Db, now: Date): Promise<SessionRow | null> {
+export async function reconcileActive(tx: Db, now: Date): Promise<ReconcileResult> {
   const active = await findActiveSession(tx);
-  if (active === null) return null;
-  if (!isExpired(active, now)) return active;
+  if (active === null) return { row: null, completed: null };
+  if (!isExpired(active, now)) return { row: active, completed: null };
 
   const completed = applyNaturalComplete(active, now);
   const updated = await updateSessionRow(tx, completed);
@@ -213,7 +226,7 @@ export async function reconcileActive(tx: Db, now: Date): Promise<SessionRow | n
       `focus repository: reconcile lost the row lock mid-transaction (id=${active.id})`,
     );
   }
-  return null;
+  return { row: null, completed };
 }
 
 // ---------------------------------------------------------------------------
