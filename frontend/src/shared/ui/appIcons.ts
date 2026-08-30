@@ -10,6 +10,7 @@ const APP_ICONS: Record<string, IconName> = {
   assets: "box",
   mini_game: "game",
   focus: "focus",
+  notes: "file",
 };
 
 const APP_ACCENTS: Record<string, PixelAccent> = {
@@ -17,6 +18,7 @@ const APP_ACCENTS: Record<string, PixelAccent> = {
   assets: "yellow",
   mini_game: "violet",
   focus: "coral",
+  notes: "info",
 };
 
 export function appIconName(appId: string): IconName {

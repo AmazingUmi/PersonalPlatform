@@ -1,0 +1,16 @@
+manifest_version: 1
+id: notes
+name: Notes
+version: 0.1.0
+description: Low-friction personal notes — capture first, organize later.
+default_enabled: true
+frontend:
+  route: /notes
+widgets:
+  - id: quick_note
+    name: Quick Note
+capabilities:
+  database: true
+  storage: false
+  scheduler: false
+  events: false

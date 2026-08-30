@@ -121,6 +121,10 @@
   --app-accent: var(--px-coral);
 }
 
+[data-app="notes"] {
+  --app-accent: var(--px-info);
+}
+
 [data-app="settings"] {
   --app-accent: var(--px-primary);
 }

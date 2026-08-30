@@ -10,7 +10,7 @@ export const TEST_DATABASE_URL =
   process.env.TEST_DATABASE_URL ??
   "postgresql://personal_platform:change-me-for-local-development@127.0.0.1:5439/personal_platform_test";
 
-export const APP_SCHEMAS = ["assets", "focus", "mini_game", "tasks"];
+export const APP_SCHEMAS = ["assets", "focus", "mini_game", "notes", "tasks"];
 
 /** Every schema PersonalPlatform itself owns in the test database. */
 export const PLATFORM_SCHEMAS = ["core", ...APP_SCHEMAS];

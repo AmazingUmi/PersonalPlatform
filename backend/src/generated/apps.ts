@@ -4,12 +4,14 @@ import type { BackendAppModule } from "../core/app-registry/types.js";
 import assets from "../apps/assets/index.js";
 import focus from "../apps/focus/index.js";
 import mini_game from "../apps/mini_game/index.js";
+import notes from "../apps/notes/index.js";
 import tasks from "../apps/tasks/index.js";
 
 export const backendAppModules: Record<string, BackendAppModule> = {
   assets,
   focus,
   mini_game,
+  notes,
   tasks,
 };
 
@@ -18,5 +20,6 @@ export const frontendAppIds: string[] = [
   "assets",
   "focus",
   "mini_game",
+  "notes",
   "tasks",
 ];

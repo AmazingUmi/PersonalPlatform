@@ -4,12 +4,14 @@ import type { FrontendAppModule } from "../shared/appTypes";
 import assets from "../apps/assets/index";
 import focus from "../apps/focus/index";
 import mini_game from "../apps/mini_game/index";
+import notes from "../apps/notes/index";
 import tasks from "../apps/tasks/index";
 
 export const frontendAppModules: Record<string, FrontendAppModule> = {
   assets,
   focus,
   mini_game,
+  notes,
   tasks,
 };
 
@@ -17,5 +19,6 @@ export const frontendAppIds: string[] = [
   "assets",
   "focus",
   "mini_game",
+  "notes",
   "tasks",
 ];

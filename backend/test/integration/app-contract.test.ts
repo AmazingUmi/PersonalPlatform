@@ -53,6 +53,7 @@ const KNOWN_ROUTES: Record<string, string> = {
   assets: "/api/apps/assets/items",
   mini_game: "/api/apps/mini_game/saves",
   focus: "/api/apps/focus/state",
+  notes: "/api/apps/notes/notes",
 };
 
 /** Probe route: the pinned business route, else the scaffold-contract /ping. */
