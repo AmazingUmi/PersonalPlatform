@@ -11,23 +11,24 @@
  *
  * Usage: npm run generate:apps [-- --check]
  *   --check: regenerate in memory and fail if the committed files are stale.
+ *
+ * scan(root) is exported for reuse (scripts/verify-apps.ts); the generation
+ * CLI below only runs when this file is the process entry point.
  */
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { semanticErrors, validateManifest } from "../backend/src/core/app-registry/manifest.js";
 
-const root = process.cwd();
-const appsDir = join(root, "apps");
-const checkOnly = process.argv.includes("--check");
-
-interface AppEntry {
+export interface AppEntry {
   id: string;
   hasBackend: boolean;
   hasFrontend: boolean;
 }
 
-function scan(): AppEntry[] {
+export function scan(root: string): AppEntry[] {
+  const appsDir = join(root, "apps");
   if (!existsSync(appsDir)) {
     console.error(`generate:apps: apps directory not found at ${appsDir}`);
     process.exit(1);
@@ -142,28 +143,45 @@ ${ids}
 `;
 }
 
-const apps = scan();
-const backendPath = join(root, "backend", "src", "generated", "apps.ts");
-const frontendPath = join(root, "frontend", "src", "generated", "apps.ts");
-const backendOut = renderBackend(apps);
-const frontendOut = renderFrontend(apps);
+// ---- CLI (only active when this file is the process entry point) ----
 
-if (checkOnly) {
-  const stale: string[] = [];
-  if (readFileSync(backendPath, "utf8") !== backendOut) stale.push(backendPath);
-  if (readFileSync(frontendPath, "utf8") !== frontendOut) stale.push(frontendPath);
-  if (stale.length > 0) {
-    console.error(`generate:apps: generated files are stale (run npm run generate:apps):\n  ${stale.join("\n  ")}`);
-    process.exit(1);
+function run(): void {
+  const root = process.cwd();
+  const checkOnly = process.argv.includes("--check");
+  const apps = scan(root);
+  const backendPath = join(root, "backend", "src", "generated", "apps.ts");
+  const frontendPath = join(root, "frontend", "src", "generated", "apps.ts");
+  const backendOut = renderBackend(apps);
+  const frontendOut = renderFrontend(apps);
+
+  if (checkOnly) {
+    const stale: string[] = [];
+    if (readFileSync(backendPath, "utf8") !== backendOut) stale.push(backendPath);
+    if (readFileSync(frontendPath, "utf8") !== frontendOut) stale.push(frontendPath);
+    if (stale.length > 0) {
+      console.error(`generate:apps: generated files are stale (run npm run generate:apps):\n  ${stale.join("\n  ")}`);
+      process.exit(1);
+    }
+    console.log(`generate:apps: ${apps.length} app(s) up to date`);
+  } else {
+    mkdirSync(join(root, "backend", "src", "generated"), { recursive: true });
+    mkdirSync(join(root, "frontend", "src", "generated"), { recursive: true });
+    writeFileSync(backendPath, backendOut);
+    writeFileSync(frontendPath, frontendOut);
+    console.log(
+      `generate:apps: wrote ${backendPath} and ${frontendPath} (${apps.length} app(s), ` +
+        `${apps.filter((a) => a.hasBackend).length} backend, ${apps.filter((a) => a.hasFrontend).length} frontend)`,
+    );
   }
-  console.log(`generate:apps: ${apps.length} app(s) up to date`);
-} else {
-  mkdirSync(join(root, "backend", "src", "generated"), { recursive: true });
-  mkdirSync(join(root, "frontend", "src", "generated"), { recursive: true });
-  writeFileSync(backendPath, backendOut);
-  writeFileSync(frontendPath, frontendOut);
-  console.log(
-    `generate:apps: wrote ${backendPath} and ${frontendPath} (${apps.length} app(s), ` +
-      `${apps.filter((a) => a.hasBackend).length} backend, ${apps.filter((a) => a.hasFrontend).length} frontend)`,
-  );
 }
+
+const isDirectRun = (() => {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+})();
+
+if (isDirectRun) run();
