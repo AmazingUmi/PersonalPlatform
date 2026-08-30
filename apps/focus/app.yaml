@@ -1,0 +1,16 @@
+manifest_version: 1
+id: focus
+name: Focus
+version: 1.0.0
+description: Pomodoro timer with focus history, statistics, and dashboard quick controls.
+default_enabled: true
+frontend:
+  route: /focus
+widgets:
+  - id: timer
+    name: Focus Timer
+capabilities:
+  database: true
+  storage: false
+  scheduler: false
+  events: true

@@ -24,7 +24,7 @@ describe("reset schema allowlist (FP-8.1)", () => {
     assert.ok(!droppableSchemas().includes("information_schema"));
     assert.deepEqual(
       PLATFORM_SCHEMAS,
-      ["core", "assets", "tasks", "mini_game"],
+      ["core", "assets", "focus", "mini_game", "tasks"],
       "platform schema set stays explicit",
     );
   });

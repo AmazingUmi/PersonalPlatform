@@ -72,7 +72,7 @@ echo "$APPS_JSON"
 node -e '
   const body = JSON.parse(process.argv[1]);
   const ids = body.items.map((a) => a.id).sort();
-  const expect = ["assets", "mini_game", "tasks"];
+  const expect = ["assets", "focus", "mini_game", "tasks"];
   if (JSON.stringify(ids) !== JSON.stringify(expect)) {
     console.error(`expected apps ${expect}, got ${ids}`);
     process.exit(1);
@@ -81,7 +81,7 @@ node -e '
     console.error("expected all apps enabled");
     process.exit(1);
   }
-  console.log("OK: three validation apps enabled");
+  console.log("OK: four validation apps enabled");
 ' "$APPS_JSON"
 
 kill "$BACKEND_PID" 2>/dev/null || true
