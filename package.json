@@ -1,15 +1,17 @@
 {
   "name": "personal-platform",
   "private": true,
+  "type": "module",
   "workspaces": [
     "backend",
     "frontend"
   ],
   "scripts": {
     "build": "npm run generate:apps && npm run build --workspaces --if-present",
-    "check": "npm run generate:apps:check && npm run check --workspaces --if-present",
+    "check": "npm run generate:apps:check && npm run verify:apps && npm run check --workspaces --if-present",
     "generate:apps": "tsx scripts/generate-apps-registry.ts",
     "generate:apps:check": "tsx scripts/generate-apps-registry.ts --check",
+    "verify:apps": "tsx scripts/verify-apps.ts",
     "migration:up": "tsx backend/src/cli/migrate.ts up",
     "migration:status": "tsx backend/src/cli/migrate.ts status",
     "migration:create": "tsx backend/src/cli/migrate.ts create",
