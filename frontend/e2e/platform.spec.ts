@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { expect, test, type Page } from "@playwright/test";
 
 /**
- * Key end-to-end flows for the three validation apps plus the disable/enable
+ * Key end-to-end flows for the four validation apps plus the disable/enable
  * lifecycle, driven through the real shell. The stack (backend + vite) is
  * managed by playwright webServer config against the E2E database.
  */
@@ -19,19 +19,21 @@ async function setAppEnabled(id: string, enabled: boolean): Promise<void> {
 }
 
 test.beforeAll(async () => {
-  // Deterministic start: all three apps enabled.
+  // Deterministic start: all four apps enabled.
   await setAppEnabled("assets", true);
   await setAppEnabled("tasks", true);
   await setAppEnabled("mini_game", true);
+  await setAppEnabled("focus", true);
 });
 
-test("shell loads with navigation and all three apps enabled", async ({ page }) => {
+test("shell loads with navigation and all four apps enabled", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
   await expect(page.getByRole("link", { name: "App Center" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Assets" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Tasks" })).toBeVisible();
   await expect(page.getByRole("link", { name: /2048/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Focus", exact: true })).toBeVisible();
 });
 
 test("dashboard renders one widget per validation app", async ({ page }) => {
@@ -39,6 +41,7 @@ test("dashboard renders one widget per validation app", async ({ page }) => {
   await expect(page.getByText("Asset Summary")).toBeVisible();
   await expect(page.getByText("Tasks Today")).toBeVisible();
   await expect(page.getByText("2048 High Score")).toBeVisible();
+  await expect(page.getByText("Focus Timer")).toBeVisible();
 });
 
 async function createItemViaDialog(page: Page, name: string) {
@@ -142,6 +145,9 @@ test("app center lists all apps with status and toggles", async ({ page }) => {
   await expect(list.getByText("Assets")).toBeVisible();
   await expect(list.getByText("Tasks")).toBeVisible();
   await expect(list.getByText("Mini Game (2048)")).toBeVisible();
+  // exact: the Focus description ("...focus history...") also contains the
+  // word case-insensitively, so match the full name cell only.
+  await expect(list.getByText("Focus", { exact: true })).toBeVisible();
 
   const assetsCard = page.locator(".app-card").filter({ hasText: "Assets" });
   await assetsCard.getByRole("button", { name: "Disable" }).click();
@@ -152,7 +158,7 @@ test("app center lists all apps with status and toggles", async ({ page }) => {
 
 test("dashboard: clicking a widget card navigates to its app", async ({ page }) => {
   await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
-    data: { value: ["assets:summary", "mini_game:highscore", "tasks:today"] },
+    data: { value: ["assets:summary", "mini_game:highscore", "tasks:today", "focus:timer"] },
   });
   await page.goto("/");
   await page.getByRole("button", { name: /open 2048 high score/i }).click();
@@ -162,10 +168,10 @@ test("dashboard: clicking a widget card navigates to its app", async ({ page }) 
 test("dashboard: drag reorder persists after reload", async ({ page }) => {
   // Deterministic baseline: reset the persisted layout via the settings API.
   await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
-    data: { value: ["assets:summary", "mini_game:highscore", "tasks:today"] },
+    data: { value: ["assets:summary", "mini_game:highscore", "tasks:today", "focus:timer"] },
   });
   await page.goto("/");
-  await expect(page.locator(".dashboard-card [data-widget-key]")).toHaveCount(3);
+  await expect(page.locator(".dashboard-card [data-widget-key]")).toHaveCount(4);
   const orderBefore = await page
     .locator(".dashboard-card [data-widget-key]")
     .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-widget-key")));
@@ -189,14 +195,14 @@ test("dashboard: drag reorder persists after reload", async ({ page }) => {
     .locator(".dashboard-card [data-widget-key]")
     .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-widget-key")))) as string[];
   assert.notDeepEqual(orderAfterDrag, orderBefore, "drag actually reordered the widgets");
-  assert.equal(orderAfterDrag.length, 3);
+  assert.equal(orderAfterDrag.length, 4);
 
   await page.getByRole("button", { name: "Done", exact: true }).click();
   // Done persists asynchronously; wait until the shell returns to normal mode
   // so the reload cannot cancel the PUT mid-flight.
   await expect(page.getByRole("button", { name: /edit layout/i })).toBeVisible();
   await page.reload();
-  await expect(page.locator(".dashboard-card [data-widget-key]")).toHaveCount(3);
+  await expect(page.locator(".dashboard-card [data-widget-key]")).toHaveCount(4);
   const orderAfterReload = await page
     .locator(".dashboard-card [data-widget-key]")
     .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-widget-key")));
@@ -205,13 +211,13 @@ test("dashboard: drag reorder persists after reload", async ({ page }) => {
   // Reset the persisted layout for the following tests (no hidden widgets ->
   // no in-page restore button, so reset through the settings API).
   await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
-    data: { value: ["assets:summary", "mini_game:highscore", "tasks:today"] },
+    data: { value: ["assets:summary", "mini_game:highscore", "tasks:today", "focus:timer"] },
   });
 });
 
 test("dashboard: hide and show widgets persist after reload", async ({ page }) => {
   await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
-    data: { value: ["assets:summary", "mini_game:highscore", "tasks:today"] },
+    data: { value: ["assets:summary", "mini_game:highscore", "tasks:today", "focus:timer"] },
   });
   await page.goto("/");
   await page.getByRole("button", { name: /edit layout/i }).click();
