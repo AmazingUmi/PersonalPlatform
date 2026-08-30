@@ -227,7 +227,9 @@ test("dashboard: hide and show widgets persist after reload", async ({ page }) =
 
   await page.reload();
   await expect(page.locator('[data-widget-key="assets:summary"]')).toHaveCount(0);
-  await expect(page.getByText(/1 widget\(s\) hidden/)).toBeVisible();
+  // Count-agnostic: apps outside the persisted 4-key layout also count as
+  // hidden, so the number grows with the shipped app set.
+  await expect(page.getByText(/\d+ widget\(s\) hidden/)).toBeVisible();
 
   // Show it again through edit mode.
   await page.getByRole("button", { name: /edit layout/i }).click();
