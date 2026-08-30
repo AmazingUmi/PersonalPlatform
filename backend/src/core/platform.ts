@@ -40,6 +40,10 @@ export interface PlatformDeps {
    * activation never runs against an outdated schema (FP-1.1).
    */
   migrateApp?: (appId: string) => Promise<void>;
+  /**
+   * Fixed clock for the platform TimeService (tests). Defaults to real time.
+   */
+  clock?: () => Date;
 }
 
 export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
@@ -48,7 +52,7 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
 
   const eventBus = new EventBus(log);
   const scheduler = new Scheduler(log);
-  const time = createTimeService({ defaultTimezone: config.platform.timezone ?? "UTC" });
+  const time = createTimeService({ defaultTimezone: config.platform.timezone ?? "UTC", clock: deps.clock });
   const registry = new AppRegistry({
     manifestsDir: join(root, config.apps.manifests_directory),
     database,

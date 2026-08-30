@@ -68,7 +68,12 @@ after(async () => {
 describe("backup & restore (FP-11)", () => {
   let backupDir: string;
 
-  it("create packages database, storage, config and metadata", async () => {
+  // Shared fixture: create the backup once in a suite-level hook. Creating it
+  // in the first test instead let a create failure (e.g. a pg_dump version
+  // mismatch) cascade into misleading ".../backups/undefined is not a backup"
+  // errors in every restore test below; a failing hook reports the real error
+  // once for the whole suite.
+  before(async () => {
     const backupsRoot = join(root, "backups");
     const result = runBackupCli(["create", "--root", root, "--database", TEST_DATABASE_URL, "--output", backupsRoot]);
     assert.equal(result.status, 0, `backup create failed:\n${String(result.stderr)}`);
@@ -76,7 +81,9 @@ describe("backup & restore (FP-11)", () => {
     const entries = readdirSync(backupsRoot);
     assert.equal(entries.length, 1, "one timestamped backup directory");
     backupDir = join(backupsRoot, entries[0]!);
+  });
 
+  it("create packages database, storage, config and metadata", async () => {
     const metadata = JSON.parse(readFileSync(join(backupDir, "metadata.json"), "utf8")) as {
       formatVersion: number;
       createdAt: string;

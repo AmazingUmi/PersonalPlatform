@@ -41,6 +41,21 @@ jobs:
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] http://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_CODENAME")-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends postgresql-client-17
+          # The runner image also ships a default postgresql-client whose
+          # pg_dump (16.x) shadows the v17 install in /usr/bin; put the v17
+          # bindir first on PATH for every subsequent step.
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+      - name: Verify PostgreSQL client
+        run: |
+          which pg_dump
+          pg_dump --version
+          which psql
+          psql --version
+          pg_dump --version | grep -Eq 'pg_dump \(PostgreSQL\) 17\.' || (echo 'pg_dump major is not 17' && exit 1)
+          psql --version | grep -Eq 'psql \(PostgreSQL\) 17\.' || (echo 'psql major is not 17' && exit 1)
+          server="$(psql "$TEST_DATABASE_URL" -tAc 'SHOW server_version')"
+          echo "server version: $server"
+          grep -Eq '^17\.' <<<"$server" || (echo 'server major is not 17' && exit 1)
       - run: npm ci
       - run: npm run check
       - run: npm run build

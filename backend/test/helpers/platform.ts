@@ -25,6 +25,8 @@ export interface FixtureOptions {
   beforeActivation?: () => Promise<void>;
   /** Reuse a root prepared by prepareFixtureRoot (lets callers know the root beforehand). */
   root?: string;
+  /** Fixed clock for the platform TimeService; defaults to real time. */
+  clock?: () => Date;
 }
 
 /** Create the temp fixture root (manifests + migrations) without starting a platform. */
@@ -121,6 +123,7 @@ export async function buildFixturePlatform(options: FixtureOptions): Promise<{
     frontendAppIds: options.frontendAppIds ?? options.manifests.map((fixture) => fixture.id),
     migrateApp: options.migrateApp,
     beforeActivation: options.beforeActivation,
+    clock: options.clock,
   });
 
   const cleanup = () => {

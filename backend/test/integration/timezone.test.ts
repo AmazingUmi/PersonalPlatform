@@ -43,11 +43,12 @@ async function json<T>(
   return { status: response.statusCode, body: (raw ? JSON.parse(raw) : null) as T };
 }
 
-async function buildTasksPlatform(): Promise<{ platform: Platform; cleanup: () => void; root: string }> {
+async function buildTasksPlatform(clock?: () => Date): Promise<{ platform: Platform; cleanup: () => void; root: string }> {
   const fixture = await buildFixturePlatform({
     database: db,
     manifests: [{ id: "tasks", migrations: tasksMigrations }],
     backendModules: { tasks: tasksApp },
+    clock,
   });
   await runMigrations({
     databaseUrl: TEST_DATABASE_URL,
@@ -173,20 +174,30 @@ describe("tasks today boundary semantics (FP-10.3)", () => {
   });
 
   it("switching the platform timezone moves the day window live", async () => {
-    const { platform, cleanup } = await buildTasksPlatform();
+    // Fixed clock: which UTC instant belongs to which timezone's "today" must
+    // not depend on when CI happens to run. At 2026-08-30T11:00Z the windows
+    // on the UTC axis are:
+    //   Pacific/Kiritimati (UTC+14) today: [08-30T10:00Z, 08-31T10:00Z)
+    //   Etc/GMT+12 (UTC-12) today:         [08-29T12:00Z, 08-30T12:00Z)
+    // They overlap by 2h, so "Kiritimati midnight + 1min" is still GMT-12's
+    // today — that assumption was wrong. The proven instant is one minute
+    // after GMT-12's today ends: still Kiritimati's today, already GMT-12's
+    // tomorrow.
+    const now = new Date("2026-08-30T11:00:00.000Z");
+    const kiriRange = localDayRangeUtc("Pacific/Kiritimati", now);
+    const gmt12Range = localDayRangeUtc("Etc/GMT+12", now);
+    const dueMs = gmt12Range.end.getTime() + 60_000;
+    assert.ok(dueMs >= kiriRange.start.getTime(), "due instant is inside Kiritimati's today");
+    assert.ok(dueMs < kiriRange.end.getTime(), "due instant is inside Kiritimati's today");
+    assert.ok(dueMs >= gmt12Range.end.getTime(), "due instant is past GMT-12's today (tomorrow there)");
+    const dueAt = new Date(dueMs).toISOString();
+
+    const { platform, cleanup } = await buildTasksPlatform(() => now);
     try {
       await clearTasks();
-      // With UTC+14 (Pacific/Kiritimati) vs UTC-12 (Etc/GMT+12), "today"
-      // differs by a full 26 hours; a far-future task counts only where it
-      // lands inside that timezone's remaining day.
       await json(platform, "PUT", "/api/core/settings/platform.timezone", {
         value: "Pacific/Kiritimati",
       });
-      const kiriRange = localDayRangeUtc("Pacific/Kiritimati");
-      // 1 minute after Kiritimati's local midnight (UTC+14). Etc/GMT+12
-      // (UTC-12) is 26h behind locally, so its calendar day started 2h later
-      // on the UTC axis — this instant is still "yesterday" there.
-      const dueAt = new Date(kiriRange.start.getTime() + 60_000).toISOString();
 
       await json(platform, "POST", "/api/apps/tasks/tasks", { title: "edge", dueAt });
       const inKiri = await json<{ today: number }>(platform, "GET", "/api/apps/tasks/summary");
@@ -194,7 +205,7 @@ describe("tasks today boundary semantics (FP-10.3)", () => {
 
       await json(platform, "PUT", "/api/core/settings/platform.timezone", { value: "Etc/GMT+12" });
       const inGmt12 = await json<{ today: number }>(platform, "GET", "/api/apps/tasks/summary");
-      assert.equal(inGmt12.body.today, 0, "same instant is yesterday after the live switch");
+      assert.equal(inGmt12.body.today, 0, "same instant is tomorrow after the live switch");
     } finally {
       await platform.stop();
       cleanup();
