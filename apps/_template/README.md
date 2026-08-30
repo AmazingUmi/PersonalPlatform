@@ -120,7 +120,11 @@ such as the dashboard layout.
    module tables (`backend/src/generated/apps.ts`, `frontend/src/generated/apps.ts`).
 2. Edit `app.yaml`; write the first forward-only migration; run `npm run migration:up`.
 3. Implement the backend module (`registerApi`) and the frontend module (routes, widgets).
-4. Register UI metadata: icon + accent in `frontend/src/shared/ui/appIcons.ts`
-   and a `[data-app="<id>"]` accent scope in `frontend/src/styles/tokens.css`.
+4. OPTIONAL visual identity: icon + accent entries in
+   `frontend/src/shared/ui/appIcons.ts` and a `[data-app="<id>"]` accent scope
+   in `frontend/src/styles/tokens.css`. Skipping this is fine — the app falls
+   back to the generic "apps" icon and the `--px-primary` accent and is fully
+   usable without any shared-file edits. There is also nothing to sync:
+   `scripts/verify.sh` and the app-contract tests are app-list agnostic.
 5. Re-run `npm run generate:apps` after adding module files; verify with
    `npm run check && npm test && npm run test:integration`.

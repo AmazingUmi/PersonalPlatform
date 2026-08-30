@@ -14,7 +14,7 @@ Personal Platform is a single-user, self-hosted monolith. An **App** is a vertic
 
 Apps are compiled into the monolith — there is no runtime download or execution of unknown code. What the platform buys with this structure is per-app enable/disable, schema isolation, and a guarded capability surface, not dynamic loading.
 
-The contract described in this document is **App Contract V1**; `GET /api/core/platform` reports it as `platformApiVersion: 1` (see [platformApiVersion](#platformapiversion)).
+The contract described in this document is **App Contract V1**; `GET /api/core/platform` reports it as `platformApiVersion: 1` (see [platformApiVersion](#platformapiversion)). Every new app starts from the `_template` scaffold, and the shipped **focus** app is the Contract V1 reference implementation — see [Reference implementations](#reference-implementations).
 
 ## Directory layout
 
@@ -35,7 +35,7 @@ config/apps/my_app.yaml             # OPTIONAL static config, arbitrary YAML,
 
 Optional static config is loaded by `loadAppConfig` in `backend/src/core/config/index.ts`; it returns `{}` when the file is absent. It is deployment-time configuration (secrets, tunables), not user-visible settings — see [App settings ownership](#app-settings-ownership).
 
-The frontend side also has two shared registration points that are **not** scaffolded automatically; see [Registration](#registration).
+The frontend side also has two shared registration points that are **not** scaffolded automatically — both optional (icon/accent metadata); see [Registration](#registration).
 
 ## Manifest v1
 
@@ -97,12 +97,12 @@ npm run create:app -- my_app "My App"
 
 `scripts/create-app.ts` copies `apps/_template/`, writes backend and frontend stubs, and runs `generate:apps` automatically. The scaffold's `apps/_template/README.md` is copied into the new app as a step-by-step guide.
 
-### Manual frontend wiring
+### Manual frontend wiring (optional)
 
-Three registrations live in shared frontend files and must be done by hand:
+These registrations live in shared frontend files and are edited by hand, but they are all **OPTIONAL**: an unknown app id falls back to the generic `"apps"` icon and the platform accent `--px-primary`, and the app is fully usable — navigation, App Center, Dashboard widgets, routes — without touching any of these files. Add entries only when you want the app to have its own visual identity:
 
-1. **Icon and accent**: add entries to `APP_ICONS` and `APP_ACCENTS` in `frontend/src/shared/ui/appIcons.ts` (used by navigation, App Center, and Dashboard; fallbacks are `"apps"` icon and no accent).
-2. **Accent token**: add a `[data-app="<id>"] { --app-accent: var(--px-…); }` scope in `frontend/src/styles/tokens.css` so anything inside the app route can use `var(--app-accent)`.
+1. **Icon and accent (optional)**: add entries to `APP_ICONS` and `APP_ACCENTS` in `frontend/src/shared/ui/appIcons.ts` (used by navigation, App Center, and Dashboard). Without an entry the app shows the generic `"apps"` icon and the default accent.
+2. **Accent token (optional)**: add a `[data-app="<id>"] { --app-accent: var(--px-…); }` scope in `frontend/src/styles/tokens.css` so anything inside the app route can use `var(--app-accent)`. Without it the accent falls back to `--px-primary`.
 3. **New glyph (only if needed)**: if no existing icon fits, add a 16×16 pixel glyph to `pixelIcons` in `frontend/src/shared/ui/icons.tsx` — `IconName` is `keyof typeof pixelIcons`.
 
 ## App lifecycle
@@ -294,6 +294,35 @@ The shell combines the manifest `frontend.route` with each module's route paths 
 
 Integration-test requirement: a new app with a schema must be added to `APP_SCHEMAS` in `backend/test/helpers/db.ts` so `resetDatabase()` drops and re-creates it. Fixture apps that ship migrations register theirs via `registerTestSchemas(...)`.
 
+E2E policy: `frontend/e2e/platform.spec.ts` pins the **shipped app set** — the published product surface (navigation links, App Center list, dashboard widget titles). A new app in development does not need to, and should not, change the e2e specs; `npm run e2e` is only expected green on the shipped app set. Folding a new app into the e2e assertions is a product-release-time step, not part of app development.
+
+## Reference implementations
+
+Two in-repo apps are kept as living references. Read them alongside this document — when a rule here feels abstract, the concrete version lives in one of these trees.
+
+### Minimal app: `apps/_template/`
+
+The scaffold seed: `npm run create:app` copies this tree into a new `apps/<id>/` (see [Scaffolding](#scaffolding)). Its shape — a valid minimal manifest, an empty forward-only `migrations/` directory, and a README that walks through the next steps — is exactly what every app looks like before any code is written.
+
+### Complete app: `focus`
+
+The reference implementation of App Contract V1: a Pomodoro timer as a full vertical slice across all three mounting points (`apps/focus/`, `backend/src/apps/focus/`, `frontend/src/apps/focus/`). Patterns worth copying, with pointers:
+
+- **Manifest and capabilities** — `apps/focus/app.yaml`: declares `database` and `events`, and nothing it does not use.
+- **Own schema, forward-only migrations** — `apps/focus/migrations/`. The single-active-session invariant is a partial unique index (`sessions_one_active_idx … WHERE status IN ('running', 'paused')`) enforced by the database, not by application code.
+- **Backend layering** — three files, three jobs:
+  - `backend/src/apps/focus/timer.ts` — pure domain logic: zero imports, an injectable clock, no I/O. Every status transition and duration computation is testable without a database.
+  - `backend/src/apps/focus/repository.ts` — SQL, `ctx.database.withTransaction`, and revision-based optimistic locking.
+  - `backend/src/apps/focus/index.ts` — the module surface: HTTP routes, JSON Schema validation, `AppError`/constraint mapping, event publication.
+- **Platform-timezone discipline** — every calendar computation goes through `ctx.time.todayRangeUtc()` / `ctx.time.timezone()`; no app-local time helpers (`backend/src/apps/focus/index.ts`).
+- **Events after commit** — `focus.session.completed.v1` and `focus.session.cancelled.v1` are published only after the owning transaction commits (`backend/src/apps/focus/index.ts`).
+- **Interactive dashboard widget** — `frontend/src/apps/focus/FocusWidget.tsx`: plain native buttons inside the card; the shell's interactive-target guard keeps clicks from navigating (see [Dashboard widgets](#dashboard-widgets)).
+- **Frontend state hook** — `frontend/src/apps/focus/useFocusState.ts`: server-authoritative state, a 1s tick used for display only, self-heal from a 409 `error.details.state` conflict body, BroadcastChannel for cross-tab coherence, visibility-gated polling.
+- **Concurrency and recovery** — revision-based optimistic concurrency, idempotent pause/resume, a lazy reconcile on reads so correctness never depends on timers, and recovery from durable state after a platform restart (`backend/src/apps/focus/repository.ts`).
+- **Tests at all three layers** — pure-function unit tests (`backend/test/unit/focus-timer.test.ts`), an integration matrix driving a mutable injected clock (`backend/test/integration/focus.test.ts`), and a deterministic e2e that configures short durations so real timers stay fast (`frontend/e2e/focus.spec.ts`).
+
+Start a new app from `_template`; when it needs time semantics, concurrency control, or an interactive widget, read the corresponding focus file first and copy its approach.
+
 ## Adding a new app: checklist
 
 1. `npm run create:app -- <id> "Name"` — scaffolds `apps/<id>/`, backend and frontend stubs, runs `generate:apps`.
@@ -301,7 +330,7 @@ Integration-test requirement: a new app with a schema must be added to `APP_SCHE
 3. Write the first migration: `npm run migration:create -- --scope <id> --name init`, edit the SQL (bare table names), apply with `npm run migration:up`.
 4. Implement `backend/src/apps/<id>/index.ts`: `registerApi` with JSON Schema validation and `AppError` mapping; optional `registerEvents`/`registerJobs`/`healthcheck`.
 5. Implement `frontend/src/apps/<id>/index.tsx`: `routes` (path `""` is the app home) and optional `widgets` (ids matching the manifest).
-6. Register frontend UI metadata: `APP_ICONS`/`APP_ACCENTS` in `frontend/src/shared/ui/appIcons.ts` and a `[data-app="<id>"]` accent in `frontend/src/styles/tokens.css`; add a glyph in `frontend/src/shared/ui/icons.tsx` only if needed.
-7. If the app has a schema, add it to `APP_SCHEMAS` in `backend/test/helpers/db.ts`; add unit/integration/e2e coverage.
-8. **Sync `scripts/verify.sh`**: the acceptance script hardcodes the expected app list (`expect = ["assets", "focus", "mini_game", "tasks"]`). A new app must be added there or verify fails.
+6. OPTIONAL visual identity: `APP_ICONS`/`APP_ACCENTS` in `frontend/src/shared/ui/appIcons.ts` and a `[data-app="<id>"]` accent in `frontend/src/styles/tokens.css`; add a glyph in `frontend/src/shared/ui/icons.tsx` only if needed. Skipping this is fine — the app falls back to the generic `"apps"` icon and the `--px-primary` accent, and is fully usable without these edits.
+7. If the app has a schema, add it to `APP_SCHEMAS` in `backend/test/helpers/db.ts`; add unit/integration coverage. E2E specs are not part of app development — see the e2e policy under [Testing](#testing).
+8. Nothing to sync: `scripts/verify.sh` scans `apps/*/app.yaml` from disk (no hardcoded app list) and `backend/test/integration/app-contract.test.ts` falls back to the scaffold `GET /api/apps/<id>/ping` route, so a new app needs no edits to either — no assertions to update, no lists to extend.
 9. Verify: `npm run check && npm test && npm run test:integration` (full acceptance: `npm run verify`).
