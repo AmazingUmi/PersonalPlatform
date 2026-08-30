@@ -37,7 +37,10 @@ test.describe("pixel shell — mobile", () => {
     await expect(page).toHaveURL(/\/tasks$/);
     // The launcher closes after navigation.
     await expect(page.getByRole("dialog", { name: "More apps" })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /new task/i })).toBeVisible();
+    // Header button: the empty-task list renders a second "New Task" CTA.
+    await expect(
+      page.locator(".page-header__actions").getByRole("button", { name: /new task/i }),
+    ).toBeVisible();
   });
 
   test("app center stays usable and overflow-free on mobile", async ({ page }) => {

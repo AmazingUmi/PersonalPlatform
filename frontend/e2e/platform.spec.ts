@@ -42,7 +42,9 @@ test("dashboard renders one widget per validation app", async ({ page }) => {
 });
 
 async function createItemViaDialog(page: Page, name: string) {
-  await page.getByRole("button", { name: /new item/i }).click();
+  // Scoped to the header: the empty-inventory state renders a second
+  // "New Item" CTA, which would trip strict mode on a fresh database.
+  await page.locator(".page-header__actions").getByRole("button", { name: /new item/i }).click();
   await page.getByLabel("Item name").fill(name);
   await page.getByRole("button", { name: /create item/i }).click();
   await expect(page.getByTestId("item-editor")).toHaveCount(0);
@@ -65,7 +67,8 @@ test("assets: create, search and see the item", async ({ page }) => {
 test("tasks: create a task and complete it", async ({ page }) => {
   await page.goto("/tasks");
   const title = `e2e-task-${Date.now()}`;
-  await page.getByRole("button", { name: /new task/i }).click();
+  // Header button, not the empty-state CTA with the same name (fresh DB).
+  await page.locator(".page-header__actions").getByRole("button", { name: /new task/i }).click();
   await page.getByLabel("Task title").fill(title);
   await page.getByTestId("task-editor").getByLabel("Priority").selectOption("3");
   await page.getByRole("button", { name: /create task/i }).click();
