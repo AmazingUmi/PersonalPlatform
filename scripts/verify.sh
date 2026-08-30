@@ -9,8 +9,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-TEST_DATABASE_URL="${TEST_DATABASE_URL:-postgresql://personal_platform:change-me-for-local-development@127.0.0.1:5432/personal_platform_test}"
-DATABASE_URL="${DATABASE_URL:-postgresql://personal_platform:change-me-for-local-development@localhost:5432/personal_platform}"
+# Local default matches the exposed docker compose port (5439) and the test
+# helper default; CI overrides TEST_DATABASE_URL to its 5432 service.
+TEST_DATABASE_URL="${TEST_DATABASE_URL:-postgresql://personal_platform:change-me-for-local-development@127.0.0.1:5439/personal_platform_test}"
+DATABASE_URL="${DATABASE_URL:-postgresql://personal_platform:change-me-for-local-development@localhost:5439/personal_platform}"
 BACKEND_PORT="${BACKEND_PORT:-8901}"
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
