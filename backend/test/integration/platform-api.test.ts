@@ -31,6 +31,15 @@ after(async () => {
 });
 
 describe("core api", () => {
+  it("GET /api/core/platform reports the platform API version", async () => {
+    await withFixturePlatform({ database: db, manifests: [] }, async (platform) => {
+      const response = await platform.app.inject({ method: "GET", url: "/api/core/platform" });
+      assert.equal(response.statusCode, 200);
+      const body = response.json() as { platformApiVersion: number };
+      assert.equal(body.platformApiVersion, 1);
+    });
+  });
+
   it("GET /api/core/apps returns the unified items shape", async () => {
     await withFixturePlatform(
       { database: db, manifests: [{ id: "listed" }], backendModules: { listed: testAppModule("listed") } },

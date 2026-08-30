@@ -25,6 +25,7 @@ export function registerCoreRoutes(
   }));
 
   app.get("/api/core/platform", async () => ({
+    platformApiVersion: 1,
     name: deps.platform.name,
     environment: deps.platform.environment,
     timezone: deps.time.timezone(),

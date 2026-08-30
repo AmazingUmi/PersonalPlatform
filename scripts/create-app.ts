@@ -87,4 +87,15 @@ export default app;
 );
 
 execFileSync("npm", ["run", "generate:apps"], { cwd: root, stdio: "inherit" });
-console.log(`created app "${id}". Edit app.yaml, then implement backend/src/apps/${id}/index.ts.`);
+console.log(`created app "${id}" (npm run generate:apps already ran).`);
+console.log(`
+Next steps:
+  1. Edit apps/${id}/app.yaml (description, widgets, capabilities).
+  2. Write the first forward-only migration in apps/${id}/migrations/
+     (bare table names; the runner creates the ${id} schema), then: npm run migration:up
+  3. Implement backend/src/apps/${id}/index.ts and frontend/src/apps/${id}/index.tsx.
+  4. Register UI metadata: icon + accent in frontend/src/shared/ui/appIcons.ts
+     and a [data-app="${id}"] accent scope in frontend/src/styles/tokens.css.
+  5. Read doc/APP_DEVELOPMENT.md for the full app checklist
+     (short version: apps/_template/README.md).
+`);
