@@ -303,5 +303,5 @@ Integration-test requirement: a new app with a schema must be added to `APP_SCHE
 5. Implement `frontend/src/apps/<id>/index.tsx`: `routes` (path `""` is the app home) and optional `widgets` (ids matching the manifest).
 6. Register frontend UI metadata: `APP_ICONS`/`APP_ACCENTS` in `frontend/src/shared/ui/appIcons.ts` and a `[data-app="<id>"]` accent in `frontend/src/styles/tokens.css`; add a glyph in `frontend/src/shared/ui/icons.tsx` only if needed.
 7. If the app has a schema, add it to `APP_SCHEMAS` in `backend/test/helpers/db.ts`; add unit/integration/e2e coverage.
-8. **Sync `scripts/verify.sh`**: the acceptance script hardcodes the expected app list (`expect = ["assets", "mini_game", "tasks"]`). A new app must be added there or verify fails.
+8. **Sync `scripts/verify.sh`**: the acceptance script hardcodes the expected app list (`expect = ["assets", "focus", "mini_game", "tasks"]`). A new app must be added there or verify fails.
 9. Verify: `npm run check && npm test && npm run test:integration` (full acceptance: `npm run verify`).
