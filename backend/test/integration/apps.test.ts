@@ -177,7 +177,7 @@ describe("assets app API", () => {
         description: "work machine",
         quantity: 2,
         acquiredAt,
-        categoryId: electronicsId,
+        categoryIds: [electronicsId],
       },
     });
     assert.equal(created.statusCode, 201);
@@ -185,8 +185,11 @@ describe("assets app API", () => {
     assert.equal(body.name, "Laptop");
     assert.equal(body.description, "work machine");
     assert.equal(body.quantity, 2);
-    assert.equal(body.category_id, electronicsId);
-    assert.ok(body.acquired_at, "acquired_at persisted");
+    assert.deepEqual(
+      body.categories.map((c: { id: string }) => c.id),
+      [electronicsId],
+    );
+    assert.ok(body.acquiredAt, "acquiredAt persisted");
 
     const fetched = await platform.app.inject({ method: "GET", url: `/api/apps/assets/items/${body.id}` });
     assert.equal(fetched.statusCode, 200);
@@ -261,7 +264,7 @@ describe("assets app API", () => {
     const electronicsId = categories.json().items.find((c: { name: string }) => c.name === "Electronics").id as string;
     const byCategory = await platform.app.inject({
       method: "GET",
-      url: `/api/apps/assets/items?categoryId=${electronicsId}`,
+      url: `/api/apps/assets/items?categories=${electronicsId}`,
     });
     const names = byCategory.json().items.map((i: { name: string }) => i.name);
     assert.ok(names.includes("Laptop"), "category filter includes the categorized item");
@@ -338,7 +341,7 @@ describe("assets app API", () => {
     });
     assert.equal(upload.statusCode, 201);
     assert.equal(upload.json().filename, "receipt.txt");
-    assert.equal(upload.json().content_type, "text/plain");
+    assert.equal(upload.json().contentType, "text/plain");
     assert.equal(Number(upload.json().size), Buffer.byteLength(content, "utf8"));
     const attachmentId = upload.json().id as string;
 

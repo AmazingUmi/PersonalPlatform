@@ -337,6 +337,37 @@
   color: var(--px-ink-muted);
 }
 
+/* Category stripe (P7A2-10): one equal-width segment per assigned category,
+ * first row inside the card padding. Segments without a custom color fall
+ * back to the muted ink; cards with no category render no stripe at all. */
+.inv-card__stripe {
+  display: flex;
+  height: 4px;
+  flex: none;
+}
+
+.inv-card__stripe-seg {
+  flex: 1;
+  background: var(--px-ink-muted);
+}
+
+.inv-card__stripe-seg[data-accent="primary"] { background: var(--px-primary); }
+.inv-card__stripe-seg[data-accent="success"] { background: var(--px-success); }
+.inv-card__stripe-seg[data-accent="warning"] { background: var(--px-warning); }
+.inv-card__stripe-seg[data-accent="danger"] { background: var(--px-danger); }
+.inv-card__stripe-seg[data-accent="info"] { background: var(--px-info); }
+.inv-card__stripe-seg[data-accent="mint"] { background: var(--px-mint); }
+.inv-card__stripe-seg[data-accent="yellow"] { background: var(--px-yellow); }
+.inv-card__stripe-seg[data-accent="violet"] { background: var(--px-violet); }
+.inv-card__stripe-seg[data-accent="coral"] { background: var(--px-coral); }
+
+.inv-card__badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
 .asset-detail__desc {
   margin-top: var(--space-3);
   padding-top: var(--space-3);
@@ -750,7 +781,7 @@
 .app-card__icon[data-accent="coral"] { color: var(--px-coral); }
 .app-card__icon[data-accent="primary"] { color: var(--px-primary); }
 
-/* ---------- Category chips: color dot + click-to-manage ---------- */
+/* ---------- Category chips: color dot + click-to-filter, `⋯` to manage ---------- */
 
 .px-cat-dot {
   display: inline-block;
@@ -776,21 +807,40 @@
 .px-cat-dot[data-accent="violet"] { background: var(--px-violet); }
 .px-cat-dot[data-accent="coral"] { background: var(--px-coral); }
 
-.px-chip--open {
-  background: var(--px-ink);
-  border-color: var(--px-border);
-  color: var(--px-inverse);
-  box-shadow: var(--shadow-pixel-sm);
-}
-
-.px-chip--open .px-chip__count {
-  border-color: currentColor;
-}
-
 .px-chip__tools {
   display: inline-flex;
   align-items: center;
   gap: 2px;
+}
+
+/* "Manage category" ghost toggle next to each chip (P7A2-05): compact, and
+ * inverts while its inline tools row is expanded — the inverted look moved
+ * here from the chip, which is now a filter toggle. */
+.px-button.px-chip-manage {
+  min-width: 26px;
+  min-height: 32px;
+  padding: 0 5px;
+  border-color: transparent;
+}
+
+.px-button.px-chip-manage[aria-expanded="true"] {
+  background: var(--px-ink);
+  color: var(--px-inverse);
+  border-color: var(--px-border);
+  box-shadow: var(--shadow-pixel-sm);
+}
+
+/* Multi-select category chips in the item editor (P7A2-09). */
+.assets-editor__categories {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.asset-detail__categories {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
 }
 
 /* ---------- Filters panel spacing ---------- */

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../shared/api";
 import { useAppDisplayName } from "../../shared/PresentationContext";
@@ -13,6 +13,7 @@ import { PixelBadge } from "../../shared/ui/PixelBadge";
 import { PixelButton } from "../../shared/ui/PixelButton";
 import { PixelIcon } from "../../shared/ui/PixelIcon";
 import { PixelInput } from "../../shared/ui/PixelInput";
+import type { PixelAccent } from "../../shared/ui/PixelWindow";
 import { PixelWindow } from "../../shared/ui/PixelWindow";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { useAsync } from "../../shared/useAsync";
@@ -25,22 +26,32 @@ interface Category {
 
 interface Item {
   id: string;
-  category_id: string | null;
   name: string;
   description: string | null;
   quantity: number;
-  acquired_at: string | null;
-  target_location: string | null;
-  created_at: string;
-  updated_at: string;
+  acquiredAt: string | null;
+  targetLocation: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Categories ordered by name (server-side); empty = uncategorized. */
+  categories: Category[];
 }
 
 interface Attachment {
   id: string;
-  item_id: string;
+  itemId: string;
   filename: string;
-  content_type: string | null;
+  contentType: string | null;
   size: number;
+}
+
+/** GET /items also returns faceted counts (worklist §2.4). */
+interface ItemsListResponse {
+  items: Item[];
+  counts: {
+    all: number;
+    categories: Record<string, number>;
+  };
 }
 
 const SORT_OPTIONS = [
@@ -51,6 +62,30 @@ const SORT_OPTIONS = [
   { value: "acquiredAt", label: "Acquired" },
   { value: "targetLocation", label: "Location" },
 ] as const;
+
+/** Category badges clamped on cards (detail shows all). */
+const CATEGORY_BADGE_LIMIT = 3;
+
+/** API color string -> PixelBadge accent (undefined = neutral fallback). */
+function accentOf(color: string | null | undefined): PixelAccent | undefined {
+  return color ? (color as PixelAccent) : undefined;
+}
+
+/** `categories` URL param: comma-separated category ids (notes `tags` precedent). */
+function parseCategoryIds(raw: string | null): string[] {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((id) => id.trim())
+    .filter((id) => id !== "");
+}
+
+/** Same set of ids regardless of order (categoryIds are an unordered set). */
+function sameIdSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const setB = new Set(b);
+  return a.every((id) => setB.has(id));
+}
 
 function formatBytes(size: number): string {
   if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
@@ -66,7 +101,7 @@ function formatTimestamp(value: string | null): string {
 /** Build the items query string from the current URL search params. */
 function itemsQueryString(params: URLSearchParams): string {
   const query = new URLSearchParams();
-  for (const key of ["q", "categoryId", "targetLocation", "acquiredAfter", "acquiredBefore", "createdAfter", "createdBefore", "sortBy", "order"]) {
+  for (const key of ["q", "categories", "targetLocation", "acquiredAfter", "acquiredBefore", "createdAfter", "createdBefore", "sortBy", "order"]) {
     const value = params.get(key);
     if (value) query.set(key, value);
   }
@@ -75,7 +110,7 @@ function itemsQueryString(params: URLSearchParams): string {
 }
 
 /** Filter keys that count towards the collapsed Filters-button badge. */
-const ASSETS_FILTER_KEYS = ["q", "categoryId", "targetLocation", "acquiredAfter", "acquiredBefore", "createdAfter", "createdBefore"];
+const ASSETS_FILTER_KEYS = ["q", "categories", "targetLocation", "acquiredAfter", "acquiredBefore", "createdAfter", "createdBefore"];
 
 function countActiveFilters(params: URLSearchParams, keys: string[]): number {
   return keys.reduce((count, key) => (params.get(key) ? count + 1 : count), 0);
@@ -85,13 +120,13 @@ interface ItemEditorState {
   name: string;
   description: string;
   quantity: string;
-  categoryId: string;
+  categoryIds: string[];
   acquiredAt: string;
   targetLocation: string;
 }
 
 function emptyEditorState(): ItemEditorState {
-  return { name: "", description: "", quantity: "1", categoryId: "", acquiredAt: "", targetLocation: "" };
+  return { name: "", description: "", quantity: "1", categoryIds: [], acquiredAt: "", targetLocation: "" };
 }
 
 function editorStateFromItem(item: Item): ItemEditorState {
@@ -99,14 +134,15 @@ function editorStateFromItem(item: Item): ItemEditorState {
     name: item.name,
     description: item.description ?? "",
     quantity: String(item.quantity),
-    categoryId: item.category_id ?? "",
-    acquiredAt: item.acquired_at ?? "",
-    targetLocation: item.target_location ?? "",
+    categoryIds: item.categories.map((category) => category.id),
+    acquiredAt: item.acquiredAt ?? "",
+    targetLocation: item.targetLocation ?? "",
   };
 }
 
 /** Create/edit item modal (FP-3.3). Empty string fields are omitted on create,
- * sent as null on edit so nullable columns can be cleared. */
+ * sent as null on edit so nullable columns can be cleared. Categories are a
+ * multi-select chip group (worklist §4.3). */
 function ItemEditor({
   item,
   categories,
@@ -124,15 +160,28 @@ function ItemEditor({
   const set = <K extends keyof ItemEditorState>(key: K, value: ItemEditorState[K]) =>
     setForm((current) => ({ ...current, [key]: value }));
 
+  const toggleCategory = (categoryId: string) =>
+    setForm((current) => ({
+      ...current,
+      categoryIds: current.categoryIds.includes(categoryId)
+        ? current.categoryIds.filter((id) => id !== categoryId)
+        : [...current.categoryIds, categoryId],
+    }));
+
   const save = useMutation(async () => {
     const body: Record<string, unknown> = {
       name: form.name.trim(),
       description: form.description.trim() === "" ? null : form.description.trim(),
       quantity: Number(form.quantity) || 0,
-      categoryId: form.categoryId === "" ? null : form.categoryId,
       acquiredAt: form.acquiredAt === "" ? null : form.acquiredAt,
       targetLocation: form.targetLocation.trim() === "" ? null : form.targetLocation.trim(),
     };
+    // Create always sends the set (possibly empty); edit uses the PATCH
+    // three-state semantics — absent = keep, [] = clear, list = replace —
+    // so an unchanged set is simply omitted (notes tagIds precedent).
+    if (!item || !sameIdSet(form.categoryIds, item.categories.map((category) => category.id))) {
+      body.categoryIds = form.categoryIds;
+    }
     if (item) {
       await api(`/api/apps/assets/items/${item.id}`, {
         method: "PATCH",
@@ -182,33 +231,39 @@ function ItemEditor({
               aria-label="Item description"
             />
           </label>
-          <div className="px-form__grid">
-            <label className="px-form__row">
-              <span className="px-form__label">Quantity</span>
-              <PixelInput
-                type="number"
-                min={0}
-                value={form.quantity}
-                onChange={(e) => set("quantity", e.target.value)}
-                aria-label="Quantity"
-              />
-            </label>
-            <label className="px-form__row">
-              <span className="px-form__label">Category</span>
-              <select
-                className="px-select"
-                value={form.categoryId}
-                onChange={(e) => set("categoryId", e.target.value)}
-                aria-label="Category"
-              >
-                <option value="">—</option>
+          <div className="px-form__row">
+            <span className="px-form__label">Quantity</span>
+            <PixelInput
+              type="number"
+              min={0}
+              value={form.quantity}
+              onChange={(e) => set("quantity", e.target.value)}
+              aria-label="Quantity"
+            />
+          </div>
+          <div className="px-form__row">
+            <span className="px-form__label">Category</span>
+            {categories.length > 0 ? (
+              <div className="assets-editor__categories">
                 {categories.map((category) => (
-                  <option key={category.id} value={category.id}>
-                    {category.name}
-                  </option>
+                  <button
+                    key={category.id}
+                    type="button"
+                    className="px-chip"
+                    aria-pressed={form.categoryIds.includes(category.id)}
+                    aria-label={`Toggle category ${category.name}`}
+                    onClick={() => toggleCategory(category.id)}
+                  >
+                    {category.color ? (
+                      <span className="px-cat-dot" data-accent={category.color} aria-hidden="true" />
+                    ) : null}
+                    <span>{category.name}</span>
+                  </button>
                 ))}
-              </select>
-            </label>
+              </div>
+            ) : (
+              <p className="px-form__hint">No categories yet — add one below the category chips first.</p>
+            )}
           </div>
           <div className="px-form__grid">
             <label className="px-form__row">
@@ -331,7 +386,7 @@ function AssetsPage() {
   const [editorFor, setEditorFor] = useState<Item | null | undefined>(undefined);
   const [categoryEdit, setCategoryEdit] = useState<Category | null>(null);
   const [categoryDelete, setCategoryDelete] = useState<Category | null>(null);
-  // The expanded category chip reveals its manage actions; one at a time.
+  // The "Manage category" button reveals that chip's inline tools; one at a time.
   const [openCategoryId, setOpenCategoryId] = useState<string | null>(null);
   // Filters collapse into a header button; a deep link with active filters
   // starts expanded.
@@ -366,12 +421,20 @@ function AssetsPage() {
     setSearchInput(rawSearch);
   }, [rawSearch]);
 
-  const activeCategory = searchParams.get("categoryId") ?? "";
+  const selectedCategoryIds = parseCategoryIds(searchParams.get("categories"));
   const sortBy = searchParams.get("sortBy") ?? "createdAt";
   const order = searchParams.get("order") ?? "desc";
 
+  /** Toggle one category id in the URL `categories` set (worklist §4.1/4.2). */
+  const toggleCategoryFilter = (categoryId: string) => {
+    const next = selectedCategoryIds.includes(categoryId)
+      ? selectedCategoryIds.filter((id) => id !== categoryId)
+      : [...selectedCategoryIds, categoryId];
+    setParam("categories", next.join(","));
+  };
+
   const items = useAsync(
-    () => api<{ items: Item[] }>(`/api/apps/assets/items${itemsQueryString(searchParams)}`),
+    () => api<ItemsListResponse>(`/api/apps/assets/items${itemsQueryString(searchParams)}`),
     [searchParams.toString(), reloadKey],
   );
   const categories = useAsync(() => api<{ items: Category[] }>("/api/apps/assets/categories"), [reloadKey]);
@@ -398,11 +461,10 @@ function AssetsPage() {
   };
 
   const allItems = items.data?.items ?? [];
+  const counts = items.data?.counts;
+  const countForCategory = (id: string) => counts?.categories[id] ?? 0;
   const activeFilterCount = countActiveFilters(searchParams, ASSETS_FILTER_KEYS);
   const hasFilters = Boolean(itemsQueryString(searchParams));
-  const categoryNames = new Map((categories.data?.items ?? []).map((c) => [c.id, c.name]));
-  const countFor = (id: string | null) =>
-    id ? allItems.filter((item) => item.category_id === id).length : allItems.length;
 
   return (
     <div className="page" data-app="assets">
@@ -441,19 +503,6 @@ function AssetsPage() {
               aria-label="Search items"
             />
           </div>
-          <select
-            className="px-select"
-            value={activeCategory}
-            onChange={(e) => setParam("categoryId", e.target.value)}
-            aria-label="Filter by category"
-          >
-            <option value="">All categories</option>
-            {(categories.data?.items ?? []).map((category) => (
-              <option key={category.id} value={category.id}>
-                {category.name}
-              </option>
-            ))}
-          </select>
           <PixelInput
             placeholder="Location"
             value={searchParams.get("targetLocation") ?? ""}
@@ -538,11 +587,12 @@ function AssetsPage() {
           <button
             type="button"
             className="px-chip"
-            aria-pressed={activeCategory === ""}
-            onClick={() => setParam("categoryId", "")}
+            aria-pressed={selectedCategoryIds.length === 0}
+            aria-label="All categories"
+            onClick={() => setParam("categories", "")}
           >
             <span>All</span>
-            <span className="px-chip__count">{countFor(null)}</span>
+            <span className="px-chip__count">{counts?.all ?? 0}</span>
           </button>
           {(categories.data?.items ?? []).map((category) => {
             const open = openCategoryId === category.id;
@@ -550,27 +600,29 @@ function AssetsPage() {
               <span key={category.id} className="px-chip-group">
                 <button
                   type="button"
-                  className={`px-chip${open ? " px-chip--open" : ""}`}
-                  aria-expanded={open}
-                  onClick={() => setOpenCategoryId(open ? null : category.id)}
+                  className="px-chip"
+                  aria-pressed={selectedCategoryIds.includes(category.id)}
+                  aria-label={`Filter by category ${category.name}`}
+                  onClick={() => toggleCategoryFilter(category.id)}
                 >
                   {category.color ? (
                     <span className="px-cat-dot" data-accent={category.color} aria-hidden="true" />
                   ) : null}
                   <span>{category.name}</span>
-                  <span className="px-chip__count">{countFor(category.id)}</span>
+                  <span className="px-chip__count">{countForCategory(category.id)}</span>
                 </button>
+                <PixelButton
+                  variant="ghost"
+                  size="sm"
+                  className="px-chip-manage"
+                  aria-label={`Manage category ${category.name}`}
+                  aria-expanded={open}
+                  onClick={() => setOpenCategoryId(open ? null : category.id)}
+                >
+                  <PixelIcon name="menu" />
+                </PixelButton>
                 {open ? (
                   <span className="px-chip__tools">
-                    <PixelButton
-                      variant="ghost"
-                      size="sm"
-                      className="px-button--icon"
-                      aria-label={`Filter by category ${category.name}`}
-                      onClick={() => setParam("categoryId", activeCategory === category.id ? "" : category.id)}
-                    >
-                      <PixelIcon name="search" />
-                    </PixelButton>
                     <PixelButton
                       variant="ghost"
                       size="sm"
@@ -664,8 +716,21 @@ function AssetsPage() {
           />
         ) : (
           <ul className="inventory-grid">
-            {allItems.map((item) => (
+            {allItems.map((item) => {
+              const overflowCategories = item.categories.slice(CATEGORY_BADGE_LIMIT);
+              return (
               <li key={item.id} className="inv-card">
+                {item.categories.length > 0 ? (
+                  <span className="inv-card__stripe" aria-hidden="true">
+                    {item.categories.map((category) => (
+                      <i
+                        key={category.id}
+                        className="inv-card__stripe-seg"
+                        data-accent={accentOf(category.color)}
+                      />
+                    ))}
+                  </span>
+                ) : null}
                 <Link to={`/assets/items/${item.id}`} className="inv-card__main">
                   <span className="inv-card__thumb" aria-hidden="true">
                     <PixelIcon name="box" size={32} />
@@ -674,15 +739,25 @@ function AssetsPage() {
                 </Link>
                 <div className="inv-card__foot">
                   <span className="inv-card__qty">×{item.quantity}</span>
-                  {item.category_id && categoryNames.has(item.category_id) ? (
-                    <PixelBadge tone="neutral">{categoryNames.get(item.category_id)}</PixelBadge>
-                  ) : null}
-                  {item.target_location ? (
-                    <PixelBadge tone="info">{item.target_location}</PixelBadge>
-                  ) : null}
+                  <span className="inv-card__badges">
+                    {item.categories.slice(0, CATEGORY_BADGE_LIMIT).map((category) => (
+                      <PixelBadge key={category.id} accent={accentOf(category.color)}>
+                        {category.name}
+                      </PixelBadge>
+                    ))}
+                    {overflowCategories.length > 0 ? (
+                      <PixelBadge title={overflowCategories.map((category) => category.name).join(", ")}>
+                        {`+${overflowCategories.length}`}
+                      </PixelBadge>
+                    ) : null}
+                    {item.targetLocation ? (
+                      <PixelBadge tone="info">{item.targetLocation}</PixelBadge>
+                    ) : null}
+                  </span>
                 </div>
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </section>
@@ -711,14 +786,19 @@ function AssetsPage() {
       {categoryDelete ? (
         <ConfirmDialog
           title="Delete category"
-          message={`Delete "${categoryDelete.name}"? Items in this category are kept but become uncategorized.`}
+          message={`Delete "${categoryDelete.name}"? Items keep their other categories; items that only have this one become uncategorized.`}
           busy={deleteCategory.busy}
           onCancel={() => setCategoryDelete(null)}
           onConfirm={async () => {
             if (await deleteCategory.mutate()) {
               setCategoryDelete(null);
               setOpenCategoryId(null);
-              if (activeCategory === categoryDelete.id) setParam("categoryId", "");
+              if (selectedCategoryIds.includes(categoryDelete.id)) {
+                setParam(
+                  "categories",
+                  selectedCategoryIds.filter((id) => id !== categoryDelete.id).join(","),
+                );
+              }
               refresh();
             }
           }}
@@ -808,9 +888,6 @@ function AssetDetailPage() {
   }
 
   const data = item.data!;
-  const categoryName = data.category_id
-    ? (categories.data?.items ?? []).find((c) => c.id === data.category_id)?.name
-    : undefined;
 
   return (
     <div className="page page--detail" data-app="assets">
@@ -841,23 +918,35 @@ function AssetDetailPage() {
           </div>
           <div>
             <dt>Category</dt>
-            <dd>{categoryName ?? "—"}</dd>
+            <dd>
+              {data.categories.length > 0 ? (
+                <span className="asset-detail__categories">
+                  {data.categories.map((category) => (
+                    <PixelBadge key={category.id} accent={accentOf(category.color)}>
+                      {category.name}
+                    </PixelBadge>
+                  ))}
+                </span>
+              ) : (
+                "—"
+              )}
+            </dd>
           </div>
           <div>
             <dt>Location</dt>
-            <dd>{data.target_location ?? "—"}</dd>
+            <dd>{data.targetLocation ?? "—"}</dd>
           </div>
           <div>
             <dt>Acquired</dt>
-            <dd>{data.acquired_at ?? "—"}</dd>
+            <dd>{data.acquiredAt ?? "—"}</dd>
           </div>
           <div>
             <dt>Added (auto)</dt>
-            <dd>{formatTimestamp(data.created_at)}</dd>
+            <dd>{formatTimestamp(data.createdAt)}</dd>
           </div>
           <div>
             <dt>Last modified</dt>
-            <dd>{formatTimestamp(data.updated_at)}</dd>
+            <dd>{formatTimestamp(data.updatedAt)}</dd>
           </div>
         </dl>
         {data.description ? <p className="asset-detail__desc">{data.description}</p> : null}

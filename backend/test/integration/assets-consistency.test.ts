@@ -91,7 +91,7 @@ describe("multipart upload validation (FP-12.2)", () => {
     assert.equal(response.statusCode, 201);
     const body = response.json();
     assert.equal(body.filename, "photo.bin");
-    assert.equal(body.content_type, "application/octet-stream");
+    assert.equal(body.contentType, "application/octet-stream");
     assert.equal(Number(body.size), "hello-multipart".length);
     assert.ok(existsSync(attachmentFile(itemId, body.id)), "file landed in storage");
   });

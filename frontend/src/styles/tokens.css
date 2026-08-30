@@ -30,6 +30,9 @@
   --px-primary: #5279a8;
   --px-primary-light: #86add0;
   --px-primary-dark: #385777;
+  /* Same >= 4.5:1-on-the-light contract as the semantic -text tokens; darker
+   * than the others because --px-primary-light is a mid-tone, not a pale fill. */
+  --px-primary-text: #223d5c;
 
   /* Semantic (fills / borders) */
   --px-success: #5d9564;
@@ -50,11 +53,23 @@
   --px-danger-text: #a03d39;
   --px-info-text: #3c5f86;
 
-  /* Decorative */
+  /* Decorative — same light-fill/dark-text pairing rule as the semantic
+   * colors above, so all nine accents expose -light and -text. */
   --px-violet: #8b78a8;
+  --px-violet-light: #e4dff0;
+  --px-violet-text: #57496f;
+
   --px-coral: #c97861;
+  --px-coral-light: #f3ddd6;
+  --px-coral-text: #8a4735;
+
   --px-mint: #71a993;
+  --px-mint-light: #d9ebe4;
+  --px-mint-text: #3e6b58;
+
   --px-yellow: #ddb653;
+  --px-yellow-light: #f4e7c2;
+  --px-yellow-text: #7a5f1d;
 
   /* Typography
    * --font-pixel falls back to monospace until a licensed pixel font

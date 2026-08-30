@@ -158,6 +158,55 @@ a.px-button:hover {
   background: var(--px-info-light);
 }
 
+/* Accent dimension — same light-fill/dark-text language as the tone rules
+ * above, but keyed by the platform accent palette. Attribute selectors
+ * outrank the single tone class, so an accent recolors the badge while the
+ * tone class stays available as the non-color fallback. */
+.px-badge[data-accent="primary"] {
+  color: var(--px-primary-text);
+  background: var(--px-primary-light);
+}
+
+.px-badge[data-accent="success"] {
+  color: var(--px-success-text);
+  background: var(--px-success-light);
+}
+
+.px-badge[data-accent="warning"] {
+  color: var(--px-warning-text);
+  background: var(--px-warning-light);
+}
+
+.px-badge[data-accent="danger"] {
+  color: var(--px-danger-text);
+  background: var(--px-danger-light);
+}
+
+.px-badge[data-accent="info"] {
+  color: var(--px-info-text);
+  background: var(--px-info-light);
+}
+
+.px-badge[data-accent="mint"] {
+  color: var(--px-mint-text);
+  background: var(--px-mint-light);
+}
+
+.px-badge[data-accent="yellow"] {
+  color: var(--px-yellow-text);
+  background: var(--px-yellow-light);
+}
+
+.px-badge[data-accent="violet"] {
+  color: var(--px-violet-text);
+  background: var(--px-violet-light);
+}
+
+.px-badge[data-accent="coral"] {
+  color: var(--px-coral-text);
+  background: var(--px-coral-light);
+}
+
 /* ---------- PixelWindow ---------- */
 
 .px-window {
@@ -626,10 +675,14 @@ a.px-button:hover {
   padding: var(--space-4);
   background: color-mix(in srgb, var(--px-ink) 45%, transparent);
   image-rendering: pixelated;
+  /* A dialog can outgrow the viewport (e.g. a long chip list inside a form);
+     scroll the backdrop instead of pushing the actions out of reach. */
+  overflow-y: auto;
 }
 
 .px-dialog {
   width: min(420px, 100%);
+  margin: auto;
 }
 
 .px-dialog__message {
