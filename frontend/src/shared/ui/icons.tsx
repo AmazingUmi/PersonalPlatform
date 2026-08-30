@@ -55,6 +55,12 @@ export const pixelIcons = {
       />
     ),
   },
+  focus: {
+    box: "0 0 16 16",
+    node: (
+      <path d="M2 1h12v2H2zM4 3h8v2H4zM5 5h6v1H5zM6 6h4v1H6zM7 7h2v2H7zM6 9h4v1H6zM5 10h6v1H5zM4 11h8v2H4zM2 13h12v2H2z" />
+    ),
+  },
   search: {
     box: "0 0 16 16",
     node: (

@@ -798,3 +798,197 @@
 .assets-filters__spacer {
   flex: 1 1 auto;
 }
+
+/* ---------- Focus (APP-1 F07) ---------- */
+
+/* Timer zone */
+
+.focus-timer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  text-align: center;
+}
+
+.focus-timer__badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.focus-clock {
+  font-family: var(--font-pixel);
+  font-size: clamp(40px, 14vw, 56px);
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+  color: var(--px-ink);
+}
+
+.focus-clock--idle {
+  color: var(--px-ink-muted);
+}
+
+.focus-progress {
+  width: 100%;
+  height: 8px;
+  border: var(--border-1) solid var(--px-border);
+  background: var(--px-bg);
+}
+
+.focus-progress__fill {
+  height: 100%;
+  background: var(--app-accent, var(--px-primary));
+}
+
+.focus-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.focus-next {
+  margin: 0;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--px-ink-muted);
+}
+
+/* History zone: 7-day bar chart. Columns stretch to the fixed chart height,
+ * so each bar bottoms out at the baseline and grows upward. */
+
+.focus-history {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.focus-history .section-title {
+  margin: 0 0 var(--space-2);
+}
+
+.focus-stats {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: var(--space-1);
+  height: 120px;
+}
+
+.focus-stats__col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.focus-stats__value {
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  line-height: 1.2;
+  color: var(--px-ink-soft);
+}
+
+.focus-stats__bar {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.focus-stats__bar-fill {
+  width: 100%;
+  background: var(--app-accent, var(--px-primary));
+  min-height: 2px;
+  border: var(--border-1) solid var(--px-border);
+}
+
+.focus-stats__label {
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  line-height: 1.2;
+  color: var(--px-ink-muted);
+  white-space: nowrap;
+}
+
+.focus-stats__empty {
+  margin: 0;
+  padding: var(--space-4);
+  border: var(--border-1) dashed var(--px-border-soft);
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--px-ink-muted);
+}
+
+.focus-history__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.focus-history__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  border-bottom: var(--border-1) dashed var(--px-border-soft);
+}
+
+.focus-history__row:last-child {
+  border-bottom: 0;
+}
+
+.focus-history__when {
+  font-size: var(--text-sm);
+  color: var(--px-ink);
+}
+
+.focus-history__durations {
+  margin-left: auto;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+  white-space: nowrap;
+}
+
+.focus-history__more {
+  display: flex;
+  justify-content: center;
+  padding-top: var(--space-2);
+}
+
+/* Dashboard widget (APP-1 FocusWidget). */
+
+.focus-widget__time {
+  font-family: var(--font-pixel);
+  font-size: 28px;
+  line-height: 1;
+  letter-spacing: 0.03em;
+  font-variant-numeric: tabular-nums;
+  color: var(--px-ink);
+}
+
+.focus-widget__state {
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--px-ink-muted);
+}
+
+.focus-widget__meta {
+  font-size: var(--text-sm);
+  color: var(--px-ink-muted);
+}
+
+.focus-widget__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}

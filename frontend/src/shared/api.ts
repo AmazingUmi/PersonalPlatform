@@ -28,6 +28,26 @@ export interface AppInfo {
   hasFrontend: boolean;
 }
 
+/**
+ * Structured API error for responses carrying the platform error envelope
+ * `{ error: { code, message, details } }`. Extends Error, so existing
+ * `catch (e) instanceof Error` / `e.message` consumers keep working; they
+ * can additionally narrow on ApiError to read status/code/details.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  readonly details: unknown;
+
+  constructor(message: string, status: number, code: string | null, details: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
 /** Generic JSON API helper with unified error extraction. */
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
@@ -38,10 +58,20 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     /* non-JSON body */
   }
   if (!response.ok) {
-    const message =
+    const errorBody =
       typeof body === "object" && body !== null && "error" in body
-        ? String((body as { error: { message?: string } }).error?.message ?? `HTTP ${response.status}`)
+        ? (body as { error: unknown }).error
+        : null;
+    // Message extraction is unchanged: envelope message if present, else HTTP <status>.
+    const message =
+      errorBody !== null && typeof errorBody === "object"
+        ? String((errorBody as { message?: string }).message ?? `HTTP ${response.status}`)
         : `HTTP ${response.status}`;
+    if (errorBody !== null && typeof errorBody === "object") {
+      const { code, details } = errorBody as { code?: unknown; details?: unknown };
+      throw new ApiError(message, response.status, typeof code === "string" ? code : null, details);
+    }
+    // Network failures / non-JSON / non-envelope bodies still throw plain Error.
     throw new Error(message);
   }
   return body as T;

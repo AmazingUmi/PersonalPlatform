@@ -117,6 +117,10 @@
   --app-accent: var(--px-violet);
 }
 
+[data-app="focus"] {
+  --app-accent: var(--px-coral);
+}
+
 [data-app="settings"] {
   --app-accent: var(--px-primary);
 }

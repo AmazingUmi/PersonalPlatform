@@ -9,12 +9,14 @@ const APP_ICONS: Record<string, IconName> = {
   tasks: "tasks",
   assets: "box",
   mini_game: "game",
+  focus: "focus",
 };
 
 const APP_ACCENTS: Record<string, PixelAccent> = {
   tasks: "mint",
   assets: "yellow",
   mini_game: "violet",
+  focus: "coral",
 };
 
 export function appIconName(appId: string): IconName {
