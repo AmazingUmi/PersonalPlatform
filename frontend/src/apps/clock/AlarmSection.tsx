@@ -34,7 +34,8 @@ const ALARMS_URL = "/api/apps/clock/alarms";
 type PermissionState = "unsupported" | "default" | "granted" | "denied";
 
 interface RingingAlarm {
-  key: number; // occurrence instant, dedupes the same ring
+  /** Fire identity — `<alarmId>:<occurrence instant>` — unique per alarm AND occurrence. */
+  key: string;
   alarm: AlarmView;
 }
 
@@ -50,7 +51,7 @@ export function AlarmSection() {
   const [editorFor, setEditorFor] = useState<AlarmView | null | undefined>(undefined);
   const [deleting, setDeleting] = useState<AlarmView | null>(null);
   const [ringing, setRinging] = useState<RingingAlarm[]>([]);
-  const firedKeys = useRef<Set<number>>(new Set());
+  const firedKeys = useRef<Set<string>>(new Set());
   const now = useClockNow(true);
 
   const [permission, setPermission] = useState<PermissionState>(() =>
@@ -71,7 +72,9 @@ export function AlarmSection() {
   const items = alarms.data?.items ?? [];
 
   // Fire detection: a 60s window after each alarm's local HH:MM. Runs on the
-  // second tick while the app is open; each occurrence fires at most once.
+  // second tick while the app is open. The fire key is `<alarmId>:<occurrence>`:
+  // the same occurrence of the same alarm fires at most once, but two
+  // different alarms at the same HH:MM each fire on their own.
   useEffect(() => {
     for (const alarm of items) {
       if (!alarm.enabled) continue;
@@ -79,16 +82,16 @@ export function AlarmSection() {
       if (!parsed) continue;
       const occurrence = new Date(now);
       occurrence.setHours(parsed.hours, parsed.minutes, 0, 0);
-      const key = occurrence.getTime();
-      const age = now.getTime() - key;
-      if (age < 0 || age >= 60_000 || firedKeys.current.has(key)) continue;
+      const fireKey = `${alarm.id}:${occurrence.getTime()}`;
+      const age = now.getTime() - occurrence.getTime();
+      if (age < 0 || age >= 60_000 || firedKeys.current.has(fireKey)) continue;
       if (alarm.repeatDays.length > 0 && !alarm.repeatDays.includes(occurrence.getDay())) continue;
-      firedKeys.current.add(key);
-      setRinging((current) => [...current, { key, alarm }]);
+      firedKeys.current.add(fireKey);
+      setRinging((current) => [...current, { key: fireKey, alarm }]);
       if (typeof Notification !== "undefined" && Notification.permission === "granted") {
         try {
           new Notification(`⏰ ${alarm.time} ${alarm.label || "Alarm"}`, {
-            tag: `clock-alarm-${alarm.id}-${key}`,
+            tag: `clock-alarm-${fireKey}`,
           });
         } catch {
           // Some environments construct but reject; the in-app banner still rings.
@@ -269,7 +272,13 @@ function AlarmEditor({ alarm, onClose, onSaved }: AlarmEditorProps) {
   const [repeatDays, setRepeatDays] = useState<number[]>(alarm?.repeatDays ?? [1, 2, 3, 4, 5]);
   const save = useMutation(async () => {
     if (!parseAlarmTime(time)) return; // guarded below; keeps mutation types simple
-    const body = JSON.stringify({ time, label: label.trim() || null, repeatDays });
+    // POST takes a non-nullable label, so an empty label is simply omitted
+    // ("" is the column default); PATCH keeps null = "clear to ''".
+    const trimmed = label.trim();
+    const payload: Record<string, unknown> = { time, repeatDays };
+    if (alarm) payload.label = trimmed || null;
+    else if (trimmed) payload.label = trimmed;
+    const body = JSON.stringify(payload);
     if (alarm) {
       await api(`${ALARMS_URL}/${alarm.id}`, {
         method: "PATCH",

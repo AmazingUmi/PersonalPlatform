@@ -84,6 +84,10 @@ function invalidTimezoneError(timezone: string): AppError {
   );
 }
 
+function invalidCityError(): AppError {
+  return new AppError(422, "invalid_city", "city must contain at least one non-space character");
+}
+
 /** A malformed uuid must not reach pg as a 22P02 parse error — it is simply not found. */
 async function findAlarmView(db: Db, alarmId: string): Promise<AlarmView | null> {
   if (!isUuid(alarmId)) return null;
@@ -284,6 +288,9 @@ async function registerApi(ctx: AppContext): Promise<void> {
       const body = request.body as { city: string; timezone: string };
       const city = body.city.trim();
       const timezone = body.timezone.trim();
+      // The schema's minLength only sees the raw string; whitespace-only
+      // would trim to an empty city (invalid_timezone-style app-level check).
+      if (city.length === 0) throw invalidCityError();
       if (!isValidTimezone(timezone)) throw invalidTimezoneError(timezone);
       const newId = randomUUID();
       // sort_order is "append at the end", computed atomically in one statement.
@@ -310,12 +317,14 @@ async function registerApi(ctx: AppContext): Promise<void> {
     async handler(request) {
       if (!isUuid(request.params.id)) throw new AppError(404, "not_found", "world clock not found");
       const body = request.body as { city?: string; timezone?: string };
+      const city = body.city?.trim();
       const timezone = body.timezone?.trim();
+      if (city !== undefined && city.length === 0) throw invalidCityError();
       if (timezone !== undefined && !isValidTimezone(timezone)) throw invalidTimezoneError(timezone);
       const sets: string[] = [];
       const params: unknown[] = [request.params.id];
-      if (body.city !== undefined) {
-        params.push(body.city.trim());
+      if (city !== undefined) {
+        params.push(city);
         sets.push(`city = $${params.length}`);
       }
       if (timezone !== undefined) {

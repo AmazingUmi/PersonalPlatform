@@ -194,6 +194,33 @@ describe("alarm CRUD and repeat days", () => {
     assert.deepEqual(oneShot.repeatDays, []);
   });
 
+  it("label contract: omitted/empty POST labels and a null PATCH all land on \"\"", async () => {
+    // POST: omitted → "" (column default).
+    const omitted = await createAlarm({ time: "10:00" });
+    assert.equal(omitted.label, "");
+
+    // POST: empty string and whitespace-only string both trim to "".
+    const empty = await createAlarm({ time: "10:05", label: "" });
+    assert.equal(empty.label, "");
+    const blank = await createAlarm({ time: "10:10", label: "   " });
+    assert.equal(blank.label, "");
+
+    // PATCH: null clears a previously set label back to "".
+    const named = await createAlarm({ time: "10:15", label: "Named" });
+    assert.equal(named.label, "Named");
+    const cleared = await json<AlarmView>("PATCH", `/api/apps/clock/alarms/${named.id}`, {
+      label: null,
+    });
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.body.label, "");
+
+    // And a labeled round-trip keeps the trimmed value.
+    const relabeled = await json<AlarmView>("PATCH", `/api/apps/clock/alarms/${named.id}`, {
+      label: "  Tea time  ",
+    });
+    assert.equal(relabeled.body.label, "Tea time");
+  });
+
   it("sorts the list by wall-clock time", async () => {
     const early = await createAlarm({ time: "06:15" });
     const list = await json<{ items: AlarmView[] }>("GET", "/api/apps/clock/alarms");
@@ -269,6 +296,28 @@ describe("world clock CRUD, IANA validation and ordering", () => {
     assert.equal(london.sortOrder, 2);
     assert.equal(london.city, "London", "city is trimmed");
     assertNoSnakeCaseKeys(tokyo);
+  });
+
+  it("rejects whitespace-only cities (schema sees a non-empty string, trim does not)", async () => {
+    const post = await json<ErrorBody>("POST", "/api/apps/clock/world-clocks", {
+      city: "   ",
+      timezone: "Asia/Tokyo",
+    });
+    assert.equal(post.status, 422);
+    assert.equal(post.body.error.code, "invalid_city");
+
+    const entry = await createWorldClock({ city: "Berlin", timezone: "Europe/Berlin" });
+    const patch = await json<ErrorBody>("PATCH", `/api/apps/clock/world-clocks/${entry.id}`, {
+      city: "   ",
+    });
+    assert.equal(patch.status, 422);
+    assert.equal(patch.body.error.code, "invalid_city");
+
+    // A real rename still works and trims normally.
+    const renamed = await json<WorldClockView>("PATCH", `/api/apps/clock/world-clocks/${entry.id}`, {
+      city: "  Berlin (DE) ",
+    });
+    assert.equal(renamed.body.city, "Berlin (DE)");
   });
 
   it("rejects non-IANA timezone names (never store offsets)", async () => {

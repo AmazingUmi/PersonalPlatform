@@ -11,10 +11,14 @@ import { runMigrations } from "../../src/core/database/migrate.js";
 
 /**
  * Tasks public status contract (`GET /api/apps/tasks/public/status`) — the
- * cross-app read surface Clock consumes (worklist PHASE8 §6). The matrix pins
- * current / next / remaining-today semantics including the explicit
- * `now == start_at` boundary: start-inclusive for current, strictly-future
- * for next, so a task can never be both.
+ * cross-app read surface Clock consumes. Frozen semantics (apps/tasks/README.md):
+ *
+ *   current = most recently started todo task with start_at <= now
+ *             (now == start_at is current; due_at NEVER ends it — an overdue
+ *             todo task stays current until it is done)
+ *   next    = earliest todo task with start_at > now (strictly future)
+ *   today.remainingCount = additional todo tasks starting later in the
+ *             platform-local day, excluding next
  */
 
 const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
@@ -52,7 +56,7 @@ let cleanup: () => void;
 let root: string;
 
 async function json<T>(
-  method: "GET" | "POST",
+  method: "GET" | "POST" | "PUT",
   url: string,
   payload?: object,
 ): Promise<{ status: number; body: T }> {
@@ -76,6 +80,14 @@ async function fetchStatus(): Promise<StatusBody> {
 
 async function clearTasks(): Promise<void> {
   await db.context().query("DELETE FROM tasks.tasks");
+}
+
+/** PUT /api/core/settings/platform.timezone applies live (timezone.test.ts precedent). */
+async function setTimezone(value: string): Promise<void> {
+  const response = await json<{ value: string }>("PUT", "/api/core/settings/platform.timezone", {
+    value,
+  });
+  assert.equal(response.status, 200, `platform.timezone set to ${value}`);
 }
 
 before(async () => {
@@ -102,7 +114,7 @@ after(async () => {
 });
 
 describe("tasks public status matrix", () => {
-  it("empty store: everything is null and zero", async () => {
+  it("1. empty store: everything is null and zero", async () => {
     await clearTasks();
     const status = await fetchStatus();
     assert.equal(status.current, null);
@@ -110,52 +122,52 @@ describe("tasks public status matrix", () => {
     assert.equal(status.today.remainingCount, 0);
   });
 
-  it("only future tasks: next is the earliest start, no current", async () => {
+  it("2. only future tasks: next is the earliest start, no current", async () => {
     await clearTasks();
-    const later = await createTask({ title: "Later", startAt: "2026-08-31T18:00:00Z", dueAt: "2026-08-31T19:00:00Z" });
-    const sooner = await createTask({ title: "Sooner", startAt: "2026-08-31T12:30:00Z", dueAt: "2026-08-31T13:00:00Z" });
+    const later = await createTask({ title: "Later", startAt: "2026-08-31T18:00:00Z" });
+    const sooner = await createTask({ title: "Sooner", startAt: "2026-08-31T12:30:00Z" });
     const status = await fetchStatus();
     assert.equal(status.current, null);
     assert.equal(status.next!.id, sooner.id, "earliest future start wins");
     assert.equal(status.next!.title, "Sooner");
     assert.equal(status.next!.startAt, "2026-08-31T12:30:00.000Z");
-    // Both are due today, but `next` itself is excluded from remaining.
-    assert.equal(status.today.remainingCount, 1, "later task counts as remaining");
+    // Both start later today, but `next` itself is excluded from remaining.
+    assert.equal(status.today.remainingCount, 1, "the later task counts as remaining");
     void later;
   });
 
-  it("current task: started window without a due date", async () => {
+  it("3. current task: started, no due date — todo keeps it current", async () => {
     await clearTasks();
     const running = await createTask({ title: "Writing docs", startAt: "2026-08-31T10:02:00Z" });
     const status = await fetchStatus();
     assert.equal(status.current!.id, running.id);
     assert.equal(status.current!.startAt, "2026-08-31T10:02:00.000Z");
     assert.equal(status.next, null);
-    assert.equal(status.today.remainingCount, 0, "no due date → not part of today's count");
+    assert.equal(status.today.remainingCount, 0, "nothing starts later today");
   });
 
-  it("current + next + remaining together", async () => {
+  it("4. current + next + remaining together", async () => {
     await clearTasks();
     const running = await createTask({ title: "Deep work", startAt: "2026-08-31T09:00:00Z", dueAt: "2026-08-31T12:00:00Z" });
-    const upcoming = await createTask({ title: "Review", startAt: "2026-08-31T14:00:00Z", dueAt: "2026-08-31T15:00:00Z" });
-    await createTask({ title: "Chore A", dueAt: "2026-08-31T16:00:00Z" });
-    await createTask({ title: "Chore B", dueAt: "2026-08-31T17:30:00Z" });
+    const upcoming = await createTask({ title: "Review", startAt: "2026-08-31T14:00:00Z" });
+    await createTask({ title: "Chore A", startAt: "2026-08-31T16:00:00Z" });
+    await createTask({ title: "Chore B", startAt: "2026-08-31T17:30:00Z" });
     const status = await fetchStatus();
     assert.equal(status.current!.id, running.id);
     assert.equal(status.next!.id, upcoming.id);
-    assert.equal(status.today.remainingCount, 2, "the two chores, excluding current and next");
+    assert.equal(status.today.remainingCount, 2, "the two later starts today, excluding next");
   });
 
-  it("now == start_at is current (start-inclusive), never next", async () => {
+  it("5. now == start_at is current (start-inclusive), never next", async () => {
     await clearTasks();
-    const boundary = await createTask({ title: "Boundary", startAt: "2026-08-31T11:26:00.000Z", dueAt: "2026-08-31T12:00:00Z" });
+    const boundary = await createTask({ title: "Boundary", startAt: "2026-08-31T11:26:00.000Z" });
     const future = await createTask({ title: "After", startAt: "2026-08-31T11:26:00.001Z" });
     const status = await fetchStatus();
     assert.equal(status.current!.id, boundary.id, "a task is current at exactly its start_at");
     assert.equal(status.next!.id, future.id, "one millisecond later is strictly future");
   });
 
-  it("overlapping windows resolve to the most recently started task", async () => {
+  it("6. overlapping started tasks resolve to the most recently started one", async () => {
     await clearTasks();
     const earlier = await createTask({ title: "Long block", startAt: "2026-08-31T08:00:00Z" });
     const recent = await createTask({ title: "Late block", startAt: "2026-08-31T11:00:00Z" });
@@ -164,15 +176,17 @@ describe("tasks public status matrix", () => {
     void earlier;
   });
 
-  it("a window whose due_at passed is no longer current", async () => {
+  it("7. an overdue todo task remains current (due_at never ends current)", async () => {
     await clearTasks();
-    await createTask({ title: "Stale window", startAt: "2026-08-31T08:00:00Z", dueAt: "2026-08-31T09:00:00Z" });
+    // Window nominally 08:00–09:00; now is 11:26 — long past due, still todo.
+    const stale = await createTask({ title: "Stale window", startAt: "2026-08-31T08:00:00Z", dueAt: "2026-08-31T09:00:00Z" });
     const status = await fetchStatus();
-    assert.equal(status.current, null, "due_at already passed → not in progress");
-    assert.equal(status.today.remainingCount, 1, "still due today → counted as remaining");
+    assert.equal(status.current!.id, stale.id, "overdue todo task is still the current task");
+    assert.equal(status.next, null);
+    assert.equal(status.today.remainingCount, 0, "its start is in the past, so it is not remaining");
   });
 
-  it("done tasks never appear, and unmarking brings them back", async () => {
+  it("8. done tasks never appear, and unmarking brings them back", async () => {
     await clearTasks();
     const running = await createTask({ title: "Then done", startAt: "2026-08-31T10:00:00Z" });
     await platform.app.inject({
@@ -189,26 +203,66 @@ describe("tasks public status matrix", () => {
     assert.equal((await fetchStatus()).current!.id, running.id, "reopened tasks count again");
   });
 
-  it("cross-day tasks: next may be tomorrow; today count excludes other days", async () => {
+  it("9. a task starting today and due tomorrow counts in remaining", async () => {
     await clearTasks();
-    const tomorrow = await createTask({ title: "Tomorrow run", startAt: "2026-09-01T08:00:00Z", dueAt: "2026-09-01T09:00:00Z" });
-    await createTask({ title: "Yesterday leftovers", dueAt: "2026-08-30T23:00:00Z" });
+    const evening = await createTask({ title: "Evening kickoff", startAt: "2026-08-31T13:00:00Z", dueAt: "2026-09-01T10:00:00Z" });
     const status = await fetchStatus();
-    assert.equal(status.current, null);
-    assert.equal(status.next!.id, tomorrow.id, "next can cross the day boundary");
-    assert.equal(status.today.remainingCount, 0, "yesterday-due and tomorrow-due are not today");
+    assert.equal(status.next!.id, evening.id);
+    await createTask({ title: "Late start", startAt: "2026-08-31T15:00:00Z", dueAt: "2026-09-02T10:00:00Z" });
+    const updated = await fetchStatus();
+    assert.equal(updated.today.remainingCount, 1, "tomorrow-due does not matter; today-start does");
   });
 
-  it("tasks without start_at never become current or next", async () => {
+  it("10. a task due today but without start_at does NOT count", async () => {
     await clearTasks();
     await createTask({ title: "Undated", dueAt: "2026-08-31T18:00:00Z" });
     const status = await fetchStatus();
     assert.equal(status.current, null);
     assert.equal(status.next, null);
-    assert.equal(status.today.remainingCount, 1, "but an undated task due today still counts");
+    assert.equal(status.today.remainingCount, 0, "due_at alone never counts — only future start_at");
   });
 
-  it("exposes only the contract fields (no leakage of internal columns)", async () => {
+  it("11. a task starting tomorrow does NOT count in today's remaining", async () => {
+    await clearTasks();
+    await createTask({ title: "Tomorrow run", startAt: "2026-09-01T08:00:00Z", dueAt: "2026-09-01T09:00:00Z" });
+    await createTask({ title: "Later tomorrow", startAt: "2026-09-01T10:00:00Z" });
+    const status = await fetchStatus();
+    assert.equal(status.next!.title, "Tomorrow run");
+    assert.equal(status.today.remainingCount, 0, "both starts are outside the local day");
+  });
+
+  it("12. next itself is excluded from remainingCount", async () => {
+    await clearTasks();
+    await createTask({ title: "Only future", startAt: "2026-08-31T16:00:00Z" });
+    const status = await fetchStatus();
+    assert.equal(status.next!.title, "Only future");
+    assert.equal(status.today.remainingCount, 0, "the next task is displayed on its own, never double-counted");
+  });
+
+  it("13. remainingCount follows the platform-local day (cross-day, live timezone switch)", async () => {
+    await clearTasks();
+    // Under UTC (default) all three starts are later today; under
+    // Asia/Shanghai (now = 19:26 local) the local day ends at 16:00Z, so only
+    // the two pre-16:00Z starts are "today" and the 16:30Z one is tomorrow.
+    await createTask({ title: "Soon", startAt: "2026-08-31T15:30:00Z" });
+    await createTask({ title: "Soon after", startAt: "2026-08-31T15:45:00Z" });
+    await createTask({ title: "Shanghai tomorrow", startAt: "2026-08-31T16:30:00Z" });
+
+    const utc = await fetchStatus();
+    assert.equal(utc.next!.title, "Soon");
+    assert.equal(utc.today.remainingCount, 2, "under UTC all three are later today minus next");
+
+    await setTimezone("Asia/Shanghai");
+    try {
+      const shanghai = await fetchStatus();
+      assert.equal(shanghai.next!.title, "Soon", "23:30 local is still the earliest future start");
+      assert.equal(shanghai.today.remainingCount, 1, "16:30Z is already Sep 1 local — not today");
+    } finally {
+      await setTimezone("UTC");
+    }
+  });
+
+  it("14. exposes only the contract fields (no leakage of internal columns)", async () => {
     await clearTasks();
     await createTask({ title: "Shape", startAt: "2026-08-31T10:00:00Z", dueAt: "2026-08-31T12:00:00Z", priority: 3 });
     const response = await json<StatusBody>("GET", "/api/apps/tasks/public/status");

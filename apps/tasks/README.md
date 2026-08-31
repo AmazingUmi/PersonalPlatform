@@ -25,18 +25,22 @@ Response (camelCase, timestamptz as ISO UTC):
 }
 ```
 
-Semantics:
+Semantics (frozen):
 
-- `current` — a `todo` task inside its planned window
-  (`start_at <= now` and `due_at` null or `> now`). At `now == start_at` the
-  task is already current (**start-inclusive boundary**); several overlapping
-  windows resolve to the most recently started task. `null` when none.
+- `current` — the most recently started `todo` task with `start_at <= now`
+  (`ORDER BY start_at DESC`). `due_at` is the target deadline and **never**
+  ends current-ness: an overdue, unfinished task stays current until it is
+  done. At `now == start_at` the task is already current (start-inclusive
+  boundary); several started tasks resolve to the most recently started one.
+  `null` when none.
 - `next` — the `todo` task with the earliest strictly-future `start_at`
-  (`start_at > now`, so the `now == start_at` case belongs to `current`, never
-  both). `null` when none.
-- `today.remainingCount` — `todo` tasks with `due_at` inside the platform
-  local day (`ctx.time.todayRangeUtc()`), excluding the `current` and `next`
-  task. Same "today" semantic as `GET /summary`.
+  (`start_at > now`, so the `now == start_at` case belongs to `current`,
+  never both). `null` when none.
+- `today.remainingCount` — additional `todo` tasks **starting** later in the
+  platform-local day (`ctx.time.todayRangeUtc()`, `start_at > now`), excluding
+  `next` (which is displayed on its own). The current task is excluded by
+  `start_at > now`; tasks without `start_at` never count, regardless of
+  `due_at`.
 
 Breaking changes to this response require a new route version
 (e.g. `/public/v2/status`), never an in-place semantic change.

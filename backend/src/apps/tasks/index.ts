@@ -269,22 +269,27 @@ async function registerApi(ctx: AppContext): Promise<void> {
   //
   // The only sanctioned way for another app (Clock today; Calendar /
   // Statistics later) to consume task timing: a read-only HTTP contract
-  // instead of table access. Boundary rule: a task becomes "current" at
-  // exactly start_at (inclusive); "next" requires start_at strictly later
-  // than now, so now == start_at can never be both. When several tasks are
-  // inside their window, the most recently started one is the current task.
+  // instead of table access. Frozen semantics (apps/tasks/README.md):
+  //   current = most recently started todo task with start_at <= now
+  //             (now == start_at is current; due_at NEVER ends it — an
+  //             overdue todo task stays current until it is done)
+  //   next    = earliest todo task with start_at > now (strictly future, so
+  //             now == start_at can never be both)
+  //   today.remainingCount = additional todo tasks starting later in the
+  //             platform-local day, excluding next (current is excluded by
+  //             start_at > now; tasks without start_at never count)
   ctx.api.get("/public/status", async () => {
     const now = ctx.time.now();
     const current = await getCurrentTask(db, now);
     const next = await getNextTask(db, now);
-    const exclude = [current?.id, next?.id].filter((value): value is string => value !== undefined);
+    const exclude = next ? [next.id] : [];
     const { start, end } = ctx.time.todayRangeUtc(now);
-    // Same "today = due inside the local calendar day" semantic as /summary.
     const remaining = await db.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM tasks.tasks
-       WHERE status = 'todo' AND due_at IS NOT NULL AND due_at >= $1 AND due_at < $2
-         AND id <> ALL($3::uuid[])`,
-      [start.toISOString(), end.toISOString(), exclude],
+       WHERE status = 'todo' AND start_at IS NOT NULL
+         AND start_at > $3 AND start_at >= $1 AND start_at < $2
+         AND id <> ALL($4::uuid[])`,
+      [start.toISOString(), end.toISOString(), now.toISOString(), exclude],
     );
     return {
       current,
@@ -301,12 +306,11 @@ export interface PublicTaskView {
   startAt: string;
 }
 
-/** Started (start_at <= now) and still open (no due yet) — most recent start wins. */
+/** Most recently started todo task (start_at <= now); due_at never ends it. */
 async function getCurrentTask(db: AppContext["database"], now: Date): Promise<PublicTaskView | null> {
   const { rows } = await db.query<{ id: string; title: string; start_at: string }>(
     `SELECT id, title, start_at FROM tasks.tasks
      WHERE status = 'todo' AND start_at IS NOT NULL AND start_at <= $1
-       AND (due_at IS NULL OR due_at > $1)
      ORDER BY start_at DESC, id
      LIMIT 1`,
     [now.toISOString()],
