@@ -2,6 +2,7 @@
 // Regenerate with: npm run generate:apps
 import type { BackendAppModule } from "../core/app-registry/types.js";
 import assets from "../apps/assets/index.js";
+import clock from "../apps/clock/index.js";
 import focus from "../apps/focus/index.js";
 import mini_game from "../apps/mini_game/index.js";
 import notes from "../apps/notes/index.js";
@@ -9,6 +10,7 @@ import tasks from "../apps/tasks/index.js";
 
 export const backendAppModules: Record<string, BackendAppModule> = {
   assets,
+  clock,
   focus,
   mini_game,
   notes,
@@ -18,6 +20,7 @@ export const backendAppModules: Record<string, BackendAppModule> = {
 /** Apps that ship a frontend module; mirrors frontend/src/generated/apps.ts. */
 export const frontendAppIds: string[] = [
   "assets",
+  "clock",
   "focus",
   "mini_game",
   "notes",

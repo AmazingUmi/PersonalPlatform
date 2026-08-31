@@ -1,0 +1,16 @@
+manifest_version: 1
+id: clock
+name: Clock
+version: 0.1.0
+description: Pixel time hub — clock faces, alarms, world clocks and task status
+default_enabled: true
+frontend:
+  route: /clock
+widgets:
+  - id: clock
+    name: Clock
+capabilities:
+  database: true
+  storage: false
+  scheduler: false
+  events: false

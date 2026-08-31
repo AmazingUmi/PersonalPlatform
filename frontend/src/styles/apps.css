@@ -1240,3 +1240,619 @@
   align-items: center;
   gap: var(--space-2);
 }
+
+/* ---------- Tasks detail (P8: deep-link target for Clock) ---------- */
+
+.task-detail__field > dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.task-detail__description {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: var(--border-1) solid var(--px-border-soft);
+}
+
+.task-detail__description-title {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--px-ink-muted);
+}
+
+.task-detail__description p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Clock (P8) ---------- */
+/* Amber "LED clock" accent. The faces always fall back to the warning accent
+ * so they look right on the Dashboard too, where no [data-app] scope exists.
+ * All animations are discrete (steps) and neutralized globally by the
+ * prefers-reduced-motion override in base.css. */
+
+.clock-card {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.clock-card__footer {
+  display: flex;
+  justify-content: center;
+}
+
+/* Digital face */
+
+.clock-digital {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+  border: var(--border-2) solid var(--px-border);
+  border-radius: var(--radius-pixel);
+  background: var(--px-surface);
+  box-shadow: var(--shadow-pixel-sm);
+  /* Pixel tick marks on the left edge, echoing the analog dial. */
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 7px,
+    var(--px-border-soft) 7px,
+    var(--px-border-soft) 8px
+  );
+  background-size: 4px 100%;
+  background-repeat: no-repeat;
+}
+
+.clock-digital--focus {
+  border-color: var(--px-warning-text);
+  background-color: var(--px-warning-light);
+  animation: clock-focus-pulse 2s steps(2) infinite;
+}
+
+.clock-digital__top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  color: var(--px-ink-muted);
+}
+
+.clock-digital__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--px-ink);
+}
+
+.clock-digital--focus .clock-digital__label {
+  color: var(--px-warning-text);
+}
+
+.clock-digital__focus-dot {
+  width: 8px;
+  height: 8px;
+  background: var(--app-accent, var(--px-warning));
+  box-shadow: 2px 2px 0 var(--px-shadow);
+  animation: clock-blink 1s steps(1) infinite;
+}
+
+.clock-digital__time {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 2px;
+  font-family: var(--font-pixel);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: var(--px-ink);
+}
+
+.clock-digital--card .clock-digital__time {
+  font-size: clamp(34px, 9vw, 46px);
+}
+
+.clock-digital--page .clock-digital__time {
+  font-size: clamp(48px, 10vw, 80px);
+}
+
+.clock-digital__seconds {
+  font-size: 0.38em;
+  letter-spacing: 0.03em;
+  color: var(--px-ink-muted);
+}
+
+.clock-digital--focus .clock-digital__seconds {
+  color: var(--px-warning-text);
+}
+
+.clock-digital__meridiem {
+  align-self: center;
+  font-size: var(--text-xs);
+  letter-spacing: 0.05em;
+  color: var(--px-ink-muted);
+  padding-left: var(--space-1);
+}
+
+.clock-digital__colon {
+  animation: clock-blink 2s steps(1) infinite;
+}
+
+.clock-digital__date {
+  text-align: center;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  color: var(--px-ink-muted);
+}
+
+.clock-digital__focus-line {
+  text-align: center;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.05em;
+  color: var(--px-warning-text);
+  overflow-wrap: anywhere;
+}
+
+.clock-digital__focus-title {
+  color: var(--px-ink-muted);
+}
+
+@keyframes clock-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0.25;
+  }
+}
+
+@keyframes clock-focus-pulse {
+  0%,
+  49% {
+    box-shadow: var(--shadow-pixel-sm);
+  }
+  50%,
+  100% {
+    box-shadow: var(--shadow-pixel-sm), 3px 3px 0 var(--px-warning-light);
+  }
+}
+
+/* Analog face (pure SVG; scales with its container) */
+
+.clock-analog {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: center;
+}
+
+.clock-analog__svg {
+  display: block;
+  width: 100%;
+  max-width: 220px;
+  aspect-ratio: 1;
+}
+
+.clock-analog--page .clock-analog__svg {
+  max-width: 320px;
+}
+
+.clock-analog__dial {
+  fill: var(--px-surface);
+  stroke: var(--px-border);
+  stroke-width: 4;
+}
+
+.clock-analog__tick {
+  fill: var(--px-border-soft);
+}
+
+.clock-analog__tick--major {
+  fill: var(--px-border);
+}
+
+.clock-analog__numeral {
+  fill: var(--px-ink);
+  font-family: var(--font-pixel);
+  font-size: 11px;
+  text-anchor: middle;
+}
+
+.clock-analog__hand {
+  fill: var(--px-ink);
+}
+
+.clock-analog__hand--second,
+.clock-analog__cap {
+  fill: var(--app-accent, var(--px-warning));
+}
+
+.clock-analog--focus .clock-analog__hand--second {
+  stroke: var(--px-warning-text);
+  stroke-width: 1;
+}
+
+.clock-analog__ring {
+  fill: none;
+  stroke: var(--app-accent, var(--px-warning));
+  stroke-width: 2;
+  stroke-dasharray: 4 8;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: clock-ring-spin 16s steps(16) infinite;
+}
+
+@keyframes clock-ring-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.clock-analog__meta {
+  display: grid;
+  gap: 2px;
+  text-align: center;
+}
+
+.clock-analog__focus-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.05em;
+  color: var(--px-warning-text);
+}
+
+.clock-analog__focus-line--idle {
+  color: var(--px-ink-muted);
+}
+
+.clock-analog__focus-dot {
+  width: 8px;
+  height: 8px;
+  background: var(--app-accent, var(--px-warning));
+  animation: clock-blink 1s steps(1) infinite;
+}
+
+.clock-analog__focus-title {
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Clock page grid */
+
+.clock-page__grid {
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@media (min-width: 980px) {
+  .clock-page__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .clock-page__main {
+    grid-column: 1 / -1;
+  }
+}
+
+.clock-page__face {
+  display: grid;
+  justify-items: center;
+}
+
+.clock-page__face > * {
+  width: 100%;
+  max-width: 560px;
+}
+
+.clock-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.clock-controls__check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--px-ink);
+  cursor: pointer;
+}
+
+/* Task status zone */
+
+.clock-tasks {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.clock-tasks__block {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border: var(--border-2) solid var(--px-border);
+  border-radius: var(--radius-pixel);
+  background: var(--px-surface);
+  box-shadow: var(--shadow-pixel-sm);
+}
+
+.clock-tasks__block--current {
+  border-color: var(--px-warning-text);
+  background: var(--px-warning-light);
+}
+
+.clock-tasks__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  color: var(--px-ink-muted);
+}
+
+.clock-tasks__block--current .clock-tasks__label {
+  color: var(--px-warning-text);
+}
+
+.clock-tasks__live-dot {
+  width: 8px;
+  height: 8px;
+  background: var(--app-accent, var(--px-warning));
+  animation: clock-blink 1s steps(1) infinite;
+}
+
+.clock-tasks__title {
+  font-family: var(--font-pixel);
+  font-size: var(--text-md);
+  color: var(--px-ink);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.clock-tasks__title:hover {
+  text-decoration: underline;
+}
+
+.clock-tasks__next-time {
+  color: var(--px-primary);
+}
+
+.clock-tasks__hint {
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+}
+
+.clock-tasks__more {
+  justify-self: start;
+  padding: var(--space-1) var(--space-2);
+  border: var(--border-2) solid var(--px-border);
+  border-radius: var(--radius-pixel);
+  background: var(--px-surface-2);
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.05em;
+  color: var(--px-ink);
+  text-decoration: none;
+  box-shadow: var(--shadow-pixel-sm);
+}
+
+.clock-tasks__more:hover {
+  background: var(--px-surface-3);
+}
+
+/* Alarms zone */
+
+.clock-alarms {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.clock-alarms__ringing {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.clock-alarms__ring-line {
+  margin: 0 0 var(--space-2);
+}
+
+.clock-alarms__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.clock-alarms__next {
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.05em;
+  color: var(--px-ink-muted);
+}
+
+.clock-alarms__perm-note {
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+}
+
+.clock-alarms__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.clock-alarm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-2) solid var(--px-border);
+  border-radius: var(--radius-pixel);
+  background: var(--px-surface);
+  box-shadow: var(--shadow-pixel-sm);
+}
+
+.clock-alarm--off {
+  opacity: 0.6;
+  border-color: var(--px-border-soft);
+}
+
+.clock-alarm__main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.clock-alarm__time {
+  font-family: var(--font-pixel);
+  font-size: var(--text-lg);
+  font-variant-numeric: tabular-nums;
+  color: var(--px-ink);
+}
+
+.clock-alarm__label {
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  color: var(--px-ink);
+  overflow-wrap: anywhere;
+}
+
+.clock-alarm__repeat {
+  font-size: var(--text-xs);
+  letter-spacing: 0.05em;
+  color: var(--px-ink-muted);
+}
+
+.clock-alarm__actions {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.clock-alarms__days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.clock-alarms__day {
+  min-width: 44px;
+}
+
+/* World clock zone */
+
+.clock-world {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.clock-world__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.clock-world__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-2) solid var(--px-border);
+  border-radius: var(--radius-pixel);
+  background: var(--px-surface);
+  box-shadow: var(--shadow-pixel-sm);
+}
+
+.clock-world__main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.clock-world__city {
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+  letter-spacing: 0.03em;
+  color: var(--px-ink);
+  overflow-wrap: anywhere;
+}
+
+.clock-world__zone {
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+}
+
+.clock-world__time {
+  display: grid;
+  gap: 2px;
+  text-align: right;
+}
+
+.clock-world__clock {
+  font-family: var(--font-pixel);
+  font-size: var(--text-lg);
+  font-variant-numeric: tabular-nums;
+  color: var(--px-ink);
+}
+
+.clock-world__offset {
+  font-size: var(--text-xs);
+  letter-spacing: 0.05em;
+  color: var(--px-ink-muted);
+}
+
+.clock-world__actions {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.clock-world__add {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: var(--border-1) solid var(--px-border-soft);
+}
+
+/* Narrow dashboard cards: keep the face legible, drop the secondary text. */
+
+@media (max-width: 380px) {
+  .clock-digital__date,
+  .clock-analog__meta {
+    display: none;
+  }
+
+  .clock-digital--card .clock-digital__time {
+    font-size: 34px;
+  }
+}

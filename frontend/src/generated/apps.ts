@@ -2,6 +2,7 @@
 // Regenerate with: npm run generate:apps
 import type { FrontendAppModule } from "../shared/appTypes";
 import assets from "../apps/assets/index";
+import clock from "../apps/clock/index";
 import focus from "../apps/focus/index";
 import mini_game from "../apps/mini_game/index";
 import notes from "../apps/notes/index";
@@ -9,6 +10,7 @@ import tasks from "../apps/tasks/index";
 
 export const frontendAppModules: Record<string, FrontendAppModule> = {
   assets,
+  clock,
   focus,
   mini_game,
   notes,
@@ -17,6 +19,7 @@ export const frontendAppModules: Record<string, FrontendAppModule> = {
 
 export const frontendAppIds: string[] = [
   "assets",
+  "clock",
   "focus",
   "mini_game",
   "notes",

@@ -140,6 +140,10 @@
   --app-accent: var(--px-info);
 }
 
+[data-app="clock"] {
+  --app-accent: var(--px-warning);
+}
+
 [data-app="settings"] {
   --app-accent: var(--px-primary);
 }
