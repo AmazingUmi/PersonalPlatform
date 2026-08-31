@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../shared/api";
 import { useAppDisplayName } from "../../shared/PresentationContext";
 import type { FrontendAppModule } from "../../shared/appTypes";
@@ -561,6 +561,147 @@ function TasksPage() {
 
 const pad = (value: number) => String(value).padStart(2, "0");
 
+/**
+ * Read-only task detail at /tasks/:id — the deep-link target for other apps
+ * (Clock's current/next task). Editing reuses the same TaskEditor dialog as
+ * the list page.
+ */
+function TaskDetailPage() {
+  const { id } = useParams();
+  const [reloadKey, setReloadKey] = useState(0);
+  const [editing, setEditing] = useState(false);
+  const task = useAsync(
+    () => api<Task>(`/api/apps/tasks/tasks/${id}`),
+    [id, reloadKey],
+  );
+  const refresh = () => setReloadKey((key) => key + 1);
+
+  if (task.loading) {
+    return (
+      <div className="page page--detail" data-app="tasks">
+        <LoadingState label="Loading task…" />
+      </div>
+    );
+  }
+  if (task.error || !task.data) {
+    return (
+      <div className="page page--detail" data-app="tasks">
+        <EmptyState
+          icon="warning"
+          title="Task not found"
+          description="It may have been deleted, or the Tasks app was restarted."
+          action={
+            <Link className="px-button px-button--secondary px-button--md" to="/tasks">
+              Back to Tasks
+            </Link>
+          }
+        />
+      </div>
+    );
+  }
+
+  const current = task.data;
+  const priority = priorityMeta(current.priority);
+
+  const toggleStatus = async () => {
+    try {
+      await api(`/api/apps/tasks/tasks/${current.id}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: current.status === "done" ? "todo" : "done" }),
+      });
+    } finally {
+      refresh();
+    }
+  };
+
+  return (
+    <div className="page page--detail" data-app="tasks">
+      <header className="page-header">
+        <div>
+          <h1 className="page-header__title">{current.title}</h1>
+          <p className="page-header__subtitle">Task detail</p>
+        </div>
+        <div className="page-header__actions">
+          <PixelButton variant="secondary" size="sm" onClick={() => setEditing(true)}>
+            <PixelIcon name="edit" /> Edit
+          </PixelButton>
+          <PixelButton
+            variant={current.status === "done" ? "secondary" : "primary"}
+            size="sm"
+            onClick={toggleStatus}
+          >
+            {current.status === "done" ? "Reopen" : "Complete"}
+          </PixelButton>
+          <Link className="px-button px-button--secondary px-button--sm" to="/tasks">
+            <PixelIcon name="back" /> Tasks
+          </Link>
+        </div>
+      </header>
+
+      <PixelWindow title="Task" icon="tasks">
+        <dl className="px-deflist">
+          <div className="task-detail__field">
+            <dt>Status</dt>
+            <dd>
+              {current.status === "done" ? (
+                <PixelBadge tone="success">Done</PixelBadge>
+              ) : (
+                <PixelBadge tone="warning">Todo</PixelBadge>
+              )}
+            </dd>
+          </div>
+          <div className="task-detail__field">
+            <dt>Priority</dt>
+            <dd>
+              <PixelBadge tone={priority.tone}>{priority.label}</PixelBadge>
+            </dd>
+          </div>
+          <div className="task-detail__field">
+            <dt>Start</dt>
+            <dd>{formatDateTime(current.start_at)}</dd>
+          </div>
+          <div className="task-detail__field">
+            <dt>Deadline</dt>
+            <dd>
+              {formatDateTime(current.due_at)}
+              {isOverdue(current) ? (
+                <>
+                  {" "}
+                  <PixelBadge tone="danger">Overdue</PixelBadge>
+                </>
+              ) : null}
+            </dd>
+          </div>
+          {current.completed_at ? (
+            <div className="task-detail__field">
+              <dt>Completed</dt>
+              <dd>{formatDateTime(current.completed_at)}</dd>
+            </div>
+          ) : null}
+        </dl>
+        {current.description ? (
+          <div className="task-detail__description">
+            <h3 className="task-detail__description-title">Notes</h3>
+            <p>{current.description}</p>
+          </div>
+        ) : null}
+      </PixelWindow>
+
+      {editing ? (
+        <TaskEditor
+          task={current}
+          onClose={() => setEditing(false)}
+          onSaved={() => {
+            setEditing(false);
+            refresh();
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
 function TasksTodayWidget() {
   const summary = useAsync(() => api<{ today: number; overdue: number; done: number }>("/api/apps/tasks/summary"));
   if (summary.loading) return <LoadingState label="Loading…" />;
@@ -597,7 +738,10 @@ function TasksTodayWidget() {
 
 const app: FrontendAppModule = {
   id: "tasks",
-  routes: [{ path: "", label: "Tasks", element: <TasksPage /> }],
+  routes: [
+    { path: "", label: "Tasks", element: <TasksPage /> },
+    { path: ":id", label: "Task Detail", element: <TaskDetailPage /> },
+  ],
   widgets: [{ id: "today", title: "Tasks Today", render: () => <TasksTodayWidget /> }],
 };
 

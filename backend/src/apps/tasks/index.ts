@@ -264,6 +264,68 @@ async function registerApi(ctx: AppContext): Promise<void> {
       done: Number(done.rows[0]?.count ?? 0),
     };
   });
+
+  // ---- Public status (cross-app read surface) --------------------------------
+  //
+  // The only sanctioned way for another app (Clock today; Calendar /
+  // Statistics later) to consume task timing: a read-only HTTP contract
+  // instead of table access. Boundary rule: a task becomes "current" at
+  // exactly start_at (inclusive); "next" requires start_at strictly later
+  // than now, so now == start_at can never be both. When several tasks are
+  // inside their window, the most recently started one is the current task.
+  ctx.api.get("/public/status", async () => {
+    const now = ctx.time.now();
+    const current = await getCurrentTask(db, now);
+    const next = await getNextTask(db, now);
+    const exclude = [current?.id, next?.id].filter((value): value is string => value !== undefined);
+    const { start, end } = ctx.time.todayRangeUtc(now);
+    // Same "today = due inside the local calendar day" semantic as /summary.
+    const remaining = await db.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM tasks.tasks
+       WHERE status = 'todo' AND due_at IS NOT NULL AND due_at >= $1 AND due_at < $2
+         AND id <> ALL($3::uuid[])`,
+      [start.toISOString(), end.toISOString(), exclude],
+    );
+    return {
+      current,
+      next,
+      today: { remainingCount: Number(remaining.rows[0]?.count ?? 0) },
+    };
+  });
+}
+
+/** Minimal view for /public/status — only the fields a consumer needs. */
+export interface PublicTaskView {
+  id: string;
+  title: string;
+  startAt: string;
+}
+
+/** Started (start_at <= now) and still open (no due yet) — most recent start wins. */
+async function getCurrentTask(db: AppContext["database"], now: Date): Promise<PublicTaskView | null> {
+  const { rows } = await db.query<{ id: string; title: string; start_at: string }>(
+    `SELECT id, title, start_at FROM tasks.tasks
+     WHERE status = 'todo' AND start_at IS NOT NULL AND start_at <= $1
+       AND (due_at IS NULL OR due_at > $1)
+     ORDER BY start_at DESC, id
+     LIMIT 1`,
+    [now.toISOString()],
+  );
+  if (!rows[0]) return null;
+  return { id: rows[0].id, title: rows[0].title, startAt: rows[0].start_at };
+}
+
+/** Earliest strictly-future start. */
+async function getNextTask(db: AppContext["database"], now: Date): Promise<PublicTaskView | null> {
+  const { rows } = await db.query<{ id: string; title: string; start_at: string }>(
+    `SELECT id, title, start_at FROM tasks.tasks
+     WHERE status = 'todo' AND start_at IS NOT NULL AND start_at > $1
+     ORDER BY start_at ASC, id
+     LIMIT 1`,
+    [now.toISOString()],
+  );
+  if (!rows[0]) return null;
+  return { id: rows[0].id, title: rows[0].title, startAt: rows[0].start_at };
 }
 
 async function registerJobs(ctx: AppContext): Promise<JobHandle[]> {
