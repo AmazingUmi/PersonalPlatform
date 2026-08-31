@@ -20,11 +20,59 @@
 
 /* ---------- Dashboard ---------- */
 
-.dashboard-grid {
+/*
+ * Free Layout V2. Narrow viewports keep the normal flow grid. From the
+ * desktop breakpoint on (960px — must equal DASHBOARD_DESKTOP_BREAKPOINT_PX
+ * in shell/dashboardLayout.ts) the canvas becomes a relative-positioned
+ * desktop and cards are absolutely placed on the 16px logical grid
+ * (GRID_SIZE, mirrored by --dashboard-grid below).
+ */
+.dashboard-canvas {
+  --dashboard-grid: 16px;
+  --dashboard-card-w: 320px;
+  /* Slightly stronger than the ambient --px-bg-grid so the guide reads over
+   * the body's own background pattern while staying restrained. */
+  --dashboard-guide-dot: rgb(38 50 71 / 0.1);
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
   gap: var(--space-4);
   align-items: start;
+}
+
+.dashboard-drop-ghost {
+  display: none;
+}
+
+@media (min-width: 960px) {
+  .dashboard-canvas {
+    position: relative;
+    display: block;
+  }
+
+  .dashboard-canvas .dashboard-card {
+    position: absolute;
+    width: var(--dashboard-card-w);
+  }
+
+  /* Edit mode: faint pixel guide dots on the logical grid — subtle enough to
+   * never compete with widget content, entirely absent in normal mode. */
+  .dashboard-canvas--editing {
+    background-image: radial-gradient(var(--dashboard-guide-dot) 1px, transparent 1px);
+    background-size: var(--dashboard-grid) var(--dashboard-grid);
+  }
+
+  /* Drop preview outline at the snapped target slot. Rendered behind the
+   * cards (first child) so it never intercepts pointer events. */
+  .dashboard-drop-ghost {
+    display: block;
+    position: absolute;
+    pointer-events: none;
+    border: var(--border-2) dashed var(--px-primary);
+  }
+
+  .dashboard-drop-ghost--invalid {
+    border-color: var(--px-danger);
+  }
 }
 
 .dashboard-hidden {

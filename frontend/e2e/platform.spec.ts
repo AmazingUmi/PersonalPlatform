@@ -165,37 +165,77 @@ test("dashboard: clicking a widget card navigates to its app", async ({ page }) 
   await expect(page).toHaveURL(/\/mini_game$/);
 });
 
-test("dashboard: drag reorder persists after reload", async ({ page }) => {
-  // Deterministic baseline: reset the persisted layout via the settings API.
+test("dashboard: free-layout drag persists after reload (V1 -> V2)", async ({ page }) => {
+  // Deterministic baseline: a legacy V1 order also exercises the read-side
+  // migration in a real browser.
   await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
     data: { value: ["assets:summary", "mini_game:highscore", "tasks:today", "focus:timer"] },
   });
   await page.goto("/");
+  await expect(page.locator(".dashboard-canvas[data-desktop='true']")).toBeVisible();
   await expect(page.locator(".dashboard-card [data-widget-key]")).toHaveCount(4);
-  const orderBefore = await page
-    .locator(".dashboard-card [data-widget-key]")
-    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-widget-key")));
+
+  const cardBox = (key: string) =>
+    page.locator(`.dashboard-card[data-widget="${key}"]`).boundingBox() as Promise<{
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    }>;
+  // Grid placements are the source of truth; bounding boxes are also compared
+  // loosely (async widget content changes heights at runtime).
+  const placement = (key: string) =>
+    page
+      .locator(`.dashboard-card[data-widget="${key}"]`)
+      .evaluate((node) => ({ left: node.style.left, top: node.style.top }));
+  const round = (box: { x: number; y: number; width: number; height: number }) => ({
+    x: Math.round(box.x),
+    y: Math.round(box.y),
+    width: Math.round(box.width),
+    height: Math.round(box.height),
+  });
+  const keys = ["assets:summary", "mini_game:highscore", "tasks:today", "focus:timer"];
+  const beforePlacement: Awaited<ReturnType<typeof placement>>[] = [];
+  for (const key of keys) beforePlacement.push(await placement(key));
+  const canvasBefore = await page.locator(".dashboard-canvas").boundingBox();
+  const tasksBoxBefore = round(await cardBox("tasks:today"));
 
   await page.getByRole("button", { name: /edit layout/i }).click();
-  // Drag the first card's handle below the last card via pointer events.
-  const handles = page.locator(".drag-handle");
-  const sourceBox = await handles.first().boundingBox();
-  const targetBox = await handles.last().boundingBox();
-  assert(sourceBox && targetBox, "drag handle boxes resolved");
-  await page.mouse.move(sourceBox.x + sourceBox.width / 2, sourceBox.y + sourceBox.height / 2);
+  // Drag the tasks card's handle down-left into empty space (2 units left,
+  // 25 units down): well clear of the second row and of the right edge, so
+  // the drop lands on the exact snapped grid slot.
+  const handle = page.locator('.dashboard-card[data-widget="tasks:today"] .drag-handle');
+  const source = await handle.boundingBox();
+  assert(source, "drag handle box resolved");
+  const startX = source.x + source.width / 2;
+  const startY = source.y + source.height / 2;
+  await page.mouse.move(startX, startY);
   await page.mouse.down();
-  await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2 + 40, {
-    steps: 15,
-  });
+  await page.mouse.move(startX - 32, startY + 400, { steps: 20 });
   await page.mouse.up();
 
-  // Let the dnd-kit drop animation settle, then read the new order.
-  await page.waitForTimeout(600);
-  const orderAfterDrag = (await page
-    .locator(".dashboard-card [data-widget-key]")
-    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-widget-key")))) as string[];
-  assert.notDeepEqual(orderAfterDrag, orderBefore, "drag actually reordered the widgets");
-  assert.equal(orderAfterDrag.length, 4);
+  // Only the dragged card moved, onto its snapped slot; the other cards keep
+  // their placements and the old slot stays empty (no re-flow). The vertical
+  // target is 25 units; dnd-kit's auto-scroll may add a unit of page scroll
+  // to the drop delta, so accept the 25-27 unit band.
+  const tasksPlacementAfter = await placement("tasks:today");
+  assert.equal(tasksPlacementAfter.left, "640px", "tasks moved 2 grid units left");
+  const topUnits = Number.parseInt(tasksPlacementAfter.top, 10) / 16;
+  assert.ok(
+    topUnits >= 25 && topUnits <= 27,
+    `tasks moved ~25 grid units down (got ${tasksPlacementAfter.top})`,
+  );
+  for (const [index, key] of keys.entries()) {
+    if (key === "tasks:today") continue;
+    expect(await placement(key)).toEqual(beforePlacement[index]);
+  }
+  const tasksBoxAfter = round(await cardBox("tasks:today"));
+  assert.ok(tasksBoxAfter.y > tasksBoxBefore.y + 350, "tasks card visually moved far down");
+
+  // The canvas grew downward to make room for the lower card.
+  const canvasAfter = await page.locator(".dashboard-canvas").boundingBox();
+  assert.ok(canvasAfter && canvasBefore, "canvas boxes resolved");
+  assert.ok(canvasAfter.height > canvasBefore.height, "canvas grew after the drop");
 
   await page.getByRole("button", { name: "Done", exact: true }).click();
   // Done persists asynchronously; wait until the shell returns to normal mode
@@ -203,16 +243,43 @@ test("dashboard: drag reorder persists after reload", async ({ page }) => {
   await expect(page.getByRole("button", { name: /edit layout/i })).toBeVisible();
   await page.reload();
   await expect(page.locator(".dashboard-card [data-widget-key]")).toHaveCount(4);
-  const orderAfterReload = await page
-    .locator(".dashboard-card [data-widget-key]")
-    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-widget-key")));
-  expect(orderAfterReload).toEqual(orderAfterDrag);
+  expect(await placement("tasks:today")).toEqual(tasksPlacementAfter);
+  for (const [index, key] of keys.entries()) {
+    if (key === "tasks:today") continue;
+    expect(await placement(key)).toEqual(beforePlacement[index]);
+  }
 
-  // Reset the persisted layout for the following tests (no hidden widgets ->
-  // no in-page restore button, so reset through the settings API).
+  // Reset the persisted layout for the following tests.
   await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
     data: { value: ["assets:summary", "mini_game:highscore", "tasks:today", "focus:timer"] },
   });
+});
+
+test("dashboard: narrow viewport keeps widgets in flow without overflow", async ({ page }) => {
+  await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
+    data: { value: ["assets:summary", "mini_game:highscore", "tasks:today", "focus:timer"] },
+  });
+  await page.setViewportSize({ width: 375, height: 800 });
+  await page.goto("/");
+  await expect(page.locator(".dashboard-card [data-widget-key]")).toHaveCount(4);
+
+  // Narrow mode must not use the desktop absolute layout: cards are in the
+  // normal flow (no inline grid offsets, no absolute positioning).
+  await expect(page.locator(".dashboard-canvas[data-desktop='true']")).toHaveCount(0);
+  const cardStyles = await page.locator(".dashboard-card").first().evaluate((node) => ({
+    position: getComputedStyle(node).position,
+    left: node.style.left,
+    top: node.style.top,
+  }));
+  expect(cardStyles.position).not.toBe("absolute");
+  expect(cardStyles.left).toBe("");
+  expect(cardStyles.top).toBe("");
+
+  // No horizontal overflow from desktop placements.
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(0);
 });
 
 test("dashboard: hide and show widgets persist after reload", async ({ page }) => {

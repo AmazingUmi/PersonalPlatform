@@ -402,7 +402,7 @@
   }
 }
 
-/* ---------- Dashboard cards: navigation + edit-mode drag (FP-5) ---------- */
+/* ---------- Dashboard cards: navigation + edit-mode free drag (FP-5, V2) ---------- */
 
 .dashboard-card {
   position: relative;
@@ -411,6 +411,13 @@
 .dashboard-card--dragging {
   z-index: 40;
   opacity: 0.85;
+}
+
+/* Dragged card hovering an occupied / out-of-bounds slot: hard danger frame,
+ * released drops there revert to the origin. */
+.dashboard-card--drop-invalid {
+  outline: var(--border-2) solid var(--px-danger);
+  outline-offset: 2px;
 }
 
 .dashboard-card__hit {
