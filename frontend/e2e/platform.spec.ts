@@ -307,6 +307,167 @@ test("dashboard: hide and show widgets persist after reload", async ({ page }) =
   await expect(page.locator('[data-widget-key="assets:summary"]')).toHaveCount(1);
 });
 
+// ---------- Dashboard free resize (Phase 10) ----------
+
+/** Deterministic six-widget V2 layout: clock (0,0) has room to grow right/down. */
+const RESIZE_LAYOUT = {
+  version: 2,
+  items: {
+    "clock:clock": { x: 0, y: 0, w: 20, h: 16 },
+    "tasks:today": { x: 0, y: 26, w: 20, h: 16 },
+    "assets:summary": { x: 42, y: 0, w: 20, h: 16 },
+    "mini_game:highscore": { x: 42, y: 26, w: 20, h: 16 },
+    "focus:timer": { x: 0, y: 48, w: 20, h: 16 },
+    "notes:quick_note": { x: 42, y: 48, w: 20, h: 16 },
+  },
+  hidden: [],
+};
+
+const CANONICAL_LAYOUT = ["assets:summary", "mini_game:highscore", "tasks:today", "focus:timer"];
+
+async function putResizeLayout(page: Page) {
+  // clock/notes are default-enabled; make it explicit for determinism.
+  await setAppEnabled("clock", true);
+  await setAppEnabled("notes", true);
+  const response = await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
+    data: { value: RESIZE_LAYOUT },
+  });
+  expect(response.status(), "PUT resize layout").toBe(200);
+}
+
+/** Inline style geometry of a dashboard card (the placement source of truth). */
+async function cardGeometry(page: Page, key: string) {
+  return page.locator(`.dashboard-card[data-widget="${key}"]`).evaluate((node) => ({
+    left: node.style.left,
+    top: node.style.top,
+    width: node.style.width,
+    height: node.style.height,
+    density: node.getAttribute("data-density"),
+  }));
+}
+
+test("dashboard: resize persists after reload and switches density by threshold", async ({ page }) => {
+  await putResizeLayout(page);
+  await page.goto("/");
+  await expect(page.locator(".dashboard-canvas[data-desktop='true']")).toBeVisible();
+  await expect(page.locator('[data-widget-key="clock:clock"]')).toBeVisible();
+
+  const keys = Object.keys(RESIZE_LAYOUT.items);
+  const before: Record<string, unknown>[] = [];
+  for (const key of keys) before.push(await cardGeometry(page, key));
+  // 20x16 satisfies the clock's normal threshold, not expanded.
+  expect(before[0]).toMatchObject({ width: "320px", height: "256px", density: "normal" });
+
+  await page.getByRole("button", { name: /edit layout/i }).click();
+  // Bottom-right grip: drag +6 units right (+96px) and +4 down (+64px).
+  const handle = page.locator('.dashboard-card[data-widget="clock:clock"] .resize-handle');
+  const box = await handle.boundingBox();
+  assert(box, "resize handle box resolved");
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 96, box.y + box.height / 2 + 64, { steps: 10 });
+  await page.mouse.up();
+
+  // Only the resized card changed: w/h grew, x/y anchored, others untouched.
+  const clockAfter = await cardGeometry(page, "clock:clock");
+  assert.equal(clockAfter.left, "0px", "clock x anchored");
+  assert.equal(clockAfter.top, "0px", "clock y anchored");
+  assert.equal(clockAfter.width, "416px", "clock grew to 26 units");
+  assert.equal(clockAfter.height, "320px", "clock grew to 20 units");
+  // 26x20 crosses the clock's expanded threshold: attribute + content switch.
+  expect(clockAfter.density).toBe("expanded");
+  await expect(page.locator('[data-widget-key="clock:clock"]')).toContainText("MORE TASKS TODAY");
+  for (const [index, key] of keys.entries()) {
+    if (key === "clock:clock") continue;
+    expect(await cardGeometry(page, key)).toEqual(before[index]);
+  }
+
+  // Done persists; a reload restores the exact size and density.
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(page.getByRole("button", { name: /edit layout/i })).toBeVisible();
+  await page.reload();
+  await expect(page.locator('[data-widget-key="clock:clock"]')).toBeVisible();
+  expect(await cardGeometry(page, "clock:clock")).toMatchObject({
+    left: "0px",
+    top: "0px",
+    width: "416px",
+    height: "320px",
+    density: "expanded",
+  });
+  await expect(page.locator('[data-widget-key="clock:clock"]')).toContainText("MORE TASKS TODAY");
+
+  // Reset for the following tests (canonical legacy array: clock/notes hidden).
+  await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
+    data: { value: CANONICAL_LAYOUT },
+  });
+});
+
+test("dashboard: resize toward an occupied widget is rejected and retains the size", async ({ page }) => {
+  await putResizeLayout(page);
+  await page.goto("/");
+  await expect(page.locator('[data-widget-key="clock:clock"]')).toBeVisible();
+  await page.getByRole("button", { name: /edit layout/i }).click();
+
+  const handle = page.locator('.dashboard-card[data-widget="clock:clock"] .resize-handle');
+  const box = await handle.boundingBox();
+  assert(box, "resize handle box resolved");
+  // Drag far downwards: the candidate collides with tasks:today (y=26).
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + 500, { steps: 10 });
+  await expect(page.locator('.dashboard-card[data-widget="clock:clock"]')).toHaveClass(
+    /dashboard-card--resize-invalid/,
+  );
+  await page.mouse.up();
+
+  // Released invalid: original size retained, tasks untouched.
+  expect(await cardGeometry(page, "clock:clock")).toMatchObject({
+    width: "320px",
+    height: "256px",
+    density: "normal",
+  });
+  expect(await cardGeometry(page, "tasks:today")).toMatchObject({ top: "416px", height: "256px" });
+
+  await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
+    data: { value: CANONICAL_LAYOUT },
+  });
+});
+
+test("dashboard: narrow viewport ignores saved desktop sizes without overflow", async ({ page }) => {
+  await putResizeLayout(page);
+  await page.setViewportSize({ width: 375, height: 800 });
+  await page.goto("/");
+  await expect(page.locator(".dashboard-card [data-widget-key]").first()).toBeVisible();
+
+  // Narrow mode must not apply desktop geometry: flow layout, no inline size.
+  await expect(page.locator(".dashboard-canvas[data-desktop='true']")).toHaveCount(0);
+  const cardStyles = await page.locator(".dashboard-card").first().evaluate((node) => ({
+    position: getComputedStyle(node).position,
+    left: node.style.left,
+    top: node.style.top,
+    width: node.style.width,
+    height: node.style.height,
+    density: node.getAttribute("data-density"),
+  }));
+  expect(cardStyles.position).not.toBe("absolute");
+  expect(cardStyles.left).toBe("");
+  expect(cardStyles.top).toBe("");
+  expect(cardStyles.width).toBe("");
+  expect(cardStyles.height).toBe("");
+  // Density falls back to normal even for the saved 26x20 clock.
+  expect(cardStyles.density).toBe("normal");
+
+  // No horizontal overflow from desktop placements.
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(0);
+
+  await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
+    data: { value: CANONICAL_LAYOUT },
+  });
+});
+
 test("app center: nickname and accent persist and reach the dock", async ({ page }) => {
   // Clean slate for the presentation setting.
   await page.request.put(`${CORE}/api/core/settings/apps.presentation`, { data: { value: {} } });

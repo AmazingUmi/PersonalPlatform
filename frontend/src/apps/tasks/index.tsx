@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../shared/api";
 import { useAppDisplayName } from "../../shared/PresentationContext";
-import type { FrontendAppModule } from "../../shared/appTypes";
+import type { FrontendAppModule, WidgetDensity } from "../../shared/appTypes";
 import { useDebouncedValue } from "../../shared/useDebouncedValue";
 import { useMutation } from "../../shared/useMutation";
 import { ConfirmDialog } from "../../shared/ui/ConfirmDialog";
@@ -702,36 +702,109 @@ function TaskDetailPage() {
   );
 }
 
-function TasksTodayWidget() {
-  const summary = useAsync(() => api<{ today: number; overdue: number; done: number }>("/api/apps/tasks/summary"));
-  if (summary.loading) return <LoadingState label="Loading…" />;
-  if (summary.error) {
+/** View of this app's own public status route (contract: apps/tasks/README.md). */
+interface PublicTaskView {
+  id: string;
+  title: string;
+  startAt: string;
+}
+
+interface PublicStatusView {
+  current: PublicTaskView | null;
+  next: PublicTaskView | null;
+  today: { remainingCount: number };
+}
+
+const PUBLIC_STATUS_URL = "/api/apps/tasks/public/status";
+const SUMMARY_URL = "/api/apps/tasks/summary";
+
+/** Tasks still ahead today after the current one: next (if any) + the rest. */
+function moreTodayCount(status: PublicStatusView | null): number {
+  if (!status) return 0;
+  return status.today.remainingCount + (status.next ? 1 : 0);
+}
+
+/**
+ * Tasks Today dashboard card. Information density follows the container's
+ * layout context: compact keeps the running task plus a one-line outlook,
+ * normal shows the Today/Overdue/Done counters, expanded adds the
+ * current/next/remaining block. The fetches follow the density so a compact
+ * card never pays for data it cannot show.
+ */
+function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
+  const wantStatus = density !== "normal";
+  const wantSummary = density !== "compact";
+  const status = useAsync(
+    () => (wantStatus ? api<PublicStatusView>(PUBLIC_STATUS_URL) : Promise.resolve(null)),
+    [density],
+  );
+  const summary = useAsync(
+    () =>
+      wantSummary
+        ? api<{ today: number; overdue: number; done: number }>(SUMMARY_URL)
+        : Promise.resolve(null),
+    [density],
+  );
+  if ((wantStatus && status.loading) || (wantSummary && summary.loading)) {
+    return <LoadingState label="Loading…" />;
+  }
+  const statusError = wantStatus ? status.error : null;
+  const summaryError = wantSummary ? summary.error : null;
+  const error = statusError ?? summaryError;
+  if (error) {
     return (
       <div className="widget-fallback">
         <StatusMessage tone="error">
-          <p>{summary.error}</p>
+          <p>{error}</p>
         </StatusMessage>
-        <PixelButton size="sm" variant="secondary" onClick={summary.reload}>
+        <PixelButton size="sm" variant="secondary" onClick={status.error ? status.reload : summary.reload}>
           Retry
         </PixelButton>
       </div>
     );
   }
+
+  if (density === "compact") {
+    const current = status.data?.current ?? null;
+    return (
+      <div className="tasks-widget tasks-widget--compact">
+        <span className="tasks-widget__label">CURRENT</span>
+        <span className="tasks-widget__title">{current ? current.title : "No running task"}</span>
+        <span className="tasks-widget__more">{moreTodayCount(status.data)} MORE TODAY</span>
+      </div>
+    );
+  }
+
   const data = summary.data ?? { today: 0, overdue: 0, done: 0 };
   return (
-    <div className="px-stats">
-      <div className="px-stat">
-        <span className="px-stat__label">Today</span>
-        <span className="px-stat__value">{pad(data.today)}</span>
+    <div className="tasks-widget">
+      <div className="px-stats">
+        <div className="px-stat">
+          <span className="px-stat__label">Today</span>
+          <span className="px-stat__value">{pad(data.today)}</span>
+        </div>
+        <div className="px-stat px-stat--danger">
+          <span className="px-stat__label">Overdue</span>
+          <span className="px-stat__value">{pad(data.overdue)}</span>
+        </div>
+        <div className="px-stat px-stat--success">
+          <span className="px-stat__label">Done</span>
+          <span className="px-stat__value">{data.done}</span>
+        </div>
       </div>
-      <div className="px-stat px-stat--danger">
-        <span className="px-stat__label">Overdue</span>
-        <span className="px-stat__value">{pad(data.overdue)}</span>
-      </div>
-      <div className="px-stat px-stat--success">
-        <span className="px-stat__label">Done</span>
-        <span className="px-stat__value">{data.done}</span>
-      </div>
+      {density === "expanded" ? (
+        <div className="tasks-widget__status">
+          <p className="tasks-widget__row">
+            <span className="tasks-widget__row-label">CURRENT</span>
+            <span className="tasks-widget__row-title">{status.data?.current ? status.data.current.title : "None"}</span>
+          </p>
+          <p className="tasks-widget__row">
+            <span className="tasks-widget__row-label">NEXT</span>
+            <span className="tasks-widget__row-title">{status.data?.next ? status.data.next.title : "None"}</span>
+          </p>
+          <p className="tasks-widget__count">{moreTodayCount(status.data)} MORE TODAY</p>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -742,7 +815,23 @@ const app: FrontendAppModule = {
     { path: "", label: "Tasks", element: <TasksPage /> },
     { path: ":id", label: "Task Detail", element: <TaskDetailPage /> },
   ],
-  widgets: [{ id: "today", title: "Tasks Today", render: () => <TasksTodayWidget /> }],
+  widgets: [
+    {
+      id: "today",
+      title: "Tasks Today",
+      render: (context) => <TasksTodayWidget density={context?.layout.density ?? "normal"} />,
+      layout: {
+        minW: 16,
+        minH: 10,
+        defaultW: 20,
+        defaultH: 16,
+        density: {
+          normal: { minW: 18, minH: 12 },
+          expanded: { minW: 26, minH: 16 },
+        },
+      },
+    },
+  ],
 };
 
 export default app;

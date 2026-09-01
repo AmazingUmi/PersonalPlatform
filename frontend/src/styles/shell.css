@@ -420,6 +420,33 @@
   outline-offset: 2px;
 }
 
+/* Live bottom-right resize: stronger primary frame; an invalid candidate
+ * (collision) switches to danger. Invalid releases revert the size. */
+.dashboard-card--resizing {
+  z-index: 40;
+  outline: var(--border-2) solid var(--px-primary);
+  outline-offset: 2px;
+}
+
+.dashboard-card--resize-invalid {
+  outline-color: var(--px-danger);
+}
+
+/* Transient "w × h" chip shown only while a resize is in progress. */
+.dashboard-resize-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 5;
+  padding: 2px 6px;
+  border: var(--border-1) solid var(--px-border);
+  background: var(--px-surface);
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  color: var(--px-ink-soft);
+  pointer-events: none;
+}
+
 .dashboard-card__hit {
   cursor: pointer;
   height: 100%;
@@ -445,4 +472,37 @@
 
 .drag-handle:active {
   cursor: grabbing;
+}
+
+/* Bottom-right resize grip (Phase 10): rendered only in desktop edit mode.
+ * Diagonal pixel stripes read as a classic resize corner; pointer events
+ * are captured by the Dashboard, never reaching drag/navigation. */
+.resize-handle {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  z-index: 6;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: var(--border-1) solid var(--px-border);
+  background:
+    linear-gradient(135deg, transparent 0 4px, var(--px-ink-soft) 4px 6px, transparent 6px 10px, var(--px-ink-soft) 10px 12px, transparent 12px 100%),
+    var(--px-surface);
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
+.resize-handle:hover,
+.resize-handle:focus-visible {
+  border-color: var(--px-primary);
+  color: var(--px-primary);
+  background:
+    linear-gradient(135deg, transparent 0 4px, var(--px-primary) 4px 6px, transparent 6px 10px, var(--px-primary) 10px 12px, transparent 12px 100%),
+    var(--px-surface);
+}
+
+.resize-handle:focus-visible {
+  outline: var(--border-2) solid var(--px-primary);
+  outline-offset: 2px;
 }

@@ -7,6 +7,8 @@ import {
   useState,
   useSyncExternalStore,
   type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
@@ -23,6 +25,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { ErrorBoundary } from "../shared/ErrorBoundary";
 import { getSetting, putSetting, type AppInfo } from "../shared/api";
+import type { WidgetDensity, WidgetLayoutSpec, WidgetRenderContext } from "../shared/appTypes";
 import { resolvePresentation, type PresentationOverrides } from "../shared/presentation";
 import { EmptyState } from "../shared/ui/EmptyState";
 import { LoadingState } from "../shared/ui/LoadingState";
@@ -39,18 +42,21 @@ import {
   findFirstFreePosition,
   generateDefaultLayout,
   gridKeyboardCoordinateGetter,
-  normalizeMeasuredSize,
   parseDashboardLayout,
-  rectForPlacement,
+  placementRect,
   rectIsFree,
   resolveEffectiveLayout,
+  resolveWidgetDefaults,
+  resolveWidgetDensity,
+  resizePlacement,
   serializeLayout,
   snapToGrid,
   sortForMobile,
   type DashboardLayoutV2,
   type DashboardWidgetPlacement,
   type ParsedDashboardLayout,
-  type WidgetSize,
+  type ResolvedWidgetLayout,
+  type SizeUnits,
 } from "./dashboardLayout";
 import { enabledAppModules, resolveWidgets, type ResolvedWidget } from "./routes";
 
@@ -60,6 +66,11 @@ const widgetKey = (widget: ResolvedWidget) => `${widget.appId}:${widget.widget.i
 /** Interactive descendants must not trigger card navigation (FP-5.2). */
 function isInteractiveTarget(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest("button, a, input, select, textarea, label") !== null;
+}
+
+/** Grid rect for a placement at a concrete (possibly live-preview) size. */
+function rectOfSize(placement: DashboardWidgetPlacement, size: SizeUnits) {
+  return { x: placement.x, y: placement.y, w: size.w, h: size.h };
 }
 
 /**
@@ -99,13 +110,27 @@ interface DragPreview {
   valid: boolean;
 }
 
+/** Live bottom-right resize state (pointer or keyboard driven). */
+interface ResizePreview {
+  key: string;
+  /** Pointer position at resize start (client coords). */
+  startPx: { x: number; y: number };
+  /** Size when the resize began — the revert target for invalid releases. */
+  startSize: SizeUnits;
+  size: SizeUnits;
+  valid: boolean;
+}
+
 /**
  * Dashboard is a pure widget container: widgets come from enabled frontend
  * app modules. The desktop canvas gives every widget an independent 2D grid
- * position (Dashboard Free Layout V2) persisted in core.settings under
- * "dashboard.widgets" as `{version: 2, items, hidden}`; legacy values (a
- * plain widget-key array) migrate on read. Narrow viewports fall back to the
- * normal flow grid.
+ * placement `{x, y, w, h}` (Free Layout V2 + Phase 10 adaptive resize)
+ * persisted in core.settings under "dashboard.widgets" as
+ * `{version: 2, items, hidden}`; legacy values (a plain widget-key array)
+ * migrate on read. Card geometry comes from the placement itself — never
+ * from measured content — and widgets adapt to their size through density
+ * levels resolved from their declared thresholds. Narrow viewports fall back
+ * to the normal flow grid with density "normal".
  */
 export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentation?: PresentationOverrides }) {
   const navigate = useNavigate();
@@ -121,9 +146,11 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
   const [editMode, setEditMode] = useState(false);
   const [draft, setDraft] = useState<{ items: Record<string, DashboardWidgetPlacement>; hidden: string[] } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [sizes, setSizes] = useState<Record<string, WidgetSize>>({});
   const [canvasWidth, setCanvasWidth] = useState(0);
   const [activeDrag, setActiveDrag] = useState<DragPreview | null>(null);
+  const [activeResize, setActiveResize] = useState<ResizePreview | null>(null);
+  /** Mirror of activeResize so pointer-up handlers never read a stale closure. */
+  const activeResizeRef = useRef<ResizePreview | null>(null);
   const desktop = useDesktopLayoutMode();
 
   useEffect(() => {
@@ -154,13 +181,41 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
 
   const availableKeys = useMemo(() => available.map(widgetKey), [available]);
   const byKey = useMemo(() => new Map(available.map((widget) => [widgetKey(widget), widget])), [available]);
-  const sizeOf = useCallback((key: string) => sizes[key] ?? normalizeMeasuredSize(0, 0), [sizes]);
+
+  const updateResize = useCallback((next: ResizePreview | null) => {
+    activeResizeRef.current = next;
+    setActiveResize(next);
+  }, []);
+
+  // Widget layout contracts (grid units) resolved against platform defaults.
+  const specs = useMemo(() => {
+    const map: Record<string, WidgetLayoutSpec | undefined> = {};
+    for (const resolved of available) map[widgetKey(resolved)] = resolved.widget.layout;
+    return map;
+  }, [available]);
+  const layouts = useMemo(() => {
+    const map: Record<string, ResolvedWidgetLayout> = {};
+    for (const key of availableKeys) map[key] = resolveWidgetDefaults(specs[key]);
+    return map;
+  }, [availableKeys, specs]);
+  const layoutOf = useCallback(
+    (key: string) => layouts[key] ?? resolveWidgetDefaults(undefined),
+    [layouts],
+  );
+  const defaultsOf = useCallback(
+    (key: string): SizeUnits => {
+      const layout = layoutOf(key);
+      return { w: layout.defaultW, h: layout.defaultH };
+    },
+    [layoutOf],
+  );
 
   // Effective (persisted) layout: saved placements + runtime auto-placement
-  // for widgets that are neither placed nor hidden.
+  // for widgets that are neither placed nor hidden. Every placement carries
+  // explicit w/h; nothing is written back until the next user save.
   const effective = useMemo(
-    () => (parsed === "loading" ? null : resolveEffectiveLayout(parsed, availableKeys, sizes, canvasWidth)),
-    [parsed, availableKeys, sizes, canvasWidth],
+    () => (parsed === "loading" ? null : resolveEffectiveLayout(parsed, availableKeys, specs, canvasWidth)),
+    [parsed, availableKeys, specs, canvasWidth],
   );
 
   // Edit mode works on a draft snapshot that is persisted on Done.
@@ -172,69 +227,64 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
   const orderSignature = orderedKeys.join(",");
   const visible = orderedKeys.flatMap((key) => (byKey.has(key) ? [byKey.get(key)!] : []));
 
-  // ---------- canvas + card measurement ----------
+  // ---------- canvas measurement ----------
+  // Only the canvas WIDTH is measured (for capacity clamping). Card geometry
+  // comes from placements, so per-card DOM measurement — and its feedback
+  // loops — no longer exists.
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  const cardNodes = useRef(new Map<string, HTMLElement>());
-  const registerCardNode = useCallback((key: string, node: HTMLElement | null) => {
-    if (node) cardNodes.current.set(key, node);
-    else cardNodes.current.delete(key);
-  }, []);
-
-  const measure = useCallback(() => {
+  const measureCanvas = useCallback(() => {
     const canvas = canvasRef.current;
-    if (canvas) {
-      const width = canvas.getBoundingClientRect().width;
-      setCanvasWidth((prev) => (Math.abs(prev - width) < 0.5 ? prev : width));
-    }
-    const measured: Record<string, WidgetSize> = {};
-    for (const [key, node] of cardNodes.current) {
-      const rect = node.getBoundingClientRect();
-      measured[key] = normalizeMeasuredSize(rect.width, rect.height);
-    }
-    setSizes((prev) => {
-      let changed = false;
-      for (const [key, size] of Object.entries(measured)) {
-        const before = prev[key];
-        if (!before || before.width !== size.width || before.height !== size.height) {
-          changed = true;
-          break;
-        }
-      }
-      return changed ? { ...prev, ...measured } : prev;
-    });
+    if (!canvas) return;
+    const width = canvas.getBoundingClientRect().width;
+    setCanvasWidth((prev) => (Math.abs(prev - width) < 0.5 ? prev : width));
   }, []);
 
   useLayoutEffect(() => {
-    measure();
-  }, [measure, orderSignature, editMode, desktop]);
+    measureCanvas();
+  }, [measureCanvas, orderSignature, editMode, desktop]);
 
   useEffect(() => {
     if (!desktop) return;
-    window.addEventListener("resize", measure);
-    return () => window.removeEventListener("resize", measure);
-  }, [desktop, measure]);
+    const onWindowResize = () => measureCanvas();
+    window.addEventListener("resize", onWindowResize);
+    return () => window.removeEventListener("resize", onWindowResize);
+  }, [desktop, measureCanvas]);
+
+  // Leaving edit mode (or the desktop layout) must never strand a live
+  // resize preview on a normal-mode card.
+  useEffect(() => {
+    if (!editMode || !desktop) updateResize(null);
+  }, [editMode, desktop, updateResize]);
 
   // ---------- free-layout drag ----------
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: gridKeyboardCoordinateGetter }),
+
+  const othersFor = useCallback(
+    (key: string) =>
+      Object.entries(items)
+        .filter(([otherKey]) => otherKey !== key)
+        .map(([otherKey, other]) => placementRect(other, defaultsOf(otherKey))),
+    [items, defaultsOf],
   );
 
   /** Snap + clamp the origin-plus-delta position and collision-check it. */
   const evaluateCandidate = useCallback(
     (key: string, origin: DashboardWidgetPlacement, deltaPx: { x: number; y: number }) => {
-      const size = sizeOf(key);
-      const raw = {
+      const defaults = defaultsOf(key);
+      const raw: DashboardWidgetPlacement = {
         x: snapToGrid(origin.x * GRID_SIZE + deltaPx.x),
         y: snapToGrid(origin.y * GRID_SIZE + deltaPx.y),
+        w: origin.w,
+        h: origin.h,
       };
-      const placement = clampPlacement(raw, size, canvasWidth);
-      const others = Object.entries(items)
-        .filter(([otherKey]) => otherKey !== key)
-        .map(([otherKey, other]) => rectForPlacement(other, sizeOf(otherKey)));
-      return { placement, valid: rectIsFree(rectForPlacement(placement, size), others) };
+      const placement = clampPlacement(raw, defaults, canvasWidth);
+      return { placement, valid: rectIsFree(placementRect(placement, defaults), othersFor(key)) };
     },
-    [items, sizeOf, canvasWidth],
+    [canvasWidth, defaultsOf, othersFor],
+  );
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: gridKeyboardCoordinateGetter }),
   );
 
   const onDragStart = (event: DragStartEvent) => {
@@ -274,7 +324,134 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
 
   const onDragCancel = () => setActiveDrag(null);
 
+  // ---------- bottom-right resize ----------
+
+  const onResizeStart = (key: string, event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    const origin = items[key];
+    if (!origin) return;
+    event.preventDefault();
+    // Pointer capture keeps move/up on the handle even outside the card;
+    // jsdom lacks the API, so feature-detect (keyboard path covers jsdom).
+    if (typeof event.currentTarget.setPointerCapture === "function") {
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } catch {
+        // Capture races with a released pointer are harmless.
+      }
+    }
+    const layout = layoutOf(key);
+    const startSize = { w: origin.w ?? layout.defaultW, h: origin.h ?? layout.defaultH };
+    updateResize({ key, startPx: { x: event.clientX, y: event.clientY }, startSize, size: startSize, valid: true });
+  };
+
+  const onResizeMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const current = activeResizeRef.current;
+    if (!current) return;
+    const origin = items[current.key];
+    if (!origin) return;
+    const attempted = {
+      w: snapToGrid(current.startSize.w * GRID_SIZE + (event.clientX - current.startPx.x)),
+      h: snapToGrid(current.startSize.h * GRID_SIZE + (event.clientY - current.startPx.y)),
+    };
+    const { placement, valid } = resizePlacement(
+      { x: origin.x, y: origin.y, w: current.startSize.w, h: current.startSize.h },
+      attempted,
+      layoutOf(current.key),
+      canvasWidth,
+      othersFor(current.key),
+    );
+    if (current.size.w === placement.w && current.size.h === placement.h && current.valid === valid) return;
+    updateResize({ ...current, size: { w: placement.w, h: placement.h }, valid });
+  };
+
+  /** commit=true applies a valid candidate to the draft; invalid reverts. */
+  const onResizeEnd = (commit: boolean) => {
+    const current = activeResizeRef.current;
+    updateResize(null);
+    if (!current || !commit || !current.valid) return;
+    const origin = items[current.key];
+    if (!origin) return;
+    if (origin.w === current.size.w && origin.h === current.size.h) return;
+    // Resize changes ONLY the resized widget's w/h — x/y and every other
+    // card stay untouched (Free Layout V2 isolation rule).
+    setDraft((state) =>
+      state
+        ? {
+            ...state,
+            items: {
+              ...state.items,
+              [current.key]: { x: origin.x, y: origin.y, w: current.size.w, h: current.size.h },
+            },
+          }
+        : state,
+    );
+  };
+
+  const onResizeKeyDown = (key: string, event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    const deltas: Record<string, SizeUnits> = {
+      ArrowLeft: { w: -1, h: 0 },
+      ArrowRight: { w: 1, h: 0 },
+      ArrowUp: { w: 0, h: -1 },
+      ArrowDown: { w: 0, h: 1 },
+    };
+    const delta = deltas[event.code];
+    if (!delta) return;
+    // Stop the arrow from scrolling or reaching the dnd-kit drag sensor.
+    event.preventDefault();
+    event.stopPropagation();
+    const origin = items[key];
+    if (!origin) return;
+    const layout = layoutOf(key);
+    const attempted = {
+      w: (origin.w ?? layout.defaultW) + delta.w,
+      h: (origin.h ?? layout.defaultH) + delta.h,
+    };
+    const { placement, valid } = resizePlacement(origin, attempted, layout, canvasWidth, othersFor(key));
+    // Invalid targets (collision) and targets that clamp to the current
+    // size are no-ops — the keyboard never moves an invalid resize.
+    if (!valid || (placement.w === origin.w && placement.h === origin.h)) return;
+    setDraft((state) =>
+      state ? { ...state, items: { ...state.items, [key]: placement } } : state,
+    );
+  };
+
+  // ---------- widget render context (density) ----------
+
+  const sizeOfItem = useCallback(
+    (key: string): SizeUnits => {
+      if (activeResize?.key === key) return activeResize.size;
+      const layout = layoutOf(key);
+      const p = items[key];
+      return { w: p?.w ?? layout.defaultW, h: p?.h ?? layout.defaultH };
+    },
+    [activeResize, items, layoutOf],
+  );
+
+  const renderContextFor = useCallback(
+    (key: string): WidgetRenderContext => {
+      const layout = layoutOf(key);
+      // Mobile flow ignores desktop sizes: widgets render at their defaults
+      // in normal density, so saved w/h never leaks into the narrow layout.
+      const size = desktop ? sizeOfItem(key) : { w: layout.defaultW, h: layout.defaultH };
+      const density: WidgetDensity = desktop
+        ? resolveWidgetDensity(layout, size.w, size.h)
+        : "normal";
+      return {
+        layout: {
+          widthUnits: size.w,
+          heightUnits: size.h,
+          widthPx: size.w * GRID_SIZE,
+          heightPx: size.h * GRID_SIZE,
+          density,
+        },
+      };
+    },
+    [desktop, layoutOf, sizeOfItem],
+  );
+
   // ---------- edit mode actions ----------
+
   const startEditing = () => {
     if (!effective) return;
     setDraft({ items: { ...effective.items }, hidden: [...effective.hidden] });
@@ -288,7 +465,7 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
 
   const restoreDefault = async () => {
     const defaultItems = generateDefaultLayout(
-      availableKeys.map((key) => ({ key, size: sizeOf(key) })),
+      availableKeys.map((key) => ({ key, size: defaultsOf(key) })),
       canvasWidth,
     );
     if (editMode) {
@@ -309,12 +486,14 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
   const showWidget = (key: string) => {
     setDraft((current) => {
       if (!current) return current;
-      const size = sizeOf(key);
+      const size = defaultsOf(key);
       const occupied = Object.entries(current.items).map(([otherKey, other]) =>
-        rectForPlacement(other, sizeOf(otherKey)),
+        placementRect(other, defaultsOf(otherKey)),
       );
-      const placement = clampPlacement(findFirstFreePosition(size, occupied, canvasWidth), size, canvasWidth);
-      return { items: { ...current.items, [key]: placement }, hidden: current.hidden.filter((k) => k !== key) };
+      return {
+        items: { ...current.items, [key]: findFirstFreePosition(size, occupied, canvasWidth) },
+        hidden: current.hidden.filter((k) => k !== key),
+      };
     });
   };
 
@@ -338,12 +517,14 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
     .map((key) => byKey.get(key))
     .filter((widget): widget is ResolvedWidget => widget !== undefined);
 
-  // Canvas height follows the lowest card (and the live drop preview) so the
-  // canvas grows downwards instead of clipping low drops.
-  const cardRects = orderedKeys.map((key) => rectForPlacement(items[key]!, sizeOf(key)));
+  // Canvas height follows the lowest card — including the live drag preview
+  // and the live resize candidate — so it grows downwards instead of
+  // clipping low geometry. Rects are built from the EFFECTIVE size (which
+  // reflects the live resize), never from the stale placement.w.
+  const cardRects = orderedKeys.map((key) => ({ ...rectOfSize(items[key]!, sizeOfItem(key)) }));
   const previewRect =
     activeDrag && items[activeDrag.key]
-      ? rectForPlacement(activeDrag.candidate, sizeOf(activeDrag.key))
+      ? placementRect(activeDrag.candidate, sizeOfItem(activeDrag.key))
       : null;
   const canvasHeight = canvasHeightFor(previewRect ? [...cardRects, previewRect] : cardRects);
   const canvasStyle: CSSProperties | undefined = desktop ? { height: `${canvasHeight}px` } : undefined;
@@ -406,44 +587,56 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
                 style={{
                   left: `${activeDrag.candidate.x * GRID_SIZE}px`,
                   top: `${activeDrag.candidate.y * GRID_SIZE}px`,
-                  width: `${sizeOf(activeDrag.key).width}px`,
-                  height: `${sizeOf(activeDrag.key).height}px`,
+                  width: `${(activeDrag.candidate.w ?? defaultsOf(activeDrag.key).w) * GRID_SIZE}px`,
+                  height: `${(activeDrag.candidate.h ?? defaultsOf(activeDrag.key).h) * GRID_SIZE}px`,
                 }}
                 aria-hidden="true"
               />
             )}
-            {visible.map((resolved) => (
-              <ErrorBoundary
-                key={widgetKey(resolved)}
-                fallback={
+            {visible.map((resolved) => {
+              const key = widgetKey(resolved);
+              const context = renderContextFor(key);
+              const resizing = activeResize?.key === key ? activeResize : null;
+              return (
+                <ErrorBoundary
+                  key={key}
+                  fallback={
+                    <DashboardCard
+                      resolved={resolved}
+                      editMode={editMode}
+                      desktop={desktop}
+                      placement={items[key] ?? { x: 0, y: 0 }}
+                      size={sizeOfItem(key)}
+                      density={context.layout.density}
+                      onNavigate={openWidget}
+                      errorFallback
+                    >
+                      <p className="dashboard-widget-error">Widget failed to render.</p>
+                    </DashboardCard>
+                  }
+                >
                   <DashboardCard
                     resolved={resolved}
                     editMode={editMode}
                     desktop={desktop}
-                    placement={items[widgetKey(resolved)] ?? { x: 0, y: 0 }}
-                    registerNode={registerCardNode}
+                    accent={presentations.get(resolved.appId)?.accent}
+                    placement={items[key] ?? { x: 0, y: 0 }}
+                    size={sizeOfItem(key)}
+                    density={context.layout.density}
+                    resizing={resizing ? { valid: resizing.valid } : undefined}
+                    onResizeStart={onResizeStart}
+                    onResizeMove={onResizeMove}
+                    onResizeEnd={onResizeEnd}
+                    onResizeKeyDown={onResizeKeyDown}
                     onNavigate={openWidget}
-                    errorFallback
+                    onHide={editMode ? () => hideWidget(key) : undefined}
+                    dropInvalid={activeDrag?.key === key && !activeDrag.valid}
                   >
-                    <p className="dashboard-widget-error">Widget failed to render.</p>
+                    {resolved.widget.render(context)}
                   </DashboardCard>
-                }
-              >
-                <DashboardCard
-                  resolved={resolved}
-                  editMode={editMode}
-                  desktop={desktop}
-                  accent={presentations.get(resolved.appId)?.accent}
-                  placement={items[widgetKey(resolved)] ?? { x: 0, y: 0 }}
-                  registerNode={registerCardNode}
-                  onNavigate={openWidget}
-                  dropInvalid={activeDrag?.key === widgetKey(resolved) && !activeDrag.valid}
-                  onHide={editMode ? () => hideWidget(widgetKey(resolved)) : undefined}
-                >
-                  {resolved.widget.render()}
-                </DashboardCard>
-              </ErrorBoundary>
-            ))}
+                </ErrorBoundary>
+              );
+            })}
           </div>
         </DndContext>
       )}
@@ -489,7 +682,14 @@ interface DashboardCardProps {
   editMode: boolean;
   desktop: boolean;
   placement: DashboardWidgetPlacement;
-  registerNode: (key: string, node: HTMLElement | null) => void;
+  /** Effective card size in grid units (includes the live resize preview). */
+  size: SizeUnits;
+  density: WidgetDensity;
+  resizing?: { valid: boolean };
+  onResizeStart?: (key: string, event: ReactPointerEvent<HTMLButtonElement>) => void;
+  onResizeMove?: (event: ReactPointerEvent<HTMLButtonElement>) => void;
+  onResizeEnd?: (commit: boolean) => void;
+  onResizeKeyDown?: (key: string, event: ReactKeyboardEvent<HTMLButtonElement>) => void;
   onNavigate: (resolved: ResolvedWidget) => void;
   onHide?: () => void;
   accent?: ReturnType<typeof resolvePresentation>["accent"];
@@ -501,16 +701,23 @@ interface DashboardCardProps {
 /**
  * One dashboard card. Normal mode: the whole card navigates to the widget's
  * href (or app root). Edit mode on desktop: free dragging happens ONLY
- * through the explicit grip handle in the window header, so card clicks and
- * widget content stay unaffected (FP-5.2/FP-5.3). The card's visual position
- * comes from its grid placement, never from DOM order.
+ * through the explicit grip handle in the window header, and resizing ONLY
+ * through the bottom-right grip — card clicks and widget content stay
+ * unaffected (FP-5.2/FP-5.3). Position and size come from the grid
+ * placement, never from DOM order or measured content.
  */
 function DashboardCard({
   resolved,
   editMode,
   desktop,
   placement,
-  registerNode,
+  size,
+  density,
+  resizing,
+  onResizeStart,
+  onResizeMove,
+  onResizeEnd,
+  onResizeKeyDown,
   onNavigate,
   onHide,
   accent,
@@ -519,9 +726,10 @@ function DashboardCard({
   children,
 }: DashboardCardProps) {
   const key = widgetKey(resolved);
+  const isResizing = resizing !== undefined;
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: key,
-    disabled: !editMode || !desktop,
+    disabled: !editMode || !desktop || isResizing,
   });
 
   const interactive = editMode || errorFallback;
@@ -529,6 +737,8 @@ function DashboardCard({
     ? {
         left: `${placement.x * GRID_SIZE}px`,
         top: `${placement.y * GRID_SIZE}px`,
+        width: `${size.w * GRID_SIZE}px`,
+        height: `${size.h * GRID_SIZE}px`,
         ...(isDragging && transform ? { transform: CSS.Translate.toString(transform) } : {}),
       }
     : {};
@@ -568,19 +778,19 @@ function DashboardCard({
     "dashboard-card",
     isDragging ? "dashboard-card--dragging" : "",
     isDragging && dropInvalid ? "dashboard-card--drop-invalid" : "",
+    isResizing ? "dashboard-card--resizing" : "",
+    isResizing && !resizing!.valid ? "dashboard-card--resize-invalid" : "",
   ]
     .filter(Boolean)
     .join(" ");
 
   return (
     <div
-      ref={(node) => {
-        setNodeRef(node);
-        registerNode(key, node);
-      }}
+      ref={setNodeRef}
       className={classes}
       style={style}
       data-widget={key}
+      data-density={density}
     >
       {interactive ? (
         card
@@ -607,6 +817,23 @@ function DashboardCard({
           {card}
         </div>
       )}
+      {isResizing ? (
+        <span className="dashboard-resize-badge" aria-hidden="true">
+          {size.w} × {size.h}
+        </span>
+      ) : null}
+      {editMode && desktop && !errorFallback && onResizeStart && onResizeMove && onResizeEnd && onResizeKeyDown ? (
+        <button
+          type="button"
+          className="resize-handle"
+          aria-label={`Resize ${resolved.widget.title}`}
+          onPointerDown={(event) => onResizeStart(key, event)}
+          onPointerMove={(event) => onResizeMove(event)}
+          onPointerUp={() => onResizeEnd(true)}
+          onPointerCancel={() => onResizeEnd(false)}
+          onKeyDown={(event) => onResizeKeyDown(key, event)}
+        />
+      ) : null}
     </div>
   );
 }

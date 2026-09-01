@@ -1,31 +1,39 @@
 import { describe, expect, it } from "vitest";
+import type { WidgetLayoutSpec } from "../shared/appTypes";
 import {
   COLLISION_GAP_UNITS,
-  DEFAULT_CARD_WIDTH_PX,
-  ESTIMATED_CARD_HEIGHT_PX,
+  DEFAULT_CARD_HEIGHT_UNITS,
+  DEFAULT_CARD_WIDTH_UNITS,
+  DEFAULT_MIN_HEIGHT_UNITS,
+  DEFAULT_MIN_WIDTH_UNITS,
   GRID_SIZE,
+  applyWidgetDefaults,
   canvasCapacityUnits,
   canvasHeightFor,
   clampPlacement,
+  clampWidgetSize,
   findFirstFreePosition,
   generateDefaultLayout,
   gridKeyboardCoordinateGetter,
   gridUnits,
   migrateLegacyLayout,
-  normalizeMeasuredSize,
   normalizePlacement,
   parseDashboardLayout,
-  rectForPlacement,
+  placementRect,
   rectIsFree,
   rectsOverlap,
+  resolveEffectiveLayout,
+  resolveWidgetDefaults,
+  resolveWidgetDensity,
+  resizePlacement,
   serializeLayout,
   snapToGrid,
   sortForMobile,
-  type WidgetSize,
+  type SizeUnits,
 } from "./dashboardLayout";
 
-const size = (width: number, height: number): WidgetSize => ({ width, height });
-const defaultSize = size(DEFAULT_CARD_WIDTH_PX, ESTIMATED_CARD_HEIGHT_PX);
+const units = (w: number, h: number): SizeUnits => ({ w, h });
+const defaultUnits = units(DEFAULT_CARD_WIDTH_UNITS, DEFAULT_CARD_HEIGHT_UNITS);
 
 describe("grid math", () => {
   it("snaps pixel offsets to the nearest grid unit", () => {
@@ -48,12 +56,6 @@ describe("grid math", () => {
     expect(canvasCapacityUnits(-10)).toBe(0);
     expect(canvasCapacityUnits(GRID_SIZE * 65)).toBe(65);
     expect(canvasCapacityUnits(GRID_SIZE * 65 + 15)).toBe(65);
-  });
-
-  it("normalizes measured rects, falling back on zero sizes (jsdom)", () => {
-    expect(normalizeMeasuredSize(0, 0)).toEqual(defaultSize);
-    expect(normalizeMeasuredSize(320, 0)).toEqual({ width: 320, height: ESTIMATED_CARD_HEIGHT_PX });
-    expect(normalizeMeasuredSize(320, 123)).toEqual({ width: 320, height: 123 });
   });
 });
 
@@ -109,9 +111,78 @@ describe("parseDashboardLayout", () => {
     expect(normalizePlacement(null)).toBeNull();
   });
 
+  it("keeps w/h through parsing and serialization (w/h serialization)", () => {
+    expect(normalizePlacement({ x: 1, y: 2, w: 28.4, h: -5 })).toEqual({ x: 1, y: 2, w: 28 });
+    expect(normalizePlacement({ x: 1, y: 2, w: 0, h: 3 })).toEqual({ x: 1, y: 2, h: 3 });
+    const layout = serializeLayout({ a: { x: 1, y: 2, w: 28, h: 20 }, b: { x: 0, y: 9 } }, ["c"]);
+    expect(parseDashboardLayout(layout)).toEqual({
+      kind: "v2",
+      items: { a: { x: 1, y: 2, w: 28, h: 20 }, b: { x: 0, y: 9 } },
+      hidden: ["c"],
+    });
+  });
+
   it("round-trips through serializeLayout", () => {
     const layout = serializeLayout({ a: { x: 1, y: 2 }, b: { x: 0, y: 9 } }, ["c"]);
     expect(parseDashboardLayout(layout)).toEqual({ kind: "v2", items: { a: { x: 1, y: 2 }, b: { x: 0, y: 9 } }, hidden: ["c"] });
+  });
+});
+
+describe("resolveWidgetDefaults", () => {
+  it("falls back to the platform defaults without a spec", () => {
+    const resolved = resolveWidgetDefaults(undefined);
+    expect(resolved.defaultW).toBe(DEFAULT_CARD_WIDTH_UNITS);
+    expect(resolved.defaultH).toBe(DEFAULT_CARD_HEIGHT_UNITS);
+    expect(resolved.minW).toBe(DEFAULT_MIN_WIDTH_UNITS);
+    expect(resolved.minH).toBe(DEFAULT_MIN_HEIGHT_UNITS);
+    expect(resolved.maxW).toBeNull();
+    expect(resolved.maxH).toBeNull();
+    expect(resolved.density).toBeUndefined();
+  });
+
+  it("honors declared constraints, defaults and density thresholds", () => {
+    const spec: WidgetLayoutSpec = {
+      minW: 16,
+      minH: 12,
+      maxW: 40,
+      defaultW: 24,
+      defaultH: 18,
+      density: { normal: { minW: 18, minH: 14 }, expanded: { minW: 26, minH: 20 } },
+    };
+    expect(resolveWidgetDefaults(spec)).toEqual({
+      minW: 16,
+      minH: 12,
+      maxW: 40,
+      maxH: null,
+      defaultW: 24,
+      defaultH: 18,
+      density: spec.density,
+    });
+  });
+
+  it("keeps the default size inside the declared range", () => {
+    expect(resolveWidgetDefaults({ minW: 30, defaultW: 20 }).defaultW).toBe(30);
+    expect(resolveWidgetDefaults({ maxW: 10, defaultW: 20, minW: 4 }).defaultW).toBe(10);
+    expect(resolveWidgetDefaults({ minH: 40, defaultH: 16 }).defaultH).toBe(40);
+  });
+});
+
+describe("applyWidgetDefaults", () => {
+  it("completes old V2 x/y-only entries with per-widget defaults", () => {
+    const specs: Record<string, WidgetLayoutSpec | undefined> = {
+      a: { defaultW: 24, defaultH: 18 },
+      b: undefined,
+    };
+    expect(applyWidgetDefaults({ a: { x: 5, y: 8 }, b: { x: 0, y: 0 } }, specs)).toEqual({
+      a: { x: 5, y: 8, w: 24, h: 18 },
+      b: { x: 0, y: 0, w: DEFAULT_CARD_WIDTH_UNITS, h: DEFAULT_CARD_HEIGHT_UNITS },
+    });
+  });
+
+  it("never overwrites an explicit w/h", () => {
+    expect(applyWidgetDefaults({ a: { x: 0, y: 0, w: 30, h: 22 } }, {})).toEqual({
+      a: { x: 0, y: 0, w: 30, h: 22 },
+    });
   });
 });
 
@@ -134,8 +205,16 @@ describe("collision", () => {
     expect(rectsOverlap(a, { x: 4, y: 0, w: 2, h: 2 }, 0)).toBe(false);
   });
 
-  it("builds collision rects from placements with real pixel sizes", () => {
-    expect(rectForPlacement({ x: 2, y: 3 }, size(320, 100))).toEqual({ x: 2, y: 3, w: 20, h: 7 });
+  it("builds collision rects from placements, preferring explicit w/h", () => {
+    // The pre-Phase-10 behavior: entries without w/h use the defaults.
+    expect(placementRect({ x: 2, y: 3 }, units(20, 7))).toEqual({ x: 2, y: 3, w: 20, h: 7 });
+    // Phase 10: the explicit size wins over any default.
+    expect(placementRect({ x: 2, y: 3, w: 28, h: 20 }, units(20, 16))).toEqual({
+      x: 2,
+      y: 3,
+      w: 28,
+      h: 20,
+    });
   });
 
   it("rectIsFree checks against a list of others", () => {
@@ -145,63 +224,197 @@ describe("collision", () => {
   });
 });
 
+describe("clampWidgetSize", () => {
+  const layout = resolveWidgetDefaults({ minW: 16, minH: 12, maxW: 40, maxH: 30 });
+
+  it("clamps below the minimum width/height", () => {
+    expect(clampWidgetSize(units(3, 2), layout, 65)).toEqual(units(16, 12));
+  });
+
+  it("clamps above the maximum width/height", () => {
+    expect(clampWidgetSize(units(99, 99), layout, 65)).toEqual(units(40, 30));
+  });
+
+  it("clamps the width to the canvas right edge relative to the anchor", () => {
+    // Canvas 40 units wide, widget anchored at x=10: max w = 30.
+    expect(clampWidgetSize(units(50, 16), layout, 40, 10)).toEqual(units(30, 16));
+    // Anchor 0: the whole canvas.
+    expect(clampWidgetSize(units(50, 16), layout, 40, 0)).toEqual(units(40, 16));
+  });
+
+  it("never lets the canvas push width below the minimum", () => {
+    expect(clampWidgetSize(units(20, 16), layout, 10, 0)).toEqual(units(16, 16));
+  });
+
+  it("skips the horizontal bound when the capacity is unknown", () => {
+    expect(clampWidgetSize(units(200, 16), layout, 0)).toEqual(units(40, 16));
+  });
+
+  it("height is unbounded without maxH (canvas grows downwards)", () => {
+    const noMaxH = resolveWidgetDefaults({ minH: 8 });
+    expect(clampWidgetSize(units(20, 5000), noMaxH, 65)).toEqual(units(20, 5000));
+  });
+});
+
 describe("clampPlacement", () => {
   it("rejects negative x/y", () => {
-    expect(clampPlacement({ x: -3, y: -1 }, defaultSize, 1040)).toEqual({ x: 0, y: 0 });
+    expect(clampPlacement({ x: -3, y: -1 }, defaultUnits, 1040)).toEqual({ x: 0, y: 0 });
   });
 
   it("clamps the right edge to the canvas width", () => {
-    // Canvas 320px wide = 20 units; a 320px card (20 units) may only sit at x=0.
-    expect(clampPlacement({ x: 30, y: 4 }, size(320, 100), 320)).toEqual({ x: 0, y: 4 });
-    // A 160px card (10 units) in a 320px canvas: max x = 10.
-    expect(clampPlacement({ x: 99, y: 0 }, size(160, 100), 320)).toEqual({ x: 10, y: 0 });
-    expect(clampPlacement({ x: 5, y: 0 }, size(160, 100), 320)).toEqual({ x: 5, y: 0 });
+    // Canvas 320px wide = 20 units; a 20-unit card may only sit at x=0.
+    expect(clampPlacement({ x: 30, y: 4 }, units(20, 7), 320)).toEqual({ x: 0, y: 4 });
+    // A 10-unit card in a 320px canvas: max x = 10.
+    expect(clampPlacement({ x: 99, y: 0 }, units(10, 7), 320)).toEqual({ x: 10, y: 0 });
+    expect(clampPlacement({ x: 5, y: 0 }, units(10, 7), 320)).toEqual({ x: 5, y: 0 });
+  });
+
+  it("uses the explicit w for the right-edge clamp", () => {
+    // Explicit 28-wide card in a 40-unit canvas: max x = 12.
+    expect(clampPlacement({ x: 30, y: 0, w: 28, h: 20 }, defaultUnits, 640)).toEqual({
+      x: 12,
+      y: 0,
+      w: 28,
+      h: 20,
+    });
   });
 
   it("skips the horizontal clamp when the canvas width is unknown", () => {
-    expect(clampPlacement({ x: 40, y: -2 }, size(320, 100), 0)).toEqual({ x: 40, y: 0 });
+    expect(clampPlacement({ x: 40, y: -2 }, units(20, 7), 0)).toEqual({ x: 40, y: 0 });
   });
 
-  it("keeps reserved w/h flags when clamping", () => {
-    expect(clampPlacement({ x: -1, y: 2, w: 4, h: 3 }, defaultSize, 0)).toEqual({ x: 0, y: 2, w: 4, h: 3 });
+  it("keeps w/h fields when clamping", () => {
+    expect(clampPlacement({ x: -1, y: 2, w: 4, h: 3 }, defaultUnits, 0)).toEqual({ x: 0, y: 2, w: 4, h: 3 });
+  });
+});
+
+describe("resizePlacement", () => {
+  const layout = resolveWidgetDefaults({ minW: 16, minH: 12, defaultW: 20, defaultH: 16 });
+  const canvas = 1040; // 65 units
+
+  it("resizes both dimensions and keeps x/y anchored", () => {
+    const { placement, valid } = resizePlacement({ x: 5, y: 7, w: 20, h: 16 }, units(28, 20), layout, canvas, []);
+    expect(placement).toEqual({ x: 5, y: 7, w: 28, h: 20 });
+    expect(valid).toBe(true);
+  });
+
+  it("snaps fractional attempts to whole units", () => {
+    const { placement } = resizePlacement({ x: 0, y: 0, w: 20, h: 16 }, units(27.6, 19.2), layout, canvas, []);
+    expect(placement).toEqual({ x: 0, y: 0, w: 28, h: 19 });
+  });
+
+  it("clamps to the minimum size", () => {
+    const { placement } = resizePlacement({ x: 0, y: 0, w: 20, h: 16 }, units(2, 2), layout, canvas, []);
+    expect(placement).toEqual({ x: 0, y: 0, w: 16, h: 12 });
+  });
+
+  it("clamps the right edge to the canvas", () => {
+    // Anchor x=60 in a 65-unit canvas: max w = 5 — but minW floors it at 16.
+    const { placement } = resizePlacement({ x: 60, y: 0, w: 4, h: 12 }, units(90, 16), layout, canvas, []);
+    expect(placement).toEqual({ x: 60, y: 0, w: 16, h: 16 });
+    // Comfortable anchor: 65 - 40 = 25 usable units.
+    const wide = resizePlacement({ x: 40, y: 0, w: 20, h: 16 }, units(60, 16), layout, canvas, []);
+    expect(wide.placement.w).toBe(25);
+  });
+
+  it("flags a resize that would collide with another widget", () => {
+    // Neighbor right next to the widget (gap unit included in its rect).
+    const others = [placementRect({ x: 21, y: 0 }, units(20, 16))];
+    const collision = resizePlacement({ x: 0, y: 0, w: 20, h: 16 }, units(24, 16), layout, canvas, others);
+    expect(collision.valid).toBe(false);
+    expect(collision.placement).toEqual({ x: 0, y: 0, w: 24, h: 16 });
+    // Shrinking away from it stays valid.
+    const shrink = resizePlacement({ x: 0, y: 0, w: 24, h: 16 }, units(20, 16), layout, canvas, others);
+    expect(shrink.valid).toBe(true);
+  });
+
+  it("grows the height without a ceiling (canvas growth is the caller's job)", () => {
+    const { placement, valid } = resizePlacement({ x: 0, y: 0, w: 20, h: 16 }, units(20, 400), layout, canvas, []);
+    expect(placement.h).toBe(400);
+    expect(valid).toBe(true);
+  });
+});
+
+describe("resolveWidgetDensity", () => {
+  const layout = resolveWidgetDefaults({
+    density: { normal: { minW: 18, minH: 14 }, expanded: { minW: 26, minH: 20 } },
+  });
+
+  it("is compact below the normal threshold", () => {
+    expect(resolveWidgetDensity(layout, 17, 20)).toBe("compact");
+    expect(resolveWidgetDensity(layout, 20, 13)).toBe("compact");
+  });
+
+  it("is normal when the normal threshold is met", () => {
+    expect(resolveWidgetDensity(layout, 18, 14)).toBe("normal");
+    expect(resolveWidgetDensity(layout, 25, 19)).toBe("normal");
+  });
+
+  it("is expanded only when BOTH width and height qualify", () => {
+    expect(resolveWidgetDensity(layout, 26, 20)).toBe("expanded");
+    expect(resolveWidgetDensity(layout, 26, 19)).toBe("normal");
+    expect(resolveWidgetDensity(layout, 25, 20)).toBe("normal");
+  });
+
+  it("falls back to normal without any thresholds (legacy widgets)", () => {
+    const bare = resolveWidgetDefaults(undefined);
+    expect(resolveWidgetDensity(bare, 1, 1)).toBe("normal");
+    expect(resolveWidgetDensity(bare, 60, 60)).toBe("normal");
+  });
+
+  it("treats a missing threshold field as 0 (always met)", () => {
+    const widthOnly = resolveWidgetDefaults({ density: { normal: { minW: 18 } } });
+    expect(resolveWidgetDensity(widthOnly, 18, 1)).toBe("normal");
+    expect(resolveWidgetDensity(widthOnly, 17, 99)).toBe("compact");
+  });
+
+  it("expanded-only declarations keep sizes below it at normal", () => {
+    const expandedOnly = resolveWidgetDefaults({ density: { expanded: { minW: 26, minH: 20 } } });
+    expect(resolveWidgetDensity(expandedOnly, 10, 10)).toBe("normal");
+    expect(resolveWidgetDensity(expandedOnly, 26, 20)).toBe("expanded");
   });
 });
 
 describe("findFirstFreePosition", () => {
   it("finds the top-left free slot for an empty canvas", () => {
-    expect(findFirstFreePosition(defaultSize, [], 1040)).toEqual({ x: 0, y: 0 });
+    expect(findFirstFreePosition(defaultUnits, [], 1040)).toEqual({ x: 0, y: 0, w: 20, h: 16 });
   });
 
   it("places to the right of an occupied slot when it fits", () => {
-    const occupied = [rectForPlacement({ x: 0, y: 0 }, size(320, 200))];
+    const occupied = [placementRect({ x: 0, y: 0 }, units(20, 13))];
     // Default card (20 units wide) lands right after the first + gap.
-    expect(findFirstFreePosition(size(320, 200), occupied, 1040)).toEqual({ x: 21, y: 0 });
+    expect(findFirstFreePosition(units(20, 13), occupied, 1040)).toEqual({ x: 21, y: 0, w: 20, h: 13 });
   });
 
   it("wraps below the stack when the row is full", () => {
     // 320px canvas = 20 units: a 20-unit card already fills the row.
-    const occupied = [rectForPlacement({ x: 0, y: 0 }, size(320, 200))];
-    const found = findFirstFreePosition(size(320, 200), occupied, 320);
-    expect(found).toEqual({ x: 0, y: 14 }); // 200px = 13 units + 1 gap
+    const occupied = [placementRect({ x: 0, y: 0 }, units(20, 13))];
+    const found = findFirstFreePosition(units(20, 13), occupied, 320);
+    expect(found).toEqual({ x: 0, y: 14, w: 20, h: 13 }); // 13 units + 1 gap
   });
 
   it("navigates around multiple obstacles deterministically", () => {
     // Three cards fill the 65-unit row: 0..20, 21..41, 42..62.
     const occupied = [
-      rectForPlacement({ x: 0, y: 0 }, size(320, 100)),
-      rectForPlacement({ x: 21, y: 0 }, size(320, 100)),
-      rectForPlacement({ x: 42, y: 0 }, size(320, 100)),
+      placementRect({ x: 0, y: 0 }, units(20, 7)),
+      placementRect({ x: 21, y: 0 }, units(20, 7)),
+      placementRect({ x: 42, y: 0 }, units(20, 7)),
     ];
     // First free slot wraps to the next row (7 units + 1 gap).
-    expect(findFirstFreePosition(size(320, 100), occupied, 1040)).toEqual({ x: 0, y: 8 });
+    expect(findFirstFreePosition(units(20, 7), occupied, 1040)).toEqual({ x: 0, y: 8, w: 20, h: 7 });
     // But a narrow card still fits at the row's right margin (x 63..64).
-    expect(findFirstFreePosition(size(32, 100), occupied, 1040)).toEqual({ x: 63, y: 0 });
+    expect(findFirstFreePosition(units(2, 7), occupied, 1040)).toEqual({ x: 63, y: 0, w: 2, h: 7 });
   });
 
   it("always terminates even for widgets wider than the canvas", () => {
-    const occupied = [rectForPlacement({ x: 0, y: 0 }, size(320, 100))];
-    const found = findFirstFreePosition(size(4000, 100), occupied, 320);
-    expect(found).toEqual({ x: 0, y: 8 });
+    const occupied = [placementRect({ x: 0, y: 0 }, units(20, 7))];
+    const found = findFirstFreePosition(units(250, 7), occupied, 320);
+    expect(found).toEqual({ x: 0, y: 8, w: 250, h: 7 });
+  });
+
+  it("returns the searched-for size so new/shown widgets get default w/h", () => {
+    const found = findFirstFreePosition(units(24, 18), [], 1040);
+    expect(found).toMatchObject({ w: 24, h: 18 });
   });
 });
 
@@ -210,35 +423,35 @@ describe("generateDefaultLayout", () => {
     // 65-unit canvas: cards at 20 units + 1 gap pitch -> x 0, 21, 42, then wrap.
     const items = generateDefaultLayout(
       [
-        { key: "a", size: size(320, 100) },
-        { key: "b", size: size(320, 100) },
-        { key: "c", size: size(320, 100) },
-        { key: "d", size: size(320, 100) },
+        { key: "a", size: units(20, 7) },
+        { key: "b", size: units(20, 7) },
+        { key: "c", size: units(20, 7) },
+        { key: "d", size: units(20, 7) },
       ],
       1040,
     );
     expect(items).toEqual({
-      a: { x: 0, y: 0 },
-      b: { x: 21, y: 0 },
-      c: { x: 42, y: 0 },
-      d: { x: 0, y: 8 }, // 100px = 7 units + 1 gap
+      a: { x: 0, y: 0, w: 20, h: 7 },
+      b: { x: 21, y: 0, w: 20, h: 7 },
+      c: { x: 42, y: 0, w: 20, h: 7 },
+      d: { x: 0, y: 8, w: 20, h: 7 }, // 7 units + 1 gap
     });
   });
 
   it("is deterministic for identical input", () => {
-    const entries = [{ key: "a", size: size(320, 100) }, { key: "b", size: size(280, 300) }];
+    const entries = [{ key: "a", size: units(20, 6) }, { key: "b", size: units(18, 19) }];
     expect(generateDefaultLayout(entries, 1040)).toEqual(generateDefaultLayout(entries, 1040));
   });
 
   it("produces a collision-free layout regardless of mixed sizes", () => {
     const entries = [
-      { key: "a", size: size(320, 90) },
-      { key: "b", size: size(280, 400) },
-      { key: "c", size: size(600, 60) },
-      { key: "d", size: size(320, 250) },
+      { key: "a", size: units(20, 6) },
+      { key: "b", size: units(18, 25) },
+      { key: "c", size: units(38, 4) },
+      { key: "d", size: units(20, 16) },
     ];
     const items = generateDefaultLayout(entries, 1040);
-    const rects = entries.map((e) => rectForPlacement(items[e.key]!, e.size));
+    const rects = entries.map((e) => placementRect(items[e.key]!, e.size));
     for (let i = 0; i < rects.length; i++) {
       for (let j = i + 1; j < rects.length; j++) {
         expect(rectsOverlap(rects[i]!, rects[j]!)).toBe(false);
@@ -247,29 +460,29 @@ describe("generateDefaultLayout", () => {
   });
 
   it("uses the fallback capacity when the canvas width is unknown", () => {
-    const items = generateDefaultLayout([{ key: "a", size: size(320, 100) }], 0);
-    expect(items.a).toEqual({ x: 0, y: 0 });
+    const items = generateDefaultLayout([{ key: "a", size: units(20, 7) }], 0);
+    expect(items.a).toEqual({ x: 0, y: 0, w: 20, h: 7 });
   });
 });
 
 describe("migrateLegacyLayout", () => {
-  it("converts a V1 order into placements plus preserved hidden keys", () => {
+  it("converts a V1 order into placements (with sizes) plus preserved hidden keys", () => {
     const layout = migrateLegacyLayout(
       ["beta:w", "alpha:w"],
       ["alpha:w", "beta:w", "gamma:w"],
-      { "alpha:w": size(320, 100), "beta:w": size(320, 100), "gamma:w": size(320, 100) },
+      { "alpha:w": units(20, 7), "beta:w": units(20, 7), "gamma:w": units(20, 7) },
       1040,
     );
     expect(layout.version).toBe(2);
-    expect(layout.items["beta:w"]).toEqual({ x: 0, y: 0 });
-    expect(layout.items["alpha:w"]).toEqual({ x: 21, y: 0 });
+    expect(layout.items["beta:w"]).toEqual({ x: 0, y: 0, w: 20, h: 7 });
+    expect(layout.items["alpha:w"]).toEqual({ x: 21, y: 0, w: 20, h: 7 });
     // V1 semantics: available but unlisted widgets stay hidden.
     expect(layout.hidden).toEqual(["gamma:w"]);
   });
 
   it("drops stale keys from the legacy order without occupying slots", () => {
-    const layout = migrateLegacyLayout(["gone:w", "alpha:w"], ["alpha:w"], { "alpha:w": size(320, 100) }, 1040);
-    expect(layout.items).toEqual({ "alpha:w": { x: 0, y: 0 } });
+    const layout = migrateLegacyLayout(["gone:w", "alpha:w"], ["alpha:w"], { "alpha:w": units(20, 7) }, 1040);
+    expect(layout.items).toEqual({ "alpha:w": { x: 0, y: 0, w: 20, h: 7 } });
     expect(layout.hidden).toEqual([]);
   });
 
@@ -280,13 +493,65 @@ describe("migrateLegacyLayout", () => {
   });
 });
 
+describe("resolveEffectiveLayout", () => {
+  const specs: Record<string, WidgetLayoutSpec | undefined> = {
+    clock: { defaultW: 24, defaultH: 18, minW: 16, minH: 12 },
+    plain: undefined,
+  };
+
+  it("normalizes old V2 x/y-only entries to widget defaults (runtime only)", () => {
+    const effective = resolveEffectiveLayout(
+      { kind: "v2", items: { clock: { x: 5, y: 8 }, plain: { x: 0, y: 0 } }, hidden: [] },
+      ["clock", "plain"],
+      specs,
+      1040,
+    );
+    expect(effective.items).toEqual({
+      clock: { x: 5, y: 8, w: 24, h: 18 },
+      plain: { x: 0, y: 0, w: DEFAULT_CARD_WIDTH_UNITS, h: DEFAULT_CARD_HEIGHT_UNITS },
+    });
+  });
+
+  it("keeps explicit saved w/h", () => {
+    const effective = resolveEffectiveLayout(
+      { kind: "v2", items: { clock: { x: 0, y: 0, w: 28, h: 20 } }, hidden: [] },
+      ["clock"],
+      specs,
+      1040,
+    );
+    expect(effective.items.clock).toEqual({ x: 0, y: 0, w: 28, h: 20 });
+  });
+
+  it("runtime-clamps a saved size that exceeds the current canvas", () => {
+    // 320px canvas = 20 units: a 28-wide card clamps down to 20.
+    const effective = resolveEffectiveLayout(
+      { kind: "v2", items: { clock: { x: 0, y: 0, w: 28, h: 20 } }, hidden: [] },
+      ["clock"],
+      specs,
+      320,
+    );
+    expect(effective.items.clock).toEqual({ x: 0, y: 0, w: 20, h: 20 });
+  });
+
+  it("auto-places unplaced widgets with their default size", () => {
+    const effective = resolveEffectiveLayout(
+      { kind: "v2", items: { clock: { x: 0, y: 0 } }, hidden: [] },
+      ["clock", "plain"],
+      specs,
+      1040,
+    );
+    // plain lands one gap right of the 24-wide clock.
+    expect(effective.items.plain).toEqual({ x: 25, y: 0, w: DEFAULT_CARD_WIDTH_UNITS, h: DEFAULT_CARD_HEIGHT_UNITS });
+  });
+});
+
 describe("canvasHeightFor", () => {
   it("never shrinks below MIN_CANVAS_HEIGHT_PX", () => {
     expect(canvasHeightFor([])).toBeGreaterThanOrEqual(480);
   });
 
   it("grows below the lowest rect plus padding", () => {
-    const height = canvasHeightFor([rectForPlacement({ x: 0, y: 20 }, size(320, 256))]);
+    const height = canvasHeightFor([placementRect({ x: 0, y: 20 }, units(20, 16))]);
     // bottom = 20 + 16 = 36 units -> 576px + 48 padding = 624
     expect(height).toBe(36 * GRID_SIZE + 48);
   });

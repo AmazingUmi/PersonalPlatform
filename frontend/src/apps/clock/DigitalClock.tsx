@@ -1,3 +1,4 @@
+import type { WidgetDensity } from "../../shared/appTypes";
 import type { ClockSettings } from "./useClockSettings";
 import { dateLine, humanDuration, timeParts, weekdayLabel } from "./timeMath";
 
@@ -30,6 +31,8 @@ interface DigitalClockProps {
   settings: Pick<ClockSettings, "showSeconds" | "showDate" | "hourFormat">;
   variant: "card" | "page";
   focus: ClockFocusState | null;
+  /** compact keeps only the time (no label row, date, or focus line). */
+  density?: WidgetDensity;
 }
 
 /**
@@ -38,10 +41,11 @@ interface DigitalClockProps {
  * The colon blink and focus dot are CSS animations — both are neutralized by
  * the global prefers-reduced-motion override.
  */
-export function DigitalClock({ now, settings, variant, focus }: DigitalClockProps) {
+export function DigitalClock({ now, settings, variant, focus, density = "normal" }: DigitalClockProps) {
   const parts = timeParts(now);
   const date = dateLine(now);
   const hours = settings.hourFormat === 12 ? parts.hours12 : parts.hours24;
+  const compact = density === "compact";
   return (
     <div
       className={[
@@ -56,13 +60,15 @@ export function DigitalClock({ now, settings, variant, focus }: DigitalClockProp
         settings.hourFormat === 12 ? ` ${parts.meridiem}` : ""
       }`}
     >
-      <div className="clock-digital__top">
-        <span className="clock-digital__label">
-          {focus ? <span className="clock-digital__focus-dot" aria-hidden="true" /> : null}
-          {focus ? "FOCUS" : "CLOCK"}
-        </span>
-        <span className="clock-digital__weekday">{weekdayLabel(now)}</span>
-      </div>
+      {compact ? null : (
+        <div className="clock-digital__top">
+          <span className="clock-digital__label">
+            {focus ? <span className="clock-digital__focus-dot" aria-hidden="true" /> : null}
+            {focus ? "FOCUS" : "CLOCK"}
+          </span>
+          <span className="clock-digital__weekday">{weekdayLabel(now)}</span>
+        </div>
+      )}
       <div className="clock-digital__time">
         <span className="clock-digital__digits">{hours}</span>
         <span className="clock-digital__colon" aria-hidden="true">
@@ -76,13 +82,13 @@ export function DigitalClock({ now, settings, variant, focus }: DigitalClockProp
           <span className="clock-digital__meridiem">{parts.meridiem}</span>
         ) : null}
       </div>
-      {focus ? (
+      {focus && !compact ? (
         <div className="clock-digital__focus-line">
           RUNNING · {focusElapsedClock(focus, now)}
           <span className="clock-digital__focus-title"> {focus.title}</span>
         </div>
       ) : null}
-      {settings.showDate ? (
+      {settings.showDate && !compact ? (
         <div className="clock-digital__date">
           {date.monthDay} · {date.year}
         </div>

@@ -131,3 +131,66 @@ describe("QuickNoteWidget", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("QuickNoteWidget density (Phase 10)", () => {
+  const recentNotes = Array.from({ length: 4 }, (_, i) => ({
+    ...savedNote,
+    id: `note-${i}`,
+    content: `recent entry ${i}`,
+    dayKey: `2026-09-0${i + 1}`,
+  }));
+
+  function renderWidget(density: "compact" | "normal" | "expanded") {
+    return render(
+      <MemoryRouter>
+        <QuickNoteWidget density={density} />
+      </MemoryRouter>,
+    );
+  }
+
+  function setupRecentFetch() {
+    const calls: string[] = [];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(url);
+      if (url === "/api/apps/notes/notes" && init?.method === "POST") {
+        return jsonResponse({ ...savedNote, content: "quick thought" });
+      }
+      if (url.startsWith("/api/apps/notes/notes")) return jsonResponse({ items: recentNotes, total: 4, todayKey: "2026-09-01", yesterdayKey: "2026-08-31" });
+      return jsonResponse(null, false, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return calls;
+  }
+
+  it("compact shrinks the input and skips the recent list", async () => {
+    const calls = setupRecentFetch();
+    renderWidget("compact");
+    await act(async () => {});
+
+    expect(screen.getByLabelText("Quick note content")).toHaveAttribute("rows", "2");
+    expect(screen.queryByText(/recent entry/)).toBeNull();
+    expect(calls.filter((url) => url.startsWith("/api/apps/notes/notes") && !url.includes("POST"))).toHaveLength(0);
+  });
+
+  it("normal keeps the default input and hides recent entries", async () => {
+    setupRecentFetch();
+    renderWidget("normal");
+    await act(async () => {});
+
+    expect(screen.getByLabelText("Quick note content")).toHaveAttribute("rows", "3");
+    expect(screen.queryByText(/recent entry/)).toBeNull();
+  });
+
+  it("expanded lists up to three recent entries with their day keys", async () => {
+    setupRecentFetch();
+    renderWidget("expanded");
+
+    expect(await screen.findByText("recent entry 0")).toBeDefined();
+    expect(screen.getByText("recent entry 1")).toBeDefined();
+    expect(screen.getByText("recent entry 2")).toBeDefined();
+    expect(screen.queryByText("recent entry 3")).toBeNull();
+    expect(screen.getByText("2026-09-01")).toBeDefined();
+    expect(screen.getByLabelText("Quick note content")).toHaveAttribute("rows", "3");
+  });
+});

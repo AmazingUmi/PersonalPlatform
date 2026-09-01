@@ -1,3 +1,4 @@
+import type { WidgetDensity } from "../../shared/appTypes";
 import type { ClockSettings } from "./useClockSettings";
 import { focusElapsedClock, type ClockFocusState } from "./DigitalClock";
 import { handAngles, pad2, timeParts } from "./timeMath";
@@ -7,6 +8,8 @@ interface AnalogClockProps {
   settings: Pick<ClockSettings, "showSeconds">;
   variant: "card" | "page";
   focus: ClockFocusState | null;
+  /** compact keeps only the dial (no meta line below). */
+  density?: WidgetDensity;
 }
 
 /** One tick mark: a rect near the dial edge, rotated to its angle. */
@@ -29,7 +32,7 @@ function Tick({ angle, major }: { angle: number; major: boolean }) {
  * continuously through the minute and second of the current hour, and the
  * second hand ticks discretely — a sweep would fight the pixel aesthetic.
  */
-export function AnalogClock({ now, settings, variant, focus }: AnalogClockProps) {
+export function AnalogClock({ now, settings, variant, focus, density = "normal" }: AnalogClockProps) {
   const angles = handAngles(now);
   const parts = timeParts(now);
   const ticks = Array.from({ length: 60 }, (_, index) => ({
@@ -77,19 +80,21 @@ export function AnalogClock({ now, settings, variant, focus }: AnalogClockProps)
         ) : null}
         <rect x="57" y="57" width="6" height="6" className="clock-analog__cap" />
       </svg>
-      <div className="clock-analog__meta">
-        {focus ? (
-          <span className="clock-analog__focus-line">
-            <span className="clock-analog__focus-dot" aria-hidden="true" />
-            RUNNING · {focusElapsedClock(focus, now)}
-          </span>
-        ) : (
-          <span className="clock-analog__focus-line clock-analog__focus-line--idle">
-            {pad2(now.getHours())}:{parts.minutes}
-          </span>
-        )}
-        {focus ? <span className="clock-analog__focus-title">{focus.title}</span> : null}
-      </div>
+      {density === "compact" ? null : (
+        <div className="clock-analog__meta">
+          {focus ? (
+            <span className="clock-analog__focus-line">
+              <span className="clock-analog__focus-dot" aria-hidden="true" />
+              RUNNING · {focusElapsedClock(focus, now)}
+            </span>
+          ) : (
+            <span className="clock-analog__focus-line clock-analog__focus-line--idle">
+              {pad2(now.getHours())}:{parts.minutes}
+            </span>
+          )}
+          {focus ? <span className="clock-analog__focus-title">{focus.title}</span> : null}
+        </div>
+      )}
     </div>
   );
 }

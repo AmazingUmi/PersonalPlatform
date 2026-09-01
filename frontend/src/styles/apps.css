@@ -25,11 +25,11 @@
  * desktop breakpoint on (960px — must equal DASHBOARD_DESKTOP_BREAKPOINT_PX
  * in shell/dashboardLayout.ts) the canvas becomes a relative-positioned
  * desktop and cards are absolutely placed on the 16px logical grid
- * (GRID_SIZE, mirrored by --dashboard-grid below).
+ * (GRID_SIZE, mirrored by --dashboard-grid below). Card width/height come
+ * from the placement's w/h (inline styles) — never from measured content.
  */
 .dashboard-canvas {
   --dashboard-grid: 16px;
-  --dashboard-card-w: 320px;
   /* Slightly stronger than the ambient --px-bg-grid so the guide reads over
    * the body's own background pattern while staying restrained. */
   --dashboard-guide-dot: rgb(38 50 71 / 0.1);
@@ -51,7 +51,27 @@
 
   .dashboard-canvas .dashboard-card {
     position: absolute;
-    width: var(--dashboard-card-w);
+    /* width/height are set inline from the placement w/h (grid units). */
+  }
+
+  /* The window fills the card so the placement decides the card's geometry;
+   * the body never stretches the card. overflow:hidden keeps stray long
+   * content from bleeding past the card (widgets truncate internally). */
+  .dashboard-canvas .dashboard-card .px-window {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .dashboard-canvas .dashboard-card .px-window__body {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /* Compact density gets a slightly tighter body so small cards stay useful. */
+  .dashboard-canvas .dashboard-card[data-density="compact"] .px-window__body {
+    padding: var(--space-3);
   }
 
   /* Edit mode: faint pixel guide dots on the logical grid — subtle enough to
@@ -264,11 +284,109 @@
   }
 }
 
+/* Tasks Today dashboard widget density zones (Phase 10). */
+.tasks-widget {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.tasks-widget--compact {
+  gap: var(--space-2);
+}
+
+.tasks-widget__label,
+.tasks-widget__more,
+.tasks-widget__row-label,
+.tasks-widget__count {
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+}
+
+.tasks-widget__title {
+  font-size: var(--text-md);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks-widget__status {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-1) dashed var(--px-border);
+}
+
+.tasks-widget__row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  margin: 0;
+  min-width: 0;
+}
+
+.tasks-widget__row-label {
+  flex: none;
+}
+
+.tasks-widget__row-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks-widget__count,
+.tasks-widget__more {
+  margin: 0;
+}
+
 /* ---------- Assets ---------- */
 
 .assets-toolbar {
   display: grid;
   gap: var(--space-3);
+}
+
+/* Asset Summary dashboard widget density zones (Phase 10). */
+.assets-widget {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.assets-widget__recent {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.assets-widget__recent-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.assets-widget__recent-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.assets-widget__recent-qty {
+  flex: none;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+}
+
+.assets-widget__empty {
+  margin: 0;
+  color: var(--px-ink-muted);
 }
 
 .assets-add {
@@ -1289,6 +1407,37 @@
   gap: var(--space-2);
 }
 
+/* Expanded-density recent entries (Phase 10). */
+.notes-quick__recent {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.notes-quick__recent-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.notes-quick__recent-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-quick__recent-date {
+  flex: none;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+}
+
 /* ---------- Tasks detail (P8: deep-link target for Clock) ---------- */
 
 .task-detail__field > dd {
@@ -1333,6 +1482,43 @@
 .clock-card__footer {
   display: flex;
   justify-content: center;
+}
+
+/* Expanded-density Tasks zone (Phase 10): current / next / remaining. */
+.clock-card__tasks {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-1) dashed var(--px-border);
+}
+
+.clock-card__task {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  margin: 0;
+  min-width: 0;
+}
+
+.clock-card__task-label {
+  flex: none;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+}
+
+.clock-card__task-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clock-card__count {
+  margin: 0;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
 }
 
 /* Digital face */

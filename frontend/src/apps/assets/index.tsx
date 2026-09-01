@@ -3,7 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { api } from "../../shared/api";
 import { useAppDisplayName } from "../../shared/PresentationContext";
 import { ACCENT_OPTIONS } from "../../shared/presentation";
-import type { FrontendAppModule } from "../../shared/appTypes";
+import type { FrontendAppModule, WidgetDensity } from "../../shared/appTypes";
 import { useDebouncedValue } from "../../shared/useDebouncedValue";
 import { useMutation } from "../../shared/useMutation";
 import { ConfirmDialog } from "../../shared/ui/ConfirmDialog";
@@ -1055,32 +1055,88 @@ function AssetDetailPage() {
   );
 }
 
-function AssetSummaryWidget() {
-  const summary = useAsync(() => api<{ items: number; categories: number }>("/api/apps/assets/summary"));
-  if (summary.loading) return <LoadingState label="Loading…" />;
-  if (summary.error) {
+/**
+ * Asset Summary dashboard card. compact keeps the two counters (summary
+ * endpoint only); normal/expanded derive the counters from the item list's
+ * faceted counts and add recent items — three rows at normal, five at
+ * expanded. Never a management page: rows are name + quantity only.
+ */
+function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity }) {
+  const compact = density === "compact";
+  const recentLimit = density === "expanded" ? 5 : 3;
+  const summary = useAsync(
+    () =>
+      compact
+        ? api<{ items: number; categories: number }>("/api/apps/assets/summary")
+        : Promise.resolve(null),
+    [density],
+  );
+  const list = useAsync(
+    () =>
+      compact
+        ? Promise.resolve(null)
+        : api<ItemsListResponse>("/api/apps/assets/items?sortBy=createdAt&order=desc"),
+    [density],
+  );
+  if ((compact && summary.loading) || (!compact && list.loading)) {
+    return <LoadingState label="Loading…" />;
+  }
+  const error = (compact ? summary.error : null) ?? (compact ? null : list.error);
+  if (error) {
     return (
       <div className="widget-fallback">
         <StatusMessage tone="error">
-          <p>{summary.error}</p>
+          <p>{error}</p>
         </StatusMessage>
-        <PixelButton size="sm" variant="secondary" onClick={summary.reload}>
+        <PixelButton size="sm" variant="secondary" onClick={compact ? summary.reload : list.reload}>
           Retry
         </PixelButton>
       </div>
     );
   }
-  const data = summary.data ?? { items: 0, categories: 0 };
+
+  if (compact) {
+    const data = summary.data ?? { items: 0, categories: 0 };
+    return (
+      <div className="px-stats">
+        <div className="px-stat">
+          <span className="px-stat__label">Items</span>
+          <span className="px-stat__value">{data.items}</span>
+        </div>
+        <div className="px-stat">
+          <span className="px-stat__label">Categories</span>
+          <span className="px-stat__value">{data.categories}</span>
+        </div>
+      </div>
+    );
+  }
+
+  const data = list.data ?? { items: [], counts: { all: 0, categories: {} } };
+  const recent = data.items.slice(0, recentLimit);
   return (
-    <div className="px-stats">
-      <div className="px-stat">
-        <span className="px-stat__label">Items</span>
-        <span className="px-stat__value">{data.items}</span>
+    <div className="assets-widget">
+      <div className="px-stats">
+        <div className="px-stat">
+          <span className="px-stat__label">Items</span>
+          <span className="px-stat__value">{data.counts.all}</span>
+        </div>
+        <div className="px-stat">
+          <span className="px-stat__label">Categories</span>
+          <span className="px-stat__value">{Object.keys(data.counts.categories).length}</span>
+        </div>
       </div>
-      <div className="px-stat">
-        <span className="px-stat__label">Categories</span>
-        <span className="px-stat__value">{data.categories}</span>
-      </div>
+      {recent.length > 0 ? (
+        <ul className="assets-widget__recent">
+          {recent.map((item) => (
+            <li key={item.id} className="assets-widget__recent-row">
+              <span className="assets-widget__recent-name">{item.name}</span>
+              <span className="assets-widget__recent-qty">×{item.quantity}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="assets-widget__empty">No items tracked yet.</p>
+      )}
     </div>
   );
 }
@@ -1091,7 +1147,23 @@ const app: FrontendAppModule = {
     { path: "", label: "Assets", element: <AssetsPage /> },
     { path: "/items/:id", label: "Asset Detail", element: <AssetDetailPage /> },
   ],
-  widgets: [{ id: "summary", title: "Asset Summary", render: () => <AssetSummaryWidget /> }],
+  widgets: [
+    {
+      id: "summary",
+      title: "Asset Summary",
+      render: (context) => <AssetSummaryWidget density={context?.layout.density ?? "normal"} />,
+      layout: {
+        minW: 14,
+        minH: 10,
+        defaultW: 20,
+        defaultH: 16,
+        density: {
+          normal: { minW: 16, minH: 12 },
+          expanded: { minW: 24, minH: 16 },
+        },
+      },
+    },
+  ],
 };
 
 export default app;

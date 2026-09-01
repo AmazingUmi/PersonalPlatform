@@ -438,3 +438,78 @@ describe("AssetDetailPage editor", () => {
     });
   });
 });
+
+describe("AssetSummaryWidget density (Phase 10)", () => {
+  const widget = AssetsApp.widgets![0]!;
+
+  const recentItems = Array.from({ length: 6 }, (_, i) =>
+    makeItem({ id: `recent-${i}`, name: `Recent item ${i}`, quantity: i + 1, createdAt: `2026-09-0${i + 1}T00:00:00Z` }),
+  );
+
+  function renderWidget(density: "compact" | "normal" | "expanded") {
+    return render(
+      <MemoryRouter>
+        {widget.render({
+          layout: { widthUnits: 20, heightUnits: 16, widthPx: 320, heightPx: 256, density },
+        })}
+      </MemoryRouter>,
+    );
+  }
+
+  function setupWidgetFetch(items: TestItem[], counts?: { all: number; categories: Record<string, number> }) {
+    const calls: string[] = [];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes("/summary")) return jsonResponse({ items: 42, categories: 5 });
+      if (url.includes("/api/apps/assets/items"))
+        return jsonResponse({ items, counts: counts ?? { all: items.length, categories: { "cat-1": 2, "cat-2": 1 } } });
+      return jsonResponse(null, false, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return calls;
+  }
+
+  it("compact shows the two counters from the summary endpoint only", async () => {
+    const calls = setupWidgetFetch(recentItems);
+    renderWidget("compact");
+
+    expect(await screen.findByText("Items")).toBeDefined();
+    expect(screen.getByText("42")).toBeDefined();
+    expect(screen.getByText("Categories")).toBeDefined();
+    expect(screen.getByText("5")).toBeDefined();
+    expect(screen.queryByText("Recent item 0")).toBeNull();
+    expect(calls.some((url) => url.includes("/api/apps/assets/items?"))).toBe(false);
+  });
+
+  it("normal derives counters from the list and shows three recent items", async () => {
+    setupWidgetFetch(recentItems);
+    renderWidget("normal");
+
+    expect(await screen.findByText("Recent item 0")).toBeDefined();
+    expect(screen.getByText("Recent item 1")).toBeDefined();
+    expect(screen.getByText("Recent item 2")).toBeDefined();
+    expect(screen.queryByText("Recent item 3")).toBeNull();
+    // Faceted counts drive the stats, not the summary endpoint.
+    expect(screen.getByText("6")).toBeDefined(); // counts.all
+    expect(screen.getByText("2")).toBeDefined(); // two category ids
+  });
+
+  it("expanded widens the recent list to five items", async () => {
+    setupWidgetFetch(recentItems);
+    renderWidget("expanded");
+
+    expect(await screen.findByText("Recent item 4")).toBeDefined();
+    expect(screen.queryByText("Recent item 5")).toBeNull();
+  });
+
+  it("declares its layout contract for the dashboard", () => {
+    expect(widget.layout).toEqual({
+      minW: 14,
+      minH: 10,
+      defaultW: 20,
+      defaultH: 16,
+      density: { normal: { minW: 16, minH: 12 }, expanded: { minW: 24, minH: 16 } },
+    });
+  });
+});

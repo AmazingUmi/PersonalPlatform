@@ -1,22 +1,31 @@
 /**
  * Dashboard Free Layout V2 — pure layout math, no React/DOM dependencies.
  * The desktop dashboard is a logical grid canvas: every widget owns an
- * {x, y} grid position; visual position is `left = x * GRID_SIZE` etc.
- * Coordinates are grid units (integers), never raw pixels.
+ * {x, y, w, h} grid position/size; visual geometry is `left = x * GRID_SIZE`
+ * etc. All values are grid units (integers), never raw pixels.
+ *
+ * Geometry source of truth (Phase 10): the desktop collision footprint and
+ * card geometry come from the placement itself. Content never stretches the
+ * container — widgets adapt through density levels instead.
  *
  * Compatibility: the persisted `dashboard.widgets` setting is either a
  * legacy V1 `string[]` order or a versioned V2 object (see DashboardLayoutV2).
- * V1 is migrated on read; V2 is written on the next user save.
+ * V1 is migrated on read; V2 entries without `w/h` are completed with widget
+ * defaults at runtime and persist in full on the next user save.
  */
+
+import type { WidgetDensity, WidgetLayoutSpec } from "../shared/appTypes";
 
 /** Logical grid unit in px. Keep in sync with the CSS rules in apps.css. */
 export const GRID_SIZE = 16;
 
-/** Desktop card width (V1 grid used ~300-340px columns; 320 = 20 units). */
-export const DEFAULT_CARD_WIDTH_PX = 320;
+/** Default card size in grid units (V2 cards were 320px wide, ~256px tall). */
+export const DEFAULT_CARD_WIDTH_UNITS = 20;
+export const DEFAULT_CARD_HEIGHT_UNITS = 16;
 
-/** Height estimate used before/without DOM measurement (16 units). */
-export const ESTIMATED_CARD_HEIGHT_PX = 256;
+/** Platform floor for widgets without their own layout constraints. */
+export const DEFAULT_MIN_WIDTH_UNITS = 12;
+export const DEFAULT_MIN_HEIGHT_UNITS = 8;
 
 /** Canvas never shrinks below this (30 units). */
 export const MIN_CANVAS_HEIGHT_PX = 480;
@@ -37,13 +46,13 @@ export const DASHBOARD_DESKTOP_MEDIA_QUERY = `(min-width: ${DASHBOARD_DESKTOP_BR
 /** Canvas width assumed when no DOM measurement is available (65 units). */
 export const FALLBACK_CANVAS_WIDTH_PX = 1040;
 
-/** Defensive ceiling for stored/suggested coordinates (160,000px). */
+/** Defensive ceiling for stored/suggested coordinates and sizes (160,000px). */
 export const MAX_GRID_UNITS = 10_000;
 
 export interface DashboardWidgetPlacement {
   x: number;
   y: number;
-  /** Reserved for a future resize feature; unused by this layout version. */
+  /** Explicit size in grid units (Phase 10); missing = widget default. */
   w?: number;
   h?: number;
 }
@@ -61,9 +70,10 @@ export type ParsedDashboardLayout =
   | { kind: "legacy"; order: string[] }
   | { kind: "none" };
 
-export interface WidgetSize {
-  width: number;
-  height: number;
+/** Size in whole grid units (the canonical widget size representation). */
+export interface SizeUnits {
+  w: number;
+  h: number;
 }
 
 /** Axis-aligned rect in grid units. */
@@ -72,6 +82,21 @@ export interface GridRect {
   y: number;
   w: number;
   h: number;
+}
+
+/**
+ * A widget's declared layout constraints resolved against the platform
+ * defaults. `maxW/maxH` null means "no widget-specific ceiling" (width is
+ * still bounded by the canvas, height is unbounded — the canvas grows).
+ */
+export interface ResolvedWidgetLayout {
+  minW: number;
+  minH: number;
+  maxW: number | null;
+  maxH: number | null;
+  defaultW: number;
+  defaultH: number;
+  density: WidgetLayoutSpec["density"];
 }
 
 // ---------- grid math ----------
@@ -155,6 +180,71 @@ export function serializeLayout(
   return { version: 2, items: clean, hidden: [...hidden] };
 }
 
+// ---------- widget layout spec resolution ----------
+
+/** Clamp an optional positive grid-unit value, or fall back. */
+function unitOr(value: number | undefined, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return Math.max(1, Math.min(MAX_GRID_UNITS, Math.round(value)));
+}
+
+/**
+ * Resolve a widget's declared layout against the platform defaults.
+ * Malformed spec fields degrade to the defaults; the default size is kept
+ * inside [min, max] so a bad spec can never produce an unusable card.
+ */
+export function resolveWidgetDefaults(spec?: WidgetLayoutSpec): ResolvedWidgetLayout {
+  const minW = unitOr(spec?.minW, DEFAULT_MIN_WIDTH_UNITS);
+  const minH = unitOr(spec?.minH, DEFAULT_MIN_HEIGHT_UNITS);
+  const maxWRaw = spec?.maxW;
+  const maxHRaw = spec?.maxH;
+  const maxW =
+    typeof maxWRaw === "number" && Number.isFinite(maxWRaw)
+      ? Math.max(minW, Math.min(MAX_GRID_UNITS, Math.round(maxWRaw)))
+      : null;
+  const maxH =
+    typeof maxHRaw === "number" && Number.isFinite(maxHRaw)
+      ? Math.max(minH, Math.min(MAX_GRID_UNITS, Math.round(maxHRaw)))
+      : null;
+  let defaultW = unitOr(spec?.defaultW, DEFAULT_CARD_WIDTH_UNITS);
+  let defaultH = unitOr(spec?.defaultH, DEFAULT_CARD_HEIGHT_UNITS);
+  defaultW = Math.max(minW, Math.min(defaultW, maxW ?? MAX_GRID_UNITS));
+  defaultH = Math.max(minH, Math.min(defaultH, maxH ?? MAX_GRID_UNITS));
+  return { minW, minH, maxW, maxH, defaultW, defaultH, density: spec?.density };
+}
+
+/**
+ * Complete placements that predate explicit sizes: entries without `w/h`
+ * keep their position and gain the widget's default size (runtime
+ * normalization only — callers decide when to persist).
+ */
+export function applyWidgetDefaults(
+  items: Record<string, DashboardWidgetPlacement>,
+  specs: Record<string, WidgetLayoutSpec | undefined>,
+): Record<string, DashboardWidgetPlacement> {
+  const out: Record<string, DashboardWidgetPlacement> = {};
+  for (const [key, placement] of Object.entries(items)) {
+    const layout = resolveWidgetDefaults(specs[key]);
+    out[key] = { x: placement.x, y: placement.y, w: placement.w ?? layout.defaultW, h: placement.h ?? layout.defaultH };
+  }
+  return out;
+}
+
+/**
+ * Density for a concrete size: compact below the `normal` threshold, normal
+ * when met, expanded when the (stricter) expanded threshold is met —
+ * expanded wins. Missing threshold fields count as 0 (always met); a widget
+ * without any density declaration is always `normal`.
+ */
+export function resolveWidgetDensity(layout: ResolvedWidgetLayout, w: number, h: number): WidgetDensity {
+  const meets = (threshold: { minW?: number; minH?: number }) =>
+    w >= (threshold.minW ?? 0) && h >= (threshold.minH ?? 0);
+  if (layout.density?.expanded && meets(layout.density.expanded)) return "expanded";
+  if (layout.density?.normal) return meets(layout.density.normal) ? "normal" : "compact";
+  // Expanded-only declarations keep sizes below the threshold at normal.
+  return "normal";
+}
+
 // ---------- collision ----------
 
 /**
@@ -172,13 +262,17 @@ export function rectsOverlap(a: GridRect, b: GridRect, gapUnits = COLLISION_GAP_
   );
 }
 
-/** Grid rect covered by a placed widget with a pixel size. */
-export function rectForPlacement(placement: DashboardWidgetPlacement, size: WidgetSize): GridRect {
+/**
+ * Grid rect covered by a placed widget: the explicit placement size wins
+ * (Phase 10 geometry source of truth); entries without `w/h` fall back to
+ * the widget defaults.
+ */
+export function placementRect(placement: DashboardWidgetPlacement, defaults: SizeUnits): GridRect {
   return {
     x: placement.x,
     y: placement.y,
-    w: gridUnits(size.width),
-    h: gridUnits(size.height),
+    w: placement.w ?? defaults.w,
+    h: placement.h ?? defaults.h,
   };
 }
 
@@ -190,35 +284,105 @@ export function rectIsFree(rect: GridRect, others: GridRect[]): boolean {
 // ---------- bounds ----------
 
 /**
+ * Clamp a widget size into the usable range: min/max constraints plus, for
+ * width, the canvas right edge relative to the anchor column (`anchorX`).
+ * The canvas floor never pushes below `minW` — on a very narrow canvas the
+ * widget stays usable and may overlap instead (runtime clamp, not persisted).
+ * An unknown capacity (<= 0) disables the horizontal bound.
+ */
+export function clampWidgetSize(
+  size: SizeUnits,
+  layout: ResolvedWidgetLayout,
+  capacityUnits: number,
+  anchorX = 0,
+): SizeUnits {
+  const canvasMaxW = capacityUnits > 0 ? capacityUnits - anchorX : Number.POSITIVE_INFINITY;
+  const maxW = Math.min(layout.maxW ?? Number.POSITIVE_INFINITY, canvasMaxW);
+  const maxH = layout.maxH ?? Number.POSITIVE_INFINITY;
+  return {
+    w: Math.round(Math.max(layout.minW, Math.min(Math.max(maxW, layout.minW), size.w))),
+    h: Math.round(Math.max(layout.minH, Math.min(Math.max(maxH, layout.minH), size.h))),
+  };
+}
+
+/**
  * Clamp a placement into the canvas: x >= 0, y >= 0, right edge <= canvas
- * width. An unknown canvas width (<= 0) disables the horizontal clamp —
- * callers without DOM measurement (tests, SSR) still get sane positions.
+ * width (using the explicit `w` when present). An unknown canvas width
+ * (<= 0) disables the horizontal clamp — callers without DOM measurement
+ * (tests, SSR) still get sane positions.
  */
 export function clampPlacement(
   placement: DashboardWidgetPlacement,
-  size: WidgetSize,
+  defaults: SizeUnits,
   canvasWidthPx: number,
 ): DashboardWidgetPlacement {
   const capacity = canvasCapacityUnits(canvasWidthPx);
-  const w = gridUnits(size.width);
-  const x = capacity > 0 ? Math.max(0, Math.min(placement.x, capacity - w)) : Math.max(0, placement.x);
-  return { x, y: Math.max(0, placement.y), ...(placement.w !== undefined ? { w: placement.w } : {}), ...(placement.h !== undefined ? { h: placement.h } : {}) };
+  const w = placement.w ?? defaults.w;
+  const x = capacity > 0 ? Math.max(0, Math.min(placement.x, Math.max(0, capacity - w))) : Math.max(0, placement.x);
+  return {
+    x,
+    y: Math.max(0, placement.y),
+    ...(placement.w !== undefined ? { w: placement.w } : {}),
+    ...(placement.h !== undefined ? { h: placement.h } : {}),
+  };
+}
+
+// ---------- resize ----------
+
+/** A placement with an explicit size — what every runtime path produces. */
+export interface SizedPlacement {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface ResizeEvaluation {
+  /** Snapped + clamped candidate; x/y are always the origin's. */
+  placement: SizedPlacement;
+  /** False when the candidate rect collides with another widget. */
+  valid: boolean;
+}
+
+/**
+ * Evaluate a bottom-right anchored resize of `origin` towards an attempted
+ * size (grid units, pre-snapping tolerated — values are rounded). The
+ * candidate is clamped to min/max/canvas bounds; collision against `others`
+ * decides validity. The caller reverts on invalid release.
+ */
+export function resizePlacement(
+  origin: DashboardWidgetPlacement,
+  attempted: SizeUnits,
+  layout: ResolvedWidgetLayout,
+  canvasWidthPx: number,
+  others: GridRect[],
+): ResizeEvaluation {
+  const capacity = canvasCapacityUnits(canvasWidthPx);
+  const size = clampWidgetSize(
+    { w: Math.max(1, Math.round(attempted.w)), h: Math.max(1, Math.round(attempted.h)) },
+    layout,
+    capacity,
+    origin.x,
+  );
+  const placement: SizedPlacement = { x: origin.x, y: origin.y, w: size.w, h: size.h };
+  return { placement, valid: rectIsFree(placementRect(placement, size), others) };
 }
 
 // ---------- placement search ----------
 
 /**
- * Deterministic top-left row-major scan for the first collision-free slot.
- * Falls back to (0, lowest bottom) when the widget can never fit the width —
- * placement must always succeed (Show/new-widget flows depend on it).
+ * Deterministic top-left row-major scan for the first collision-free slot
+ * for a widget of the given size. Falls back to (0, lowest bottom) when the
+ * widget can never fit the width — placement must always succeed (Show /
+ * new-widget flows depend on it). Returns the complete placement including
+ * the searched-for size.
  */
 export function findFirstFreePosition(
-  size: WidgetSize,
+  size: SizeUnits,
   occupied: GridRect[],
   canvasWidthPx: number,
 ): DashboardWidgetPlacement {
-  const w = gridUnits(size.width);
-  const h = gridUnits(size.height);
+  const { w, h } = size;
   const capacity = canvasCapacityUnits(canvasWidthPx) || canvasCapacityUnits(FALLBACK_CANVAS_WIDTH_PX);
   const maxX = Math.max(0, capacity - w);
   const stackBottom = occupied.reduce((max, r) => Math.max(max, r.y + r.h), 0);
@@ -226,21 +390,22 @@ export function findFirstFreePosition(
   // to stackBottom + h terminates in the worst case.
   for (let y = 0; y <= stackBottom + h; y++) {
     for (let x = 0; x <= maxX; x++) {
-      if (rectIsFree({ x, y, w, h }, occupied)) return { x, y };
+      if (rectIsFree({ x, y, w, h }, occupied)) return { x, y, w, h };
     }
   }
-  return { x: 0, y: stackBottom };
+  return { x: 0, y: stackBottom, w, h };
 }
 
 export interface DefaultLayoutEntry {
   key: string;
-  size: WidgetSize;
+  size: SizeUnits;
 }
 
 /**
  * Deterministic default layout: pack entries left-to-right in list order,
  * wrap when the row is full (compact by design — the user's own layout is
- * never compacted). Sizes are measured or estimated by the caller.
+ * never compacted). Every placement carries the entry's size so restoring
+ * defaults also restores default sizes.
  */
 export function generateDefaultLayout(
   entries: DefaultLayoutEntry[],
@@ -252,14 +417,13 @@ export function generateDefaultLayout(
   let cursorY = 0;
   let rowHeightUnits = 0;
   for (const entry of entries) {
-    const w = gridUnits(entry.size.width);
-    const h = gridUnits(entry.size.height);
+    const { w, h } = entry.size;
     if (cursorX > 0 && cursorX + w > capacity) {
       cursorX = 0;
       cursorY += rowHeightUnits + COLLISION_GAP_UNITS;
       rowHeightUnits = 0;
     }
-    items[entry.key] = { x: cursorX, y: cursorY };
+    items[entry.key] = { x: cursorX, y: cursorY, w, h };
     cursorX += w + COLLISION_GAP_UNITS;
     rowHeightUnits = Math.max(rowHeightUnits, h);
   }
@@ -276,12 +440,12 @@ export function generateDefaultLayout(
 export function migrateLegacyLayout(
   order: string[],
   availableKeys: string[],
-  sizes: Record<string, WidgetSize>,
+  defaults: Record<string, SizeUnits>,
   canvasWidthPx: number,
 ): DashboardLayoutV2 {
   const available = new Set(availableKeys);
   const known = order.filter((key) => available.has(key));
-  const entries = known.map((key) => ({ key, size: sizes[key] ?? defaultWidgetSize() }));
+  const entries = known.map((key) => ({ key, size: defaults[key] ?? defaultWidgetSize() }));
   return serializeLayout(
     generateDefaultLayout(entries, canvasWidthPx),
     availableKeys.filter((k) => !known.includes(k)),
@@ -299,21 +463,29 @@ export interface EffectiveLayout {
 
 /**
  * Normalize any parsed persisted value into the effective visible layout.
- * Saved placements are clamped to the current canvas; widgets that are
- * neither placed nor hidden (e.g. a newly shipped widget) are auto-placed at
- * the first free position at RUNTIME only — they persist on the next save.
+ * Saved placements are clamped to the current canvas (position AND size —
+ * runtime only, never written back); widgets that are neither placed nor
+ * hidden (e.g. a newly shipped widget) are auto-placed at the first free
+ * position. Every returned placement carries explicit w/h.
  */
 export function resolveEffectiveLayout(
   parsed: ParsedDashboardLayout,
   availableKeys: string[],
-  sizes: Record<string, WidgetSize>,
+  specs: Record<string, WidgetLayoutSpec | undefined>,
   canvasWidthPx: number,
 ): EffectiveLayout {
-  const sizeOf = (key: string) => sizes[key] ?? defaultWidgetSize();
+  const layoutOf = (key: string) => resolveWidgetDefaults(specs[key]);
+  const defaultsOf = (key: string): SizeUnits => {
+    const layout = layoutOf(key);
+    return { w: layout.defaultW, h: layout.defaultH };
+  };
   if (parsed.kind === "legacy") {
-    const migrated = migrateLegacyLayout(parsed.order, availableKeys, sizes, canvasWidthPx);
+    const defaults: Record<string, SizeUnits> = {};
+    for (const key of availableKeys) defaults[key] = defaultsOf(key);
+    const migrated = migrateLegacyLayout(parsed.order, availableKeys, defaults, canvasWidthPx);
     return { items: migrated.items, hidden: migrated.hidden };
   }
+  const capacity = canvasCapacityUnits(canvasWidthPx);
   const hiddenSet = new Set(
     parsed.kind === "v2" ? parsed.hidden.filter((key) => availableKeys.includes(key)) : [],
   );
@@ -321,17 +493,27 @@ export function resolveEffectiveLayout(
   if (parsed.kind === "v2") {
     for (const key of availableKeys) {
       const saved = parsed.items[key];
-      if (saved) items[key] = clampPlacement(saved, sizeOf(key), canvasWidthPx);
+      if (!saved) continue;
+      const layout = layoutOf(key);
+      const defaults = { w: layout.defaultW, h: layout.defaultH };
+      const positioned = clampPlacement(saved, defaults, canvasWidthPx);
+      const size = clampWidgetSize(
+        { w: positioned.w ?? layout.defaultW, h: positioned.h ?? layout.defaultH },
+        layout,
+        capacity,
+        positioned.x,
+      );
+      items[key] = { x: positioned.x, y: positioned.y, w: size.w, h: size.h };
     }
   }
-  const occupied = () => Object.entries(items).map(([key, p]) => rectForPlacement(p, sizeOf(key)));
+  const occupied = () => Object.entries(items).map(([key, p]) => placementRect(p, defaultsOf(key)));
   for (const key of availableKeys) {
     if (items[key] !== undefined || hiddenSet.has(key)) continue;
-    const size = sizeOf(key);
-    const found = findFirstFreePosition(size, occupied(), canvasWidthPx);
-    items[key] = clampPlacement(found, size, canvasWidthPx);
+    items[key] = findFirstFreePosition(defaultsOf(key), occupied(), canvasWidthPx);
   }
-  return { items, hidden: availableKeys.filter((key) => hiddenSet.has(key)) };
+  // Final normalization: the returned layout guarantees explicit w/h on
+  // every placement (auto-placed entries already carry theirs).
+  return { items: applyWidgetDefaults(items, specs), hidden: availableKeys.filter((key) => hiddenSet.has(key)) };
 }
 
 // ---------- canvas geometry ----------
@@ -393,20 +575,9 @@ export function gridKeyboardCoordinateGetter(
   return { x: currentCoordinates.x + delta.x, y: currentCoordinates.y + delta.y };
 }
 
-// ---------- measurement helpers ----------
+// ---------- defaults ----------
 
-/** Estimated size used before a real DOM measurement exists. */
-export function defaultWidgetSize(): WidgetSize {
-  return { width: DEFAULT_CARD_WIDTH_PX, height: ESTIMATED_CARD_HEIGHT_PX };
-}
-
-/**
- * Normalize a measured DOM rect: jsdom (and pre-layout renders) report 0x0,
- * which would collapse collision rects — fall back to the constants instead.
- */
-export function normalizeMeasuredSize(width: number, height: number): WidgetSize {
-  return {
-    width: width > 0 ? width : DEFAULT_CARD_WIDTH_PX,
-    height: height > 0 ? height : ESTIMATED_CARD_HEIGHT_PX,
-  };
+/** Platform default size for widgets without a layout spec. */
+export function defaultWidgetSize(): SizeUnits {
+  return { w: DEFAULT_CARD_WIDTH_UNITS, h: DEFAULT_CARD_HEIGHT_UNITS };
 }
