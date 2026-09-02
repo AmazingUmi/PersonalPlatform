@@ -237,10 +237,21 @@ test("dashboard: free-layout drag persists after reload (V1 -> V2)", async ({ pa
   assert.ok(canvasAfter && canvasBefore, "canvas boxes resolved");
   assert.ok(canvasAfter.height > canvasBefore.height, "canvas grew after the drop");
 
-  await page.getByRole("button", { name: "Done", exact: true }).click();
-  // Done persists asynchronously; wait until the shell returns to normal mode
-  // so the reload cannot cancel the PUT mid-flight.
-  await expect(page.getByRole("button", { name: /edit layout/i })).toBeVisible();
+  // Phase 11: the drag itself persists at drop — no Done click. (dnd-kit
+  // swallows document clicks for ~50ms after a pointer drag, so clicking Done
+  // immediately after a drop is inherently racy; polling the setting is the
+  // deterministic contract.) Stay in edit mode and wait for the auto-save.
+  await expect
+    .poll(
+      async () => {
+        const response = await page.request.get(`${CORE}/api/core/settings/dashboard.widgets`);
+        const body = (await response.json()) as { value?: { items?: Record<string, unknown> } };
+        return body.value?.items?.["tasks:today"] ? Object.keys(body.value.items).length : 0;
+      },
+      { timeout: 10_000 },
+    )
+    .toBe(4);
+
   await page.reload();
   await expect(page.locator(".dashboard-card [data-widget-key]")).toHaveCount(4);
   expect(await placement("tasks:today")).toEqual(tasksPlacementAfter);
@@ -346,7 +357,7 @@ async function cardGeometry(page: Page, key: string) {
   }));
 }
 
-test("dashboard: resize persists after reload and switches density by threshold", async ({ page }) => {
+test("dashboard: resize auto-saves without Done; other cards never move", async ({ page }) => {
   await putResizeLayout(page);
   await page.goto("/");
   await expect(page.locator(".dashboard-canvas[data-desktop='true']")).toBeVisible();
@@ -382,9 +393,20 @@ test("dashboard: resize persists after reload and switches density by threshold"
     expect(await cardGeometry(page, key)).toEqual(before[index]);
   }
 
-  // Done persists; a reload restores the exact size and density.
-  await page.getByRole("button", { name: "Done", exact: true }).click();
-  await expect(page.getByRole("button", { name: /edit layout/i })).toBeVisible();
+  // Phase 11 acceptance: NO Done click — the resize persists at pointerup.
+  // Poll the persisted setting until the auto-save has landed.
+  await expect
+    .poll(
+      async () => {
+        const response = await page.request.get(`${CORE}/api/core/settings/dashboard.widgets`);
+        const body = (await response.json()) as { value?: { items?: Record<string, { w?: number }> } };
+        return body.value?.items?.["clock:clock"]?.w ?? 0;
+      },
+      { timeout: 10_000 },
+    )
+    .toBe(26);
+
+  // Reload while still in edit mode: the resized geometry survives.
   await page.reload();
   await expect(page.locator('[data-widget-key="clock:clock"]')).toBeVisible();
   expect(await cardGeometry(page, "clock:clock")).toMatchObject({
@@ -394,7 +416,11 @@ test("dashboard: resize persists after reload and switches density by threshold"
     height: "320px",
     density: "expanded",
   });
-  await expect(page.locator('[data-widget-key="clock:clock"]')).toContainText("MORE TASKS TODAY");
+  // Every other card kept its exact placement across the resize + reload.
+  for (const [index, key] of keys.entries()) {
+    if (key === "clock:clock") continue;
+    expect(await cardGeometry(page, key)).toEqual(before[index]);
+  }
 
   // Reset for the following tests (canonical legacy array: clock/notes hidden).
   await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
@@ -439,6 +465,9 @@ test("dashboard: narrow viewport ignores saved desktop sizes without overflow", 
   await page.goto("/");
   await expect(page.locator(".dashboard-card [data-widget-key]").first()).toBeVisible();
 
+  // The Reset Layout action stays reachable on mobile (Phase 11).
+  await expect(page.getByRole("button", { name: /reset layout/i })).toBeVisible();
+
   // Narrow mode must not apply desktop geometry: flow layout, no inline size.
   await expect(page.locator(".dashboard-canvas[data-desktop='true']")).toHaveCount(0);
   const cardStyles = await page.locator(".dashboard-card").first().evaluate((node) => ({
@@ -462,6 +491,118 @@ test("dashboard: narrow viewport ignores saved desktop sizes without overflow", 
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   );
   expect(overflow).toBeLessThanOrEqual(0);
+
+  await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
+    data: { value: CANONICAL_LAYOUT },
+  });
+});
+
+// ---------- Dashboard layout stabilization (Phase 11) ----------
+
+/** Pairwise bounding-box overlap check with a 1px rounding tolerance. */
+function assertBoxesDoNotOverlap(
+  boxes: { x: number; y: number; width: number; height: number }[],
+): void {
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i]!;
+      const b = boxes[j]!;
+      const overlaps =
+        a.x + a.width - 1 > b.x && b.x + b.width - 1 > a.x && a.y + a.height - 1 > b.y && b.y + b.height - 1 > a.y;
+      assert.ok(!overlaps, `cards ${i} and ${j} overlap: ${JSON.stringify(a)} vs ${JSON.stringify(b)}`);
+    }
+  }
+}
+
+test("dashboard: default layout without a saved setting renders collision free", async ({ page }) => {
+  // No dashboard.widgets: the runtime default must be collision free by
+  // itself — and it must not be persisted by merely loading the page.
+  await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, { data: { value: null } });
+  await page.goto("/");
+  await expect(page.locator(".dashboard-canvas[data-desktop='true']")).toBeVisible();
+  const cards = page.locator(".dashboard-canvas[data-desktop='true'] .dashboard-card");
+  const count = await cards.count();
+  assert.ok(count >= 4, `expected the shipped widget set, got ${count}`);
+
+  const boxes: { x: number; y: number; width: number; height: number }[] = [];
+  for (let i = 0; i < count; i++) {
+    const box = await cards.nth(i).boundingBox();
+    assert(box, `card ${i} box resolved`);
+    boxes.push(box);
+  }
+  assertBoxesDoNotOverlap(boxes);
+
+  // Reading the default layout never writes it back (read/default runtime).
+  const response = await page.request.get(`${CORE}/api/core/settings/dashboard.widgets`);
+  const body = (await response.json()) as { value: unknown };
+  expect(body.value).toBeNull();
+
+  await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
+    data: { value: CANONICAL_LAYOUT },
+  });
+});
+
+test("dashboard: Reset Layout restores deterministic defaults from normal mode", async ({ page }) => {
+  // Heavily customized persisted layout: shifted, resized, three widgets hidden.
+  await setAppEnabled("clock", true);
+  await setAppEnabled("notes", true);
+  const customized = {
+    version: 2,
+    items: {
+      "clock:clock": { x: 3, y: 9, w: 30, h: 24 },
+      "tasks:today": { x: 40, y: 2, w: 18, h: 12 },
+      "assets:summary": { x: 12, y: 30, w: 26, h: 14 },
+    },
+    hidden: ["notes:quick_note", "focus:timer", "mini_game:highscore"],
+  };
+  await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, { data: { value: customized } });
+  await page.goto("/");
+  await expect(page.locator(".dashboard-canvas[data-desktop='true']")).toBeVisible();
+  // The customization is live: only three cards, one resized.
+  await expect(page.locator(".dashboard-canvas[data-desktop='true'] .dashboard-card")).toHaveCount(3);
+  expect(await cardGeometry(page, "clock:clock")).toMatchObject({ width: "480px", height: "384px" });
+
+  // Reset is available in the NORMAL header (no Edit Layout detour) and asks
+  // for confirmation first.
+  await page.getByRole("button", { name: /reset layout/i }).click();
+  const dialog = page.getByTestId("confirm-dialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: /reset layout/i }).click();
+
+  // Every available widget returns at its default size, hidden cleared.
+  const cards = page.locator(".dashboard-canvas[data-desktop='true'] .dashboard-card");
+  await expect(cards).toHaveCount(6);
+  for (const key of ["clock:clock", "tasks:today", "assets:summary", "mini_game:highscore", "focus:timer", "notes:quick_note"]) {
+    expect(await cardGeometry(page, key)).toMatchObject({ width: "320px", height: "256px" });
+  }
+  await expect(page.getByText(/\d+ widget\(s\) hidden/)).toHaveCount(0);
+
+  // The reset result is collision free.
+  const boxes: { x: number; y: number; width: number; height: number }[] = [];
+  for (let i = 0; i < await cards.count(); i++) {
+    const box = await cards.nth(i).boundingBox();
+    assert(box, `card ${i} box resolved`);
+    boxes.push(box);
+  }
+  assertBoxesDoNotOverlap(boxes);
+
+  // The reset persisted immediately (no Done — we never entered edit mode).
+  const saved = (await (
+    await page.request.get(`${CORE}/api/core/settings/dashboard.widgets`)
+  ).json()) as { value: { items: Record<string, { w: number; h: number }>; hidden: string[] } };
+  expect(Object.keys(saved.value.items).sort()).toEqual(
+    ["assets:summary", "clock:clock", "focus:timer", "mini_game:highscore", "notes:quick_note", "tasks:today"].sort(),
+  );
+  expect(saved.value.hidden).toEqual([]);
+  for (const item of Object.values(saved.value.items)) {
+    expect(item).toMatchObject({ w: 20, h: 16 });
+  }
+
+  // And it survives a reload.
+  const afterReset = await cardGeometry(page, "clock:clock");
+  await page.reload();
+  await expect(page.locator(".dashboard-canvas[data-desktop='true']")).toBeVisible();
+  expect(await cardGeometry(page, "clock:clock")).toEqual(afterReset);
 
   await page.request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
     data: { value: CANONICAL_LAYOUT },

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "./Dashboard";
@@ -181,7 +181,9 @@ describe("Dashboard widgets", () => {
     Object.assign(frontendAppModules, twoAppModules);
     vi.mocked(getSetting).mockResolvedValue({
       version: 2,
-      items: { "alpha:w1": { x: 2, y: 3 }, "beta:w2": { x: 10, y: 7 } },
+      // Non-overlapping slots (Phase 11 runtime collision repair would move
+      // a stacked card; absolute rendering is asserted with clear slots).
+      items: { "alpha:w1": { x: 2, y: 3 }, "beta:w2": { x: 30, y: 7 } },
       hidden: [],
     });
     renderDashboard([app("alpha"), app("beta")]);
@@ -189,7 +191,7 @@ describe("Dashboard widgets", () => {
 
     expect(cardNode("alpha:w1").style.left).toBe("32px");
     expect(cardNode("alpha:w1").style.top).toBe("48px");
-    expect(cardNode("beta:w2").style.left).toBe("160px");
+    expect(cardNode("beta:w2").style.left).toBe("480px");
     expect(cardNode("beta:w2").style.top).toBe("112px");
     expect(document.querySelector(".dashboard-canvas")!.getAttribute("data-desktop")).toBe("true");
   });
@@ -328,21 +330,27 @@ describe("Dashboard interaction (FP-5.2 / FP-5.3 / FP-5.4)", () => {
     });
   });
 
-  it("edit mode: restore default re-shows every widget at default placements", async () => {
+  it("edit mode: Reset Layout re-shows every widget at default placements and persists", async () => {
     vi.mocked(getSetting).mockResolvedValue(["beta:w2"]);
     renderDashboard([app("alpha"), app("beta")]);
     await screen.findByText("Beta Widget");
 
     fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
-    fireEvent.click(screen.getByRole("button", { name: /restore default/i }));
-    fireEvent.click(screen.getByRole("button", { name: /^done$/i }));
+    // Reset asks for confirmation first; the dialog confirm button shares the
+    // header label, so scope the query to the dialog.
+    fireEvent.click(screen.getByRole("button", { name: /reset layout/i }));
+    fireEvent.click(within(screen.getByTestId("confirm-dialog")).getByRole("button", { name: /reset layout/i }));
 
-    await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalled());
+    // Phase 11: reset persists immediately — no Done press needed.
+    await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalledTimes(1));
     expect(vi.mocked(putSetting).mock.calls[0]![1]).toEqual({
       version: 2,
       items: { "alpha:w1": { x: 0, y: 0, w: 20, h: 16 }, "beta:w2": { x: 21, y: 0, w: 20, h: 16 } },
       hidden: [],
     });
+
+    fireEvent.click(screen.getByRole("button", { name: /^done$/i }));
+    await waitFor(() => expect(screen.getByRole("button", { name: /edit layout/i })).toBeDefined());
   });
 
   it("save failure keeps edit mode open and reports the error", async () => {
@@ -413,7 +421,7 @@ describe("Dashboard Free Layout V2 (desktop)", () => {
     expect(document.querySelector(".dashboard-drop-ghost")).toBeNull();
   });
 
-  it("Done persists dragged positions and a reload restores them exactly", async () => {
+  it("drag auto-saves at drop; Done persists the same state; reload restores", async () => {
     const { unmount } = renderDashboard([app("alpha"), app("beta")]);
     await screen.findByText("Alpha Widget");
 
@@ -421,7 +429,7 @@ describe("Dashboard Free Layout V2 (desktop)", () => {
     await keyboardDrag(/move alpha widget/i, Array.from({ length: 20 }, () => "ArrowDown"));
     expect(cardNode("alpha:w1").style.top).toBe("320px");
 
-    fireEvent.click(screen.getByRole("button", { name: /^done$/i }));
+    // Phase 11: a committed drag persists at action end — no Done needed.
     await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalledTimes(1));
     const saved = vi.mocked(putSetting).mock.calls[0]![1];
     expect(saved).toEqual({
@@ -429,6 +437,11 @@ describe("Dashboard Free Layout V2 (desktop)", () => {
       items: { "alpha:w1": { x: 0, y: 20, w: 20, h: 16 }, "beta:w2": { x: 21, y: 0, w: 20, h: 16 } },
       hidden: [],
     });
+
+    // Done afterwards persists the identical state (no stale contradiction).
+    fireEvent.click(screen.getByRole("button", { name: /^done$/i }));
+    await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(putSetting).mock.calls[1]![1]).toEqual(saved);
 
     // Simulated reload: the saved value is served by core.settings again.
     unmount();
@@ -632,7 +645,7 @@ describe("Dashboard resize (Phase 10, desktop)", () => {
     expect(cardNode("alpha:w1").className).not.toContain("dashboard-card--resizing");
   });
 
-  it("Done persists x/y/w/h together and a reload restores the exact size", async () => {
+  it("keyboard resize auto-saves per action; Done persists the same state; reload restores", async () => {
     vi.mocked(getSetting).mockResolvedValue(stackedLayout);
     const { unmount } = renderDashboard([app("alpha"), app("beta")]);
     await screen.findByText("Alpha Widget");
@@ -640,10 +653,10 @@ describe("Dashboard resize (Phase 10, desktop)", () => {
     keyboardResize(/resize alpha widget/i, ["ArrowRight", "ArrowRight", "ArrowRight", "ArrowDown", "ArrowDown"]);
     expect(cardNode("alpha:w1").style.width).toBe("368px");
 
-    fireEvent.click(screen.getByRole("button", { name: /^done$/i }));
-    await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalledTimes(1));
-    const saved = vi.mocked(putSetting).mock.calls[0]![1];
-    expect(saved).toEqual({
+    // Phase 11: every valid keyboard action auto-saves (5 arrows = 5 saves).
+    await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalledTimes(5));
+    const last = vi.mocked(putSetting).mock.calls[4]![1];
+    expect(last).toEqual({
       version: 2,
       items: {
         "alpha:w1": { x: 0, y: 0, w: 23, h: 18 },
@@ -652,8 +665,14 @@ describe("Dashboard resize (Phase 10, desktop)", () => {
       hidden: [],
     });
 
+    // Done after an auto-saved resize persists the identical state — never a
+    // contradictory stale save.
+    fireEvent.click(screen.getByRole("button", { name: /^done$/i }));
+    await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalledTimes(6));
+    expect(vi.mocked(putSetting).mock.calls[5]![1]).toEqual(last);
+
     unmount();
-    vi.mocked(getSetting).mockResolvedValue(saved);
+    vi.mocked(getSetting).mockResolvedValue(last);
     renderDashboard([app("alpha"), app("beta")]);
     await screen.findByText("Alpha Widget");
     expect(cardNode("alpha:w1").style.width).toBe("368px");
@@ -661,7 +680,7 @@ describe("Dashboard resize (Phase 10, desktop)", () => {
     expect(cardNode("beta:w2").style.width).toBe("320px");
   });
 
-  it("restore default restores default sizes too", async () => {
+  it("Reset Layout restores default sizes too", async () => {
     vi.mocked(getSetting).mockResolvedValue({
       version: 2,
       items: { "alpha:w1": { x: 0, y: 0, w: 30, h: 24 }, "beta:w2": { x: 21, y: 0, w: 20, h: 16 } },
@@ -672,11 +691,11 @@ describe("Dashboard resize (Phase 10, desktop)", () => {
     expect(cardNode("alpha:w1").style.width).toBe("480px");
 
     fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
-    fireEvent.click(screen.getByRole("button", { name: /restore default/i }));
-    expect(cardNode("alpha:w1").style.width).toBe("320px");
+    fireEvent.click(screen.getByRole("button", { name: /reset layout/i }));
+    fireEvent.click(within(screen.getByTestId("confirm-dialog")).getByRole("button", { name: /reset layout/i }));
+    await waitFor(() => expect(cardNode("alpha:w1").style.width).toBe("320px"));
     expect(cardNode("alpha:w1").style.height).toBe("256px");
 
-    fireEvent.click(screen.getByRole("button", { name: /^done$/i }));
     await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalled());
     expect(vi.mocked(putSetting).mock.calls[0]![1]).toEqual({
       version: 2,
@@ -774,5 +793,268 @@ describe("Dashboard resize (Phase 10, desktop)", () => {
     expect(cardNode("gamma:w1").getAttribute("data-density")).toBe("normal");
     expect(cardNode("gamma:w1").style.width).toBe("");
     expect(cardNode("gamma:w1").style.height).toBe("");
+  });
+});
+
+describe("Dashboard layout stabilization (Phase 11, desktop)", () => {
+  /** Saved layout where alpha (0,0) has free space right and below. */
+  const stackedLayout = {
+    version: 2,
+    items: { "alpha:w1": { x: 0, y: 0, w: 20, h: 16 }, "beta:w2": { x: 0, y: 20, w: 20, h: 16 } },
+    hidden: [] as string[],
+  };
+
+  const resizeHandle = (label: RegExp) => screen.getByRole("button", { name: label });
+
+  async function pointerResizeRaw(label: RegExp, dx: number, dy: number, up = true) {
+    const handle = resizeHandle(label);
+    fireEvent.pointerDown(handle, { button: 0, clientX: 0, clientY: 0, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: dx, clientY: dy, pointerId: 1 });
+    if (up) fireEvent.pointerUp(handle, { pointerId: 1 });
+  }
+
+  function keyboardResize(label: RegExp, codes: string[]) {
+    const handle = resizeHandle(label);
+    for (const code of codes) fireEvent.keyDown(handle, { code });
+  }
+
+  beforeEach(() => {
+    stubDesktopMedia();
+    Object.assign(frontendAppModules, twoAppModules);
+  });
+
+  it("pointer resize: pointerup auto-saves exactly once; pointermove never saves", async () => {
+    vi.mocked(getSetting).mockResolvedValue(stackedLayout);
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Alpha Widget");
+    fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
+
+    // Several moves during the gesture — none may persist.
+    await pointerResizeRaw(/resize alpha widget/i, 16, 16, false);
+    fireEvent.pointerMove(resizeHandle(/resize alpha widget/i), { clientX: 32, clientY: 32, pointerId: 1 });
+    expect(vi.mocked(putSetting)).not.toHaveBeenCalled();
+    fireEvent.pointerUp(resizeHandle(/resize alpha widget/i), { pointerId: 1 });
+
+    await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(putSetting).mock.calls[0]![1]).toEqual({
+      version: 2,
+      // +2/+2 grid units from 20x16, x/y anchored, beta untouched.
+      items: { "alpha:w1": { x: 0, y: 0, w: 22, h: 18 }, "beta:w2": { x: 0, y: 20, w: 20, h: 16 } },
+      hidden: [],
+    });
+  });
+
+  it("pointer resize released invalid: reverted, nothing saved, others untouched", async () => {
+    vi.mocked(getSetting).mockResolvedValue(stackedLayout);
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Alpha Widget");
+    fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
+
+    // Straight down into beta (y=20): invalid candidate the whole way.
+    await pointerResizeRaw(/resize alpha widget/i, 0, 500);
+    expect(cardNode("alpha:w1").style.width).toBe("320px");
+    expect(cardNode("alpha:w1").style.height).toBe("256px");
+    expect(cardNode("beta:w2").style.top).toBe("320px");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(vi.mocked(putSetting)).not.toHaveBeenCalled();
+  });
+
+  it("pointer resize without any size change saves nothing", async () => {
+    vi.mocked(getSetting).mockResolvedValue(stackedLayout);
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Alpha Widget");
+    fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
+
+    // A sub-unit wiggle snaps back to the start size.
+    await pointerResizeRaw(/resize alpha widget/i, 4, 0);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(vi.mocked(putSetting)).not.toHaveBeenCalled();
+  });
+
+  it("keyboard resize: invalid (collision) and clamped no-op presses save nothing", async () => {
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Alpha Widget");
+    fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
+
+    // Default layout: beta sits at x=21 — growing alpha rightwards collides.
+    keyboardResize(/resize alpha widget/i, Array.from({ length: 10 }, () => "ArrowRight"));
+    expect(cardNode("alpha:w1").style.width).toBe("320px");
+    expect(vi.mocked(putSetting)).not.toHaveBeenCalled();
+
+    // Shrinking to the platform minimum (12 units) is valid and saves per
+    // action; presses beyond the minimum clamp to a no-op and save nothing.
+    keyboardResize(/resize alpha widget/i, Array.from({ length: 8 }, () => "ArrowLeft"));
+    await waitFor(() => expect(vi.mocked(putSetting).mock.calls.length).toBe(8));
+    expect(cardNode("alpha:w1").style.width).toBe("192px");
+
+    keyboardResize(/resize alpha widget/i, Array.from({ length: 5 }, () => "ArrowLeft"));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(cardNode("alpha:w1").style.width).toBe("192px");
+    expect(vi.mocked(putSetting).mock.calls.length).toBe(8);
+  });
+
+  it("resize save failure keeps the local result and reports the error", async () => {
+    vi.mocked(getSetting).mockResolvedValue(stackedLayout);
+    vi.mocked(putSetting).mockRejectedValueOnce(new Error("disk full"));
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Alpha Widget");
+    fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
+
+    await pointerResizeRaw(/resize alpha widget/i, 32, 0);
+
+    await waitFor(() => expect(screen.getByText(/Layout save failed: disk full/)).toBeDefined());
+    // No rollback: the resized geometry stays visible.
+    expect(cardNode("alpha:w1").style.width).toBe("352px");
+  });
+
+  it("an overlapping saved V2 layout renders repaired, without saving", async () => {
+    vi.mocked(getSetting).mockResolvedValue({
+      version: 2,
+      // Hand-edited stacked cards: identical placements must not render
+      // overlapping — the later widget in reading order moves right.
+      items: { "alpha:w1": { x: 0, y: 0, w: 20, h: 16 }, "beta:w2": { x: 0, y: 0, w: 20, h: 16 } },
+      hidden: [],
+    });
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Alpha Widget");
+
+    expect(cardNode("alpha:w1").style.left).toBe("0px");
+    expect(cardNode("beta:w2").style.left).toBe("336px"); // 21 units — gap kept
+    expect(vi.mocked(putSetting)).not.toHaveBeenCalled();
+  });
+
+  it("Reset Layout is available in normal mode and persists immediately", async () => {
+    vi.mocked(getSetting).mockResolvedValue({
+      version: 2,
+      items: {
+        "alpha:w1": { x: 0, y: 40, w: 30, h: 24 },
+        "beta:w2": { x: 42, y: 40, w: 18, h: 12 },
+      },
+      hidden: [],
+    });
+    const { unmount } = renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Alpha Widget");
+
+    // Normal mode header: Reset Layout + Edit Layout side by side.
+    expect(screen.getByRole("button", { name: /reset layout/i })).toBeDefined();
+    expect(screen.getByRole("button", { name: /edit layout/i })).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: /reset layout/i }));
+    fireEvent.click(within(screen.getByTestId("confirm-dialog")).getByRole("button", { name: /reset layout/i }));
+
+    await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(putSetting).mock.calls[0]![1]).toEqual({
+      version: 2,
+      items: { "alpha:w1": { x: 0, y: 0, w: 20, h: 16 }, "beta:w2": { x: 21, y: 0, w: 20, h: 16 } },
+      hidden: [],
+    });
+    // The committed state updated: defaults render without entering edit mode.
+    await waitFor(() => expect(cardNode("alpha:w1").style.top).toBe("0px"));
+    expect(cardNode("alpha:w1").style.width).toBe("320px");
+
+    // Simulated reload: the saved value is served again.
+    unmount();
+    vi.mocked(getSetting).mockResolvedValue(vi.mocked(putSetting).mock.calls[0]![1]);
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Alpha Widget");
+    expect(cardNode("alpha:w1").style.top).toBe("0px");
+    expect(cardNode("beta:w2").style.left).toBe("336px");
+  });
+
+  it("Reset Layout also clears hidden widgets (all available widgets return)", async () => {
+    vi.mocked(getSetting).mockResolvedValue({
+      version: 2,
+      items: { "beta:w2": { x: 0, y: 0, w: 20, h: 16 } },
+      hidden: ["alpha:w1"],
+    });
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Beta Widget");
+    expect(screen.queryByText("Alpha Widget")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /reset layout/i }));
+    fireEvent.click(within(screen.getByTestId("confirm-dialog")).getByRole("button", { name: /reset layout/i }));
+
+    await waitFor(() => expect(screen.getByText("Alpha Widget")).toBeDefined());
+    expect(screen.queryByText(/widget\(s\) hidden/)).toBeNull();
+    await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(putSetting).mock.calls[0]![1]).toMatchObject({ hidden: [] });
+  });
+
+  it("cancelling the reset confirmation changes nothing", async () => {
+    vi.mocked(getSetting).mockResolvedValue(stackedLayout);
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Alpha Widget");
+
+    fireEvent.click(screen.getByRole("button", { name: /reset layout/i }));
+    fireEvent.click(within(screen.getByTestId("confirm-dialog")).getByRole("button", { name: /cancel/i }));
+
+    expect(screen.queryByTestId("confirm-dialog")).toBeNull();
+    expect(cardNode("alpha:w1").style.top).toBe("0px");
+    expect(cardNode("beta:w2").style.top).toBe("320px");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(vi.mocked(putSetting)).not.toHaveBeenCalled();
+  });
+
+  it("an active resize blocks drag (global mutex)", async () => {
+    vi.mocked(getSetting).mockResolvedValue(stackedLayout);
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Alpha Widget");
+    fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
+
+    // Start a pointer resize and keep it live (no pointerup).
+    const handle = resizeHandle(/resize alpha widget/i);
+    fireEvent.pointerDown(handle, { button: 0, clientX: 0, clientY: 0, pointerId: 1 });
+    fireEvent.pointerMove(handle, { clientX: 32, clientY: 32, pointerId: 1 });
+    expect(cardNode("alpha:w1").className).toContain("dashboard-card--resizing");
+
+    // A keyboard drag attempt on the same card must not move it.
+    await keyboardDrag(/move alpha widget/i, Array.from({ length: 10 }, () => "ArrowDown"));
+    expect(cardNode("alpha:w1").style.top).toBe("0px");
+    expect(cardNode("beta:w2").style.top).toBe("320px");
+
+    fireEvent.pointerUp(handle, { pointerId: 1 });
+  });
+
+  it("an active drag blocks resize (global mutex)", async () => {
+    vi.mocked(getSetting).mockResolvedValue(stackedLayout);
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Alpha Widget");
+    fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
+
+    // Keyboard drag in progress (Space activates, arrows move, no drop).
+    fireEvent.keyDown(screen.getByRole("button", { name: /move alpha widget/i }), { code: "Space" });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    fireEvent.keyDown(document, { code: "ArrowDown" });
+
+    // Arrow keys on the resize handle are rejected while the drag is live.
+    keyboardResize(/resize alpha widget/i, Array.from({ length: 5 }, () => "ArrowRight"));
+    expect(cardNode("alpha:w1").style.width).toBe("320px");
+
+    fireEvent.keyDown(document, { code: "Space" });
+  });
+
+  it("resize handle exposes its current size to screen readers", async () => {
+    vi.mocked(getSetting).mockResolvedValue(stackedLayout);
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("Alpha Widget");
+    fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
+
+    const handle = resizeHandle(/resize alpha widget/i);
+    expect(handle.getAttribute("aria-label")).toBe("Resize Alpha Widget");
+    expect(handle.getAttribute("aria-describedby")).toBe("resize-status-alpha-w1");
+    expect(document.getElementById("resize-status-alpha-w1")!.textContent).toBe("20 by 16 grid units");
+
+    keyboardResize(/resize alpha widget/i, ["ArrowRight"]);
+    expect(document.getElementById("resize-status-alpha-w1")!.textContent).toBe("21 by 16 grid units");
   });
 });

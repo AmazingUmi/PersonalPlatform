@@ -22,6 +22,7 @@ import {
   placementRect,
   rectIsFree,
   rectsOverlap,
+  repairCollisions,
   resolveEffectiveLayout,
   resolveWidgetDefaults,
   resolveWidgetDensity,
@@ -501,13 +502,14 @@ describe("resolveEffectiveLayout", () => {
 
   it("normalizes old V2 x/y-only entries to widget defaults (runtime only)", () => {
     const effective = resolveEffectiveLayout(
-      { kind: "v2", items: { clock: { x: 5, y: 8 }, plain: { x: 0, y: 0 } }, hidden: [] },
+      // Non-overlapping positions: clock 24 wide to the right of plain.
+      { kind: "v2", items: { clock: { x: 25, y: 4 }, plain: { x: 0, y: 0 } }, hidden: [] },
       ["clock", "plain"],
       specs,
       1040,
     );
     expect(effective.items).toEqual({
-      clock: { x: 5, y: 8, w: 24, h: 18 },
+      clock: { x: 25, y: 4, w: 24, h: 18 },
       plain: { x: 0, y: 0, w: DEFAULT_CARD_WIDTH_UNITS, h: DEFAULT_CARD_HEIGHT_UNITS },
     });
   });
@@ -542,6 +544,228 @@ describe("resolveEffectiveLayout", () => {
     );
     // plain lands one gap right of the 24-wide clock.
     expect(effective.items.plain).toEqual({ x: 25, y: 0, w: DEFAULT_CARD_WIDTH_UNITS, h: DEFAULT_CARD_HEIGHT_UNITS });
+  });
+});
+
+describe("collision repair (Phase 11)", () => {
+  const repairSpecs: Record<string, WidgetLayoutSpec | undefined> = {};
+  const card = (x: number, y: number, w = 20, h = 16) => ({ x, y, w, h });
+
+  /** All pairwise rect combinations must be collision-free (gap included). */
+  function expectCollisionFree(items: Record<string, { x: number; y: number; w?: number; h?: number }>) {
+    const keys = Object.keys(items);
+    for (let i = 0; i < keys.length; i++) {
+      for (let j = i + 1; j < keys.length; j++) {
+        const a = items[keys[i]!]!;
+        const b = items[keys[j]!]!;
+        expect(
+          rectsOverlap(
+            { x: a.x, y: a.y, w: a.w ?? 20, h: a.h ?? 16 },
+            { x: b.x, y: b.y, w: b.w ?? 20, h: b.h ?? 16 },
+          ),
+          `${keys[i]} overlaps ${keys[j]}`,
+        ).toBe(false);
+      }
+    }
+  }
+
+  it("keeps a collision-free layout exactly as saved", () => {
+    const items = { a: card(0, 0), b: card(21, 0), c: card(0, 17) };
+    expect(repairCollisions(items, repairSpecs, 1040)).toEqual(items);
+  });
+
+  it("moves only the later conflicting widget in reading order, keeping its size", () => {
+    // Two cards stacked on the same slot (e.g. by the runtime clamp): the
+    // first in reading order stays, the second keeps 20x16 and moves to the
+    // first free slot (row-major scan: right of the keeper, not below).
+    const repaired = repairCollisions({ a: card(0, 0), b: card(0, 0) }, repairSpecs, 1040);
+    expect(repaired.a).toEqual(card(0, 0));
+    expect(repaired.b).toEqual(card(21, 0));
+  });
+
+  it("is deterministic for identical input", () => {
+    const items = { b: card(0, 0), a: card(0, 0), c: card(21, 0, 24, 18) };
+    expect(repairCollisions(items, repairSpecs, 960)).toEqual(repairCollisions(items, repairSpecs, 960));
+  });
+
+  it("P1 repro: a layout saved wide and opened narrow is collision free", () => {
+    // Saved at 1440px (4 cards in a row); the 960px clamp stacks the last
+    // three onto the right edge — the repair must resolve every conflict.
+    const savedWide = {
+      a: card(0, 0),
+      b: card(21, 0),
+      c: card(42, 0),
+      d: card(63, 0),
+    };
+    for (const width of [960, 1000, 1040, 1088, 1130]) {
+      const effective = resolveEffectiveLayout(
+        { kind: "v2", items: savedWide, hidden: [] },
+        ["a", "b", "c", "d"],
+        repairSpecs,
+        width,
+      );
+      expectCollisionFree(effective.items);
+      // The leading cards keep their saved slots.
+      expect(effective.items.a).toEqual(card(0, 0));
+      expect(effective.items.b).toEqual(card(21, 0));
+    }
+  });
+
+  it("repairs hand-edited overlapping saved data without writing back", () => {
+    const parsed = { kind: "v2" as const, items: { a: card(0, 0), b: card(10, 5) }, hidden: [] };
+    const effective = resolveEffectiveLayout(parsed, ["a", "b"], repairSpecs, 1040);
+    expectCollisionFree(effective.items);
+    // The original parsed value is untouched (repair is runtime-only).
+    expect(parsed.items.b).toEqual(card(10, 5));
+  });
+});
+
+describe("default layout collision (Phase 11)", () => {
+  /** Heterogeneous widget set from the Phase 11 brief. */
+  const heteroSpecs: Record<string, WidgetLayoutSpec | undefined> = {
+    A: { defaultW: 30, defaultH: 20 },
+    B: { defaultW: 14, defaultH: 10 },
+    C: { defaultW: 24, defaultH: 16 },
+    D: { defaultW: 18, defaultH: 28 },
+  };
+  const heteroKeys = ["A", "B", "C", "D"];
+
+  /** Grid rect view of a placement (generateDefaultLayout output always has w/h). */
+  const asRect = (p: { x: number; y: number; w?: number; h?: number }) => ({
+    x: p.x,
+    y: p.y,
+    w: p.w ?? 0,
+    h: p.h ?? 0,
+  });
+
+  function expectDefaultCollisionFree(widthPx: number) {
+    const entries = heteroKeys.map((key) => {
+      const spec = heteroSpecs[key]!;
+      return { key, size: units(spec.defaultW!, spec.defaultH!) };
+    });
+    const items = generateDefaultLayout(entries, widthPx);
+    for (let i = 0; i < entries.length; i++) {
+      for (let j = i + 1; j < entries.length; j++) {
+        expect(rectsOverlap(asRect(items[entries[i]!.key]!), asRect(items[entries[j]!.key]!)), `${widthPx}px`).toBe(false);
+      }
+    }
+  }
+
+  it("heterogeneous default sizes stay collision free, including fallback width", () => {
+    for (const width of [0, 500, 700, 960, 1040, 1280, 1920]) expectDefaultCollisionFree(width);
+  });
+
+  it("default sizes are never shrunk to fit a narrow canvas (wrap instead)", () => {
+    const items = generateDefaultLayout(
+      heteroKeys.map((key) => ({ key, size: units(heteroSpecs[key]!.defaultW!, heteroSpecs[key]!.defaultH!) })),
+      320, // 20-unit canvas: nothing fits beside A (30 wide) — pack downward.
+    );
+    expect(items.A).toEqual({ x: 0, y: 0, w: 30, h: 20 });
+    expect(items.B!.w).toBe(14);
+    expect(items.B!.h).toBe(10);
+  });
+
+  it("restore-default result is collision free (all widgets, defaults, hidden cleared)", () => {
+    const effective = resolveEffectiveLayout(
+      { kind: "v2", items: { A: { x: 3, y: 4, w: 40, h: 12 } }, hidden: ["B", "C"] },
+      heteroKeys,
+      heteroSpecs,
+      1040,
+    );
+    // Restore-default is generateDefaultLayout over every available key.
+    const restored = generateDefaultLayout(
+      heteroKeys.map((key) => ({ key, size: units(heteroSpecs[key]!.defaultW!, heteroSpecs[key]!.defaultH!) })),
+      1040,
+    );
+    expect(Object.keys(restored).sort()).toEqual([...heteroKeys].sort());
+    for (let i = 0; i < heteroKeys.length; i++) {
+      for (let j = i + 1; j < heteroKeys.length; j++) {
+        expect(rectsOverlap(asRect(restored[heteroKeys[i]!]!), asRect(restored[heteroKeys[j]!]!))).toBe(false);
+      }
+    }
+    // Sanity: the input layout above stays repaired too.
+    expect(effective.items.A).toBeDefined();
+  });
+
+  it("V1 migration result is collision free with heterogeneous sizes", () => {
+    const migrated = migrateLegacyLayout(
+      ["D", "A", "C"],
+      heteroKeys,
+      Object.fromEntries(heteroKeys.map((key) => [key, units(heteroSpecs[key]!.defaultW!, heteroSpecs[key]!.defaultH!)])),
+      1040,
+    );
+    const rects = Object.values(migrated.items).map(asRect);
+    for (let i = 0; i < rects.length; i++) {
+      for (let j = i + 1; j < rects.length; j++) {
+        expect(rectsOverlap(rects[i]!, rects[j]!)).toBe(false);
+      }
+    }
+  });
+
+  it("new-widget auto-placement and hidden->show land collision free", () => {
+    // A shipped widget missing from the saved layout is auto-placed.
+    const effective = resolveEffectiveLayout(
+      { kind: "v2", items: { A: { x: 0, y: 0, w: 30, h: 20 } }, hidden: [] },
+      heteroKeys,
+      heteroSpecs,
+      1040,
+    );
+    // Hidden -> show uses the same primitive against full occupancy.
+    const occupied = Object.entries(effective.items).map(([key, p]) =>
+      placementRect(p, { w: heteroSpecs[key]!.defaultW!, h: heteroSpecs[key]!.defaultH! }),
+    );
+    const shown = findFirstFreePosition(units(18, 28), occupied, 1040);
+    expect(rectIsFree(asRect(shown), occupied)).toBe(true);
+    // And the effective layout itself is collision free.
+    const rects = Object.entries(effective.items).map(([key, p]) =>
+      placementRect(p, { w: heteroSpecs[key]!.defaultW!, h: heteroSpecs[key]!.defaultH! }),
+    );
+    for (let i = 0; i < rects.length; i++) {
+      for (let j = i + 1; j < rects.length; j++) {
+        expect(rectsOverlap(rects[i]!, rects[j]!)).toBe(false);
+      }
+    }
+  });
+
+  it("V2 x/y-only entries with heterogeneous defaults normalize to collision-free explicit sizes", () => {
+    const effective = resolveEffectiveLayout(
+      { kind: "v2", items: { A: { x: 0, y: 0 }, B: { x: 31, y: 0 } }, hidden: [] },
+      heteroKeys,
+      heteroSpecs,
+      1040,
+    );
+    for (const key of heteroKeys) {
+      expect(effective.items[key]!.w).toBeDefined();
+      expect(effective.items[key]!.h).toBeDefined();
+    }
+    const rects = Object.entries(effective.items).map(([key, p]) =>
+      placementRect(p, { w: heteroSpecs[key]!.defaultW!, h: heteroSpecs[key]!.defaultH! }),
+    );
+    for (let i = 0; i < rects.length; i++) {
+      for (let j = i + 1; j < rects.length; j++) {
+        expect(rectsOverlap(rects[i]!, rects[j]!)).toBe(false);
+      }
+    }
+  });
+});
+
+describe("resize isolation invariant (Phase 11)", () => {
+  const layout = resolveWidgetDefaults({ minW: 16, minH: 12, defaultW: 20, defaultH: 16 });
+
+  it("resizePlacement changes only w/h — x/y stay anchored", () => {
+    const origin = { x: 7, y: 9, w: 20, h: 16 };
+    const before = structuredClone(origin);
+    const { placement } = resizePlacement(origin, units(26, 22), layout, 1040, []);
+    expect(placement.x).toBe(before.x);
+    expect(placement.y).toBe(before.y);
+    expect(placement.w).toBe(26);
+    expect(placement.h).toBe(22);
+  });
+
+  it("a colliding candidate is flagged invalid — never someone else's job", () => {
+    const others = [placementRect({ x: 21, y: 0 }, units(20, 16))];
+    const { valid } = resizePlacement({ x: 0, y: 0, w: 20, h: 16 }, units(30, 16), layout, 1040, others);
+    expect(valid).toBe(false);
   });
 });
 

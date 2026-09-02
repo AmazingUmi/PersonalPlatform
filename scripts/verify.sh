@@ -49,6 +49,30 @@ if [ "$(db_reachable "$TEST_DATABASE_URL")" != "up" ]; then
 fi
 
 step "migrations"
+# The integration suite shares this database and leaves fixture-named
+# migration records behind (e.g. the tasks fixtures run the real app SQL under
+# step1/step2 names); node-pg-migrate's checkOrder then rejects the real file
+# names on the next up-run. Reset the platform schemas first so this step
+# always validates a fresh install regardless of what ran before.
+TEST_DATABASE_URL="$TEST_DATABASE_URL" node -e '
+  const { readdirSync, existsSync } = require("node:fs");
+  const { join } = require("node:path");
+  const { Client } = require("pg");
+  const schemas = [
+    "core",
+    ...readdirSync("apps", { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !e.name.startsWith("_") && !e.name.startsWith("."))
+      .filter((e) => existsSync(join("apps", e.name, "app.yaml")))
+      .map((e) => e.name),
+  ];
+  (async () => {
+    const c = new Client({ connectionString: process.env.TEST_DATABASE_URL });
+    await c.connect();
+    for (const s of schemas) await c.query(`DROP SCHEMA IF EXISTS "${s}" CASCADE`);
+    await c.end();
+    console.log("reset platform schemas:", schemas.join(", "));
+  })().catch((e) => { console.error(e); process.exit(1); });
+'
 DATABASE_URL="$TEST_DATABASE_URL" npm run migration:up
 
 step "integration tests"

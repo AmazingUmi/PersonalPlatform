@@ -27,6 +27,7 @@ import { ErrorBoundary } from "../shared/ErrorBoundary";
 import { getSetting, putSetting, type AppInfo } from "../shared/api";
 import type { WidgetDensity, WidgetLayoutSpec, WidgetRenderContext } from "../shared/appTypes";
 import { resolvePresentation, type PresentationOverrides } from "../shared/presentation";
+import { ConfirmDialog } from "../shared/ui/ConfirmDialog";
 import { EmptyState } from "../shared/ui/EmptyState";
 import { LoadingState } from "../shared/ui/LoadingState";
 import { PixelButton } from "../shared/ui/PixelButton";
@@ -121,6 +122,12 @@ interface ResizePreview {
   valid: boolean;
 }
 
+/** Working copy of the persisted layout while Edit Layout is open. */
+interface DraftLayout {
+  items: Record<string, DashboardWidgetPlacement>;
+  hidden: string[];
+}
+
 /**
  * Dashboard is a pure widget container: widgets come from enabled frontend
  * app modules. The desktop canvas gives every widget an independent 2D grid
@@ -144,13 +151,20 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
 
   const [parsed, setParsed] = useState<ParsedDashboardLayout | "loading">("loading");
   const [editMode, setEditMode] = useState(false);
-  const [draft, setDraft] = useState<{ items: Record<string, DashboardWidgetPlacement>; hidden: string[] } | null>(null);
+  const [draft, setDraft] = useState<DraftLayout | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [canvasWidth, setCanvasWidth] = useState(0);
   const [activeDrag, setActiveDrag] = useState<DragPreview | null>(null);
   const [activeResize, setActiveResize] = useState<ResizePreview | null>(null);
   /** Mirror of activeResize so pointer-up handlers never read a stale closure. */
   const activeResizeRef = useRef<ResizePreview | null>(null);
+  /**
+   * Mirror of the draft so discrete action handlers (resize keys, pointer up)
+   * always read/commit the freshest items without functional updaters — the
+   * updater must stay pure because it can trigger a save.
+   */
+  const draftRef = useRef<DraftLayout | null>(null);
   const desktop = useDesktopLayoutMode();
 
   useEffect(() => {
@@ -167,16 +181,35 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
     };
   }, []);
 
-  const saveLayout = useCallback(async (layout: DashboardLayoutV2) => {
-    setSaveError(null);
-    try {
-      await putSetting(LAYOUT_KEY, layout);
-      setParsed({ kind: "v2", items: layout.items, hidden: layout.hidden });
-      return true;
-    } catch (error) {
-      setSaveError(error instanceof Error ? error.message : String(error));
-      return false;
-    }
+  /**
+   * Single persistence path (Phase 11): every save — Done, resize auto-save,
+   * Reset — goes through here. Saves are serialized in call order so rapid
+   * auto-saves (held arrow keys) can never apply responses out of order and
+   * overwrite newer geometry with stale state. Failures keep the local layout
+   * and surface a banner (optimistic-local, no rollback).
+   */
+  const saveChainRef = useRef<Promise<boolean>>(Promise.resolve(true));
+  const saveLayout = useCallback((layout: DashboardLayoutV2): Promise<boolean> => {
+    const attempt = saveChainRef.current.then(async () => {
+      setSaveError(null);
+      try {
+        await putSetting(LAYOUT_KEY, layout);
+        setParsed({ kind: "v2", items: layout.items, hidden: layout.hidden });
+        return true;
+      } catch (error) {
+        setSaveError(error instanceof Error ? error.message : String(error));
+        return false;
+      }
+    });
+    saveChainRef.current = attempt.catch(() => false);
+    return attempt;
+  }, []);
+
+  /** Commit a new draft (ref + state in lockstep); returns the committed value. */
+  const applyDraft = useCallback((next: DraftLayout): DraftLayout => {
+    draftRef.current = next;
+    setDraft(next);
+    return next;
   }, []);
 
   const availableKeys = useMemo(() => available.map(widgetKey), [available]);
@@ -288,6 +321,8 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
   );
 
   const onDragStart = (event: DragStartEvent) => {
+    // Global interaction mutex (Phase 11): a live resize locks all drags.
+    if (activeResizeRef.current) return;
     const key = String(event.active.id);
     const origin = items[key];
     if (origin) setActiveDrag({ key, candidate: origin, valid: true });
@@ -308,15 +343,30 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
 
   const onDragEnd = (event: DragEndEvent) => {
     const key = String(event.active.id);
+    // Mutex defense: a drag that somehow started under a live resize never
+    // commits (the draggable is disabled; this guards the race).
+    if (activeResizeRef.current) {
+      setActiveDrag(null);
+      return;
+    }
     const origin = items[key];
     if (origin) {
       const { placement, valid } = evaluateCandidate(key, origin, event.delta);
       // Invalid drops (overlap / out of bounds) revert to the origin; valid
-      // drops move ONLY the dragged widget — never any other card.
+      // drops move ONLY the dragged widget — never any other card. Like
+      // resize, a committed drag persists at action end (dnd-kit swallows
+      // clicks for ~50ms after a pointer drag, so deferring the save to Done
+      // made the very next click unreliable).
       if (valid && (placement.x !== origin.x || placement.y !== origin.y)) {
-        setDraft((current) =>
-          current ? { ...current, items: { ...current.items, [key]: placement } } : current,
-        );
+        const current = draftRef.current;
+        if (current) {
+          const next: DraftLayout = {
+            ...current,
+            items: { ...current.items, [key]: placement },
+          };
+          applyDraft(next);
+          void saveLayout(serializeLayout(next.items, next.hidden));
+        }
       }
     }
     setActiveDrag(null);
@@ -327,6 +377,9 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
   // ---------- bottom-right resize ----------
 
   const onResizeStart = (key: string, event: ReactPointerEvent<HTMLButtonElement>) => {
+    // Global interaction mutex (Phase 11): no resize under a live drag or a
+    // second live resize (multi-pointer edge cases).
+    if (activeDrag || activeResizeRef.current) return;
     if (event.button !== 0) return;
     const origin = items[key];
     if (!origin) return;
@@ -365,27 +418,31 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
     updateResize({ ...current, size: { w: placement.w, h: placement.h }, valid });
   };
 
-  /** commit=true applies a valid candidate to the draft; invalid reverts. */
+  /**
+   * Apply a valid resize result to the draft and auto-save it (Phase 11:
+   * resize persists at action end — Done is no longer required). Resize
+   * changes ONLY the resized widget's w/h — x/y and every other card stay
+   * untouched (Free Layout V2 isolation rule).
+   */
+  const commitResize = (key: string, size: SizeUnits) => {
+    const current = draftRef.current;
+    if (!current) return;
+    const origin = current.items[key];
+    if (!origin || (origin.w === size.w && origin.h === size.h)) return;
+    const next: DraftLayout = {
+      ...current,
+      items: { ...current.items, [key]: { x: origin.x, y: origin.y, w: size.w, h: size.h } },
+    };
+    applyDraft(next);
+    void saveLayout(serializeLayout(next.items, next.hidden));
+  };
+
+  /** commit=true applies a valid candidate and auto-saves; invalid reverts. */
   const onResizeEnd = (commit: boolean) => {
     const current = activeResizeRef.current;
     updateResize(null);
     if (!current || !commit || !current.valid) return;
-    const origin = items[current.key];
-    if (!origin) return;
-    if (origin.w === current.size.w && origin.h === current.size.h) return;
-    // Resize changes ONLY the resized widget's w/h — x/y and every other
-    // card stay untouched (Free Layout V2 isolation rule).
-    setDraft((state) =>
-      state
-        ? {
-            ...state,
-            items: {
-              ...state.items,
-              [current.key]: { x: origin.x, y: origin.y, w: current.size.w, h: current.size.h },
-            },
-          }
-        : state,
-    );
+    commitResize(current.key, current.size);
   };
 
   const onResizeKeyDown = (key: string, event: ReactKeyboardEvent<HTMLButtonElement>) => {
@@ -397,11 +454,14 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
     };
     const delta = deltas[event.code];
     if (!delta) return;
+    // Mutex defense: no keyboard resize under a live drag/resize.
+    if (activeDrag || activeResizeRef.current) return;
     // Stop the arrow from scrolling or reaching the dnd-kit drag sensor.
     event.preventDefault();
     event.stopPropagation();
-    const origin = items[key];
-    if (!origin) return;
+    const draft = draftRef.current;
+    const origin = draft?.items[key] ?? items[key];
+    if (!origin || !draft) return;
     const layout = layoutOf(key);
     const attempted = {
       w: (origin.w ?? layout.defaultW) + delta.w,
@@ -411,9 +471,12 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
     // Invalid targets (collision) and targets that clamp to the current
     // size are no-ops — the keyboard never moves an invalid resize.
     if (!valid || (placement.w === origin.w && placement.h === origin.h)) return;
-    setDraft((state) =>
-      state ? { ...state, items: { ...state.items, [key]: placement } } : state,
-    );
+    const next: DraftLayout = {
+      ...draft,
+      items: { ...draft.items, [key]: { x: origin.x, y: origin.y, w: placement.w, h: placement.h } },
+    };
+    applyDraft(next);
+    void saveLayout(serializeLayout(next.items, next.hidden));
   };
 
   // ---------- widget render context (density) ----------
@@ -454,46 +517,57 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
 
   const startEditing = () => {
     if (!effective) return;
-    setDraft({ items: { ...effective.items }, hidden: [...effective.hidden] });
+    applyDraft({ items: { ...effective.items }, hidden: [...effective.hidden] });
     setEditMode(true);
   };
 
   const finishEditing = async () => {
-    if (!draft) return;
-    if (await saveLayout(serializeLayout(draft.items, draft.hidden))) setEditMode(false);
+    const current = draftRef.current;
+    if (!current) return;
+    // Done persists any still-unsaved draft changes (drags, hides) and exits.
+    // After an auto-saved resize this re-persists the identical state.
+    if (await saveLayout(serializeLayout(current.items, current.hidden))) setEditMode(false);
   };
 
-  const restoreDefault = async () => {
-    const defaultItems = generateDefaultLayout(
+  /** Deterministic default layout: every available widget at its default size. */
+  const defaultLayout = (): DraftLayout => ({
+    items: generateDefaultLayout(
       availableKeys.map((key) => ({ key, size: defaultsOf(key) })),
       canvasWidth,
-    );
-    if (editMode) {
-      setDraft({ items: defaultItems, hidden: [] });
-    } else {
-      await saveLayout(serializeLayout(defaultItems, []));
-    }
+    ),
+    hidden: [],
+  });
+
+  /** Reset is one explicit action: defaults + all widgets shown, persisted
+   * immediately — never deferred to Done (Phase 11 reset contract). */
+  const performReset = async () => {
+    setResetConfirmOpen(false);
+    // Any live drag/resize preview was validated against the pre-reset
+    // occupancy — drop it so it cannot commit on top of the new defaults.
+    setActiveDrag(null);
+    updateResize(null);
+    const next = defaultLayout();
+    if (editMode) applyDraft(next);
+    await saveLayout(serializeLayout(next.items, next.hidden));
   };
 
   const hideWidget = (key: string) => {
-    setDraft((current) => {
-      if (!current) return current;
-      const { [key]: _removed, ...rest } = current.items;
-      return { items: rest, hidden: [...current.hidden, key] };
-    });
+    const current = draftRef.current;
+    if (!current) return;
+    const { [key]: _removed, ...rest } = current.items;
+    applyDraft({ items: rest, hidden: [...current.hidden, key] });
   };
 
   const showWidget = (key: string) => {
-    setDraft((current) => {
-      if (!current) return current;
-      const size = defaultsOf(key);
-      const occupied = Object.entries(current.items).map(([otherKey, other]) =>
-        placementRect(other, defaultsOf(otherKey)),
-      );
-      return {
-        items: { ...current.items, [key]: findFirstFreePosition(size, occupied, canvasWidth) },
-        hidden: current.hidden.filter((k) => k !== key),
-      };
+    const current = draftRef.current;
+    if (!current) return;
+    const size = defaultsOf(key);
+    const occupied = Object.entries(current.items).map(([otherKey, other]) =>
+      placementRect(other, defaultsOf(otherKey)),
+    );
+    applyDraft({
+      items: { ...current.items, [key]: findFirstFreePosition(size, occupied, canvasWidth) },
+      hidden: current.hidden.filter((k) => k !== key),
     });
   };
 
@@ -535,15 +609,20 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
         <h1 className="page-header__title">Dashboard</h1>
         <p className="page-header__subtitle">System overview</p>
         <div className="page-header__actions">
+          {/* Reset Layout is available in BOTH modes (Phase 11): one explicit
+           * action back to the deterministic collision-free defaults. */}
+          <PixelButton
+            size="sm"
+            variant="secondary"
+            onClick={() => setResetConfirmOpen(true)}
+            disabled={available.length === 0}
+          >
+            <PixelIcon name="refresh" /> Reset Layout
+          </PixelButton>
           {editMode ? (
-            <>
-              <PixelButton size="sm" variant="secondary" onClick={() => void restoreDefault()}>
-                Restore default
-              </PixelButton>
-              <PixelButton size="sm" onClick={() => void finishEditing()}>
-                Done
-              </PixelButton>
-            </>
+            <PixelButton size="sm" onClick={() => void finishEditing()}>
+              Done
+            </PixelButton>
           ) : (
             <PixelButton size="sm" onClick={startEditing} disabled={available.length === 0}>
               <PixelIcon name="grip" /> Edit Layout
@@ -551,6 +630,15 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
           )}
         </div>
       </header>
+      {resetConfirmOpen ? (
+        <ConfirmDialog
+          title="Reset dashboard layout?"
+          message="This restores default widget positions and sizes."
+          confirmLabel="Reset Layout"
+          onConfirm={() => void performReset()}
+          onCancel={() => setResetConfirmOpen(false)}
+        />
+      ) : null}
       {saveError && (
         <StatusMessage tone="error">
           <p>Layout save failed: {saveError}</p>
@@ -624,6 +712,8 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
                     size={sizeOfItem(key)}
                     density={context.layout.density}
                     resizing={resizing ? { valid: resizing.valid } : undefined}
+                    dragLocked={activeResize !== null}
+                    resizeLocked={activeDrag !== null}
                     onResizeStart={onResizeStart}
                     onResizeMove={onResizeMove}
                     onResizeEnd={onResizeEnd}
@@ -668,9 +758,6 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
       ) : hidden.length > 0 ? (
         <p className="dashboard-hidden">
           <span>{hidden.length} widget(s) hidden.</span>
-          <PixelButton variant="ghost" size="sm" onClick={() => void restoreDefault()}>
-            Restore default layout
-          </PixelButton>
         </p>
       ) : null}
     </div>
@@ -686,6 +773,10 @@ interface DashboardCardProps {
   size: SizeUnits;
   density: WidgetDensity;
   resizing?: { valid: boolean };
+  /** Global mutex (Phase 11): a live resize disables every drag handle. */
+  dragLocked?: boolean;
+  /** Global mutex (Phase 11): a live drag disables every resize handle. */
+  resizeLocked?: boolean;
   onResizeStart?: (key: string, event: ReactPointerEvent<HTMLButtonElement>) => void;
   onResizeMove?: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   onResizeEnd?: (commit: boolean) => void;
@@ -714,6 +805,8 @@ function DashboardCard({
   size,
   density,
   resizing,
+  dragLocked,
+  resizeLocked,
   onResizeStart,
   onResizeMove,
   onResizeEnd,
@@ -729,7 +822,7 @@ function DashboardCard({
   const isResizing = resizing !== undefined;
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: key,
-    disabled: !editMode || !desktop || isResizing,
+    disabled: !editMode || !desktop || isResizing || dragLocked,
   });
 
   const interactive = editMode || errorFallback;
@@ -823,16 +916,25 @@ function DashboardCard({
         </span>
       ) : null}
       {editMode && desktop && !errorFallback && onResizeStart && onResizeMove && onResizeEnd && onResizeKeyDown ? (
-        <button
-          type="button"
-          className="resize-handle"
-          aria-label={`Resize ${resolved.widget.title}`}
-          onPointerDown={(event) => onResizeStart(key, event)}
-          onPointerMove={(event) => onResizeMove(event)}
-          onPointerUp={() => onResizeEnd(true)}
-          onPointerCancel={() => onResizeEnd(false)}
-          onKeyDown={(event) => onResizeKeyDown(key, event)}
-        />
+        <>
+          {/* Current size announced on focus (a button role carries no value
+           * semantics, so the state lives in the described-by text). */}
+          <span id={`resize-status-${key.replace(/[^a-zA-Z0-9_-]/g, "-")}`} className="visually-hidden">
+            {size.w} by {size.h} grid units
+          </span>
+          <button
+            type="button"
+            className="resize-handle"
+            aria-label={`Resize ${resolved.widget.title}`}
+            aria-describedby={`resize-status-${key.replace(/[^a-zA-Z0-9_-]/g, "-")}`}
+            disabled={resizeLocked}
+            onPointerDown={(event) => onResizeStart(key, event)}
+            onPointerMove={(event) => onResizeMove(event)}
+            onPointerUp={() => onResizeEnd(true)}
+            onPointerCancel={() => onResizeEnd(false)}
+            onKeyDown={(event) => onResizeKeyDown(key, event)}
+          />
+        </>
       ) : null}
     </div>
   );

@@ -430,6 +430,42 @@ export function generateDefaultLayout(
   return items;
 }
 
+/**
+ * Repair collisions among loaded placements: walking in deterministic reading
+ * order, a placement that is collision-free against the already kept ones
+ * stays exactly where it was; a conflicting widget keeps its size and moves
+ * to the first free position. Runtime normalization only — the repaired
+ * geometry is persisted by the next real user save, never on read.
+ *
+ * Rationale: every save path is collision-checked, so overlaps observed after
+ * the runtime canvas clamp are introduced by the clamp itself (e.g. a layout
+ * saved on a wide canvas opened narrower). Even for hand-edited overlapping
+ * data this moves only the later widget in reading order.
+ */
+export function repairCollisions(
+  items: Record<string, DashboardWidgetPlacement>,
+  specs: Record<string, WidgetLayoutSpec | undefined>,
+  canvasWidthPx: number,
+): Record<string, DashboardWidgetPlacement> {
+  const defaultsOf = (key: string): SizeUnits => {
+    const layout = resolveWidgetDefaults(specs[key]);
+    return { w: layout.defaultW, h: layout.defaultH };
+  };
+  const kept: Record<string, DashboardWidgetPlacement> = {};
+  const occupied: GridRect[] = [];
+  for (const key of sortForMobile(items)) {
+    const placement = items[key]!;
+    const rect = placementRect(placement, defaultsOf(key));
+    if (rectIsFree(rect, occupied)) {
+      kept[key] = placement;
+    } else {
+      kept[key] = findFirstFreePosition({ w: rect.w, h: rect.h }, occupied, canvasWidthPx);
+    }
+    occupied.push(placementRect(kept[key]!, defaultsOf(key)));
+  }
+  return kept;
+}
+
 // ---------- migration ----------
 
 /**
@@ -464,9 +500,10 @@ export interface EffectiveLayout {
 /**
  * Normalize any parsed persisted value into the effective visible layout.
  * Saved placements are clamped to the current canvas (position AND size —
- * runtime only, never written back); widgets that are neither placed nor
- * hidden (e.g. a newly shipped widget) are auto-placed at the first free
- * position. Every returned placement carries explicit w/h.
+ * runtime only, never written back) and then collision-repaired in reading
+ * order so the clamp can never render overlapping cards; widgets that are
+ * neither placed nor hidden (e.g. a newly shipped widget) are auto-placed at
+ * the first free position. Every returned placement carries explicit w/h.
  */
 export function resolveEffectiveLayout(
   parsed: ParsedDashboardLayout,
@@ -489,8 +526,9 @@ export function resolveEffectiveLayout(
   const hiddenSet = new Set(
     parsed.kind === "v2" ? parsed.hidden.filter((key) => availableKeys.includes(key)) : [],
   );
-  const items: Record<string, DashboardWidgetPlacement> = {};
+  let items: Record<string, DashboardWidgetPlacement> = {};
   if (parsed.kind === "v2") {
+    const clamped: Record<string, DashboardWidgetPlacement> = {};
     for (const key of availableKeys) {
       const saved = parsed.items[key];
       if (!saved) continue;
@@ -503,8 +541,12 @@ export function resolveEffectiveLayout(
         capacity,
         positioned.x,
       );
-      items[key] = { x: positioned.x, y: positioned.y, w: size.w, h: size.h };
+      clamped[key] = { x: positioned.x, y: positioned.y, w: size.w, h: size.h };
     }
+    // The clamp squeezes cards towards the right edge independently, which
+    // can stack two saved placements onto the same slot — repair before
+    // anything renders or auto-places against them.
+    items = repairCollisions(clamped, specs, canvasWidthPx);
   }
   const occupied = () => Object.entries(items).map(([key, p]) => placementRect(p, defaultsOf(key)));
   for (const key of availableKeys) {
