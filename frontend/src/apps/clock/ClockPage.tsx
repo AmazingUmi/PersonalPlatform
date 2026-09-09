@@ -86,24 +86,29 @@ export function ClockPage() {
                 ANALOG
               </button>
             </div>
-            <div className="px-seg" role="group" aria-label="Hour format">
-              <button
-                type="button"
-                className="px-seg__btn"
-                aria-pressed={settings.hourFormat === 24}
-                onClick={() => patch({ hourFormat: 24 })}
-              >
-                24H
-              </button>
-              <button
-                type="button"
-                className="px-seg__btn"
-                aria-pressed={settings.hourFormat === 12}
-                onClick={() => patch({ hourFormat: 12 })}
-              >
-                12H
-              </button>
-            </div>
+            {/* The analog face has no numerals format — 12/24H only applies
+             * while the digital face is active (the saved value is kept and
+             * reused when switching back). */}
+            {settings.displayMode === "digital" ? (
+              <div className="px-seg" role="group" aria-label="Hour format">
+                <button
+                  type="button"
+                  className="px-seg__btn"
+                  aria-pressed={settings.hourFormat === 24}
+                  onClick={() => patch({ hourFormat: 24 })}
+                >
+                  24H
+                </button>
+                <button
+                  type="button"
+                  className="px-seg__btn"
+                  aria-pressed={settings.hourFormat === 12}
+                  onClick={() => patch({ hourFormat: 12 })}
+                >
+                  12H
+                </button>
+              </div>
+            ) : null}
             <label className="clock-controls__check">
               <input
                 type="checkbox"

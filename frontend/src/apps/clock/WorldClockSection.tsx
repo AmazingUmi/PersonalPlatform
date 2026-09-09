@@ -1,13 +1,13 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { api } from "../../shared/api";
 import { useAsync } from "../../shared/useAsync";
 import { useMutation } from "../../shared/useMutation";
 import { EmptyState } from "../../shared/ui/EmptyState";
 import { LoadingState } from "../../shared/ui/LoadingState";
 import { PixelButton } from "../../shared/ui/PixelButton";
-import { PixelInput } from "../../shared/ui/PixelInput";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { formatOffsetDiff, formatZoneTime, zoneDayDiff, zoneOffsetMinutes } from "./timeMath";
+import { WORLD_CITY_PRESETS, findWorldCityPreset, worldCityValue } from "./worldCities";
 
 export interface WorldClockView {
   id: string;
@@ -20,47 +20,25 @@ export interface WorldClockView {
 
 const WORLD_CLOCKS_URL = "/api/apps/clock/world-clocks";
 
-/** Common suggestions for the datalist; the full IANA set is used when available. */
-const COMMON_ZONES = [
-  "Asia/Shanghai",
-  "Asia/Tokyo",
-  "Asia/Singapore",
-  "Asia/Dubai",
-  "Europe/London",
-  "Europe/Paris",
-  "Europe/Berlin",
-  "America/New_York",
-  "America/Chicago",
-  "America/Los_Angeles",
-  "Australia/Sydney",
-  "Pacific/Auckland",
-];
-
-function timezoneOptions(): string[] {
-  try {
-    const supported = Intl.supportedValuesOf?.("timeZone");
-    return supported && supported.length > 0 ? [...supported] : COMMON_ZONES;
-  } catch {
-    return COMMON_ZONES;
-  }
-}
-
 /**
  * World clock list. Every entry stores an IANA zone name (never an offset),
  * so DST transitions, cross-day and half-hour zones are all resolved by Intl
  * at display time. The list re-renders from the parent's minute tick.
+ *
+ * Adding is preset-driven: city and timezone are bound pairs picked from a
+ * dropdown (worldCities.ts), so a mismatched combination can never be saved.
  */
 export function WorldClockSection({ now }: { now: Date }) {
   const clocks = useAsync(() => api<{ items: WorldClockView[] }>(WORLD_CLOCKS_URL));
-  const [city, setCity] = useState("");
-  const [timezone, setTimezone] = useState("");
-  const datalistId = "clock-timezone-options";
+  const [presetValue, setPresetValue] = useState("");
+  const preset = findWorldCityPreset(presetValue);
 
   const add = useMutation(async () => {
+    if (!preset) return;
     await api(WORLD_CLOCKS_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ city: city.trim(), timezone: timezone.trim() }),
+      body: JSON.stringify({ city: preset.city, timezone: preset.timezone }),
     });
   });
 
@@ -79,7 +57,7 @@ export function WorldClockSection({ now }: { now: Date }) {
     const target = index + delta;
     if (target < 0 || target >= items.length) return;
     const ids = items.map((entry) => entry.id);
-    [ids[index], ids[target]] = [ids[target]!, ids[index]!];
+    [ids[index], ids[target]] = [ids[target], ids[index]!];
     try {
       await api(`${WORLD_CLOCKS_URL}/order`, {
         method: "PUT",
@@ -91,8 +69,9 @@ export function WorldClockSection({ now }: { now: Date }) {
     }
   };
 
-  const canAdd = city.trim().length > 0 && timezone.trim().length > 0;
-  const zoneOptions = useMemo(() => timezoneOptions(), []);
+  const alreadyAdded =
+    preset !== undefined && items.some((entry) => entry.city === preset.city && entry.timezone === preset.timezone);
+  const canAdd = preset !== undefined && !alreadyAdded;
 
   return (
     <div className="clock-world">
@@ -173,41 +152,30 @@ export function WorldClockSection({ now }: { now: Date }) {
         onSubmit={async (event) => {
           event.preventDefault();
           if (!(await add.mutate())) return;
-          setCity("");
-          setTimezone("");
+          setPresetValue("");
           clocks.reload();
         }}
       >
-        <datalist id={datalistId}>
-          {zoneOptions.map((zone) => (
-            <option key={zone} value={zone} />
-          ))}
-        </datalist>
-        <div className="px-form__grid">
-          <label className="px-form__row">
-            <span className="px-form__label">City</span>
-            <PixelInput
-              type="text"
-              value={city}
-              maxLength={60}
-              placeholder="Tokyo"
-              onChange={(event) => setCity(event.target.value)}
-              aria-label="City name"
-            />
-          </label>
-          <label className="px-form__row">
-            <span className="px-form__label">Timezone (IANA)</span>
-            <PixelInput
-              type="text"
-              value={timezone}
-              maxLength={64}
-              placeholder="Asia/Tokyo"
-              list={datalistId}
-              onChange={(event) => setTimezone(event.target.value)}
-              aria-label="IANA timezone"
-            />
-          </label>
-        </div>
+        <label className="px-form__row">
+          <span className="px-form__label">City (timezone bound)</span>
+          <select
+            className="px-select"
+            value={presetValue}
+            onChange={(event) => setPresetValue(event.target.value)}
+            aria-label="City and timezone"
+          >
+            <option value="">Select a city…</option>
+            {WORLD_CITY_PRESETS.map((entry) => (
+              <option key={worldCityValue(entry)} value={worldCityValue(entry)}>
+                {entry.city} · {entry.timezone}
+              </option>
+            ))}
+          </select>
+        </label>
+        {preset ? <p className="clock-world__add-hint">Binds {preset.city} to {preset.timezone}.</p> : null}
+        {alreadyAdded ? (
+          <p className="clock-world__add-hint">{preset?.city} is already on the list.</p>
+        ) : null}
         {add.error ? (
           <StatusMessage tone="error">
             <p>{add.error}</p>
