@@ -143,9 +143,9 @@
   transition:
     background-color var(--motion-fast) linear,
     border-color var(--motion-fast) linear,
-    box-shadow var(--motion-fast) steps(1),
+    box-shadow var(--motion-fast) steps(2),
     color var(--motion-fast) linear,
-    transform var(--motion-fast) steps(2);
+    transform var(--motion-fast) steps(4);
 }
 
 .dock__item::before {
@@ -154,7 +154,7 @@
   color: var(--px-primary);
   visibility: hidden;
   transform: translateX(calc(-1 * var(--motion-distance-xs)));
-  transition: transform var(--motion-fast) steps(2);
+  transition: transform var(--motion-fast) steps(4);
 }
 
 .dock__item .px-icon {
@@ -228,7 +228,7 @@
    * wider than the viewport (320px no-overflow guarantee). */
   grid-template-columns: minmax(0, 1fr);
   gap: var(--space-6);
-  animation: px-page-enter var(--motion-normal) steps(3, end);
+  animation: px-page-enter var(--motion-normal) steps(7, end);
 }
 
 .page > * {
@@ -257,13 +257,13 @@
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: var(--px-ink);
-  animation: px-page-header-enter var(--motion-fast) steps(2, end) var(--motion-fast) backwards;
+  animation: px-page-header-enter var(--motion-fast) steps(4, end) var(--motion-fast) backwards;
 }
 
 .page-header__subtitle {
   font-size: var(--text-sm);
   color: var(--px-ink-muted);
-  animation: px-page-header-enter var(--motion-fast) steps(2, end) calc(var(--motion-fast) + var(--motion-stagger)) backwards;
+  animation: px-page-header-enter var(--motion-fast) steps(4, end) calc(var(--motion-fast) + var(--motion-stagger)) backwards;
 }
 
 /* ---------- Mobile navigation (< 600px) ---------- */
@@ -440,12 +440,12 @@
     background: var(--px-surface);
     border: var(--border-2) solid var(--px-border);
     box-shadow: var(--shadow-pixel);
-    animation: mobile-nav-panel-in var(--motion-normal) steps(3, end);
+    animation: mobile-nav-panel-in var(--motion-normal) steps(7, end);
   }
 
   .mobile-nav__panel--closing {
     pointer-events: none;
-    animation: mobile-nav-panel-out var(--motion-normal) steps(3, end) forwards;
+    animation: mobile-nav-panel-out var(--motion-normal) steps(7, end) forwards;
   }
 
   .mobile-nav__panel-list {
@@ -502,7 +502,7 @@
  * step while its inner wrapper micro-scales (Anime.js pickUp preset). */
 .dashboard-card .px-window {
   transition:
-    box-shadow var(--motion-fast) steps(1),
+    box-shadow var(--motion-fast) steps(2),
     filter var(--motion-fast) linear;
 }
 
@@ -547,7 +547,7 @@
   font-size: var(--text-xs);
   color: var(--px-ink-soft);
   pointer-events: none;
-  animation: px-resize-badge-in var(--motion-fast) steps(2, end);
+  animation: px-resize-badge-in var(--motion-fast) steps(4, end);
 }
 
 @keyframes px-resize-badge-in {
@@ -584,7 +584,7 @@
  * button itself would shrink its hit area to zero for the first frames and
  * swallow pointer drags (dnd-kit listeners live on the button). */
 .drag-handle .px-icon {
-  animation: px-handle-pop var(--motion-fast) steps(2, end);
+  animation: px-handle-pop var(--motion-fast) steps(4, end);
 }
 
 .drag-handle:active {
@@ -610,7 +610,7 @@
   touch-action: none;
   /* Opacity-only entrance: unlike a scale pop this never changes the hit
    * area, so pointer resizes register from the very first frame. */
-  animation: px-handle-fade-in var(--motion-fast) steps(2, end);
+  animation: px-handle-fade-in var(--motion-fast) steps(4, end);
 }
 
 @keyframes px-handle-pop {
@@ -628,7 +628,7 @@
 /* Entering Edit Layout: a short accent flash over the canvas grid reads as
  * "layout unlocked" without moving any widget. */
 .dashboard-canvas--editing {
-  animation: px-edit-flash var(--motion-normal) steps(2, end);
+  animation: px-edit-flash var(--motion-normal) steps(7, end);
 }
 
 @keyframes px-edit-flash {

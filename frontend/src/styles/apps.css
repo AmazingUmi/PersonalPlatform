@@ -268,7 +268,7 @@
   border-bottom: var(--border-1) solid var(--px-border-soft);
   /* New-row entrance only: keyed <li> means the keyframe runs solely on
    * mounted rows (new task / initial load), never on reorder or filter. */
-  animation: px-row-in var(--motion-normal) steps(3, end);
+  animation: px-row-in var(--motion-normal) steps(7, end);
 }
 
 .task:last-child {
@@ -501,7 +501,7 @@
   box-shadow: 3px 3px 0 var(--px-shadow);
   /* Mount entrance (keyed <li> — new cards / initial grid only). The one-shot
    * animation outranks the hover transform only while it runs (140ms). */
-  animation: px-row-in var(--motion-normal) steps(3, end);
+  animation: px-row-in var(--motion-normal) steps(7, end);
   transition:
     transform var(--motion-fast) steps(1),
     box-shadow var(--motion-fast) steps(1);
@@ -729,7 +729,7 @@
 /* Game over: short pixel shake via the independent `translate` property
  * (the board itself never uses transform). Ends at the natural state. */
 .game__board--over {
-  animation: game-over-pulse var(--motion-slow) steps(2, end);
+  animation: game-over-pulse var(--motion-slow) steps(10, end);
 }
 
 .game__cell {
@@ -790,7 +790,7 @@
   font-size: var(--text-lg);
   line-height: 1;
   color: var(--px-ink);
-  transition: transform var(--motion-normal) steps(3, end);
+  transition: transform var(--motion-normal) steps(7, end);
 }
 
 .game__tile--2 { background: var(--px-surface); }
@@ -831,7 +831,7 @@
 }
 
 .game__tile[data-spawn] {
-  animation: game-spawn-in var(--motion-fast) steps(2, end);
+  animation: game-spawn-in var(--motion-fast) steps(4, end);
 }
 
 @keyframes game-merge-pop {
@@ -1414,7 +1414,7 @@
   color: var(--px-ink);
   text-decoration: none;
   /* Mount entrance (keyed cards — new notes / initial timeline only). */
-  animation: px-row-in var(--motion-normal) steps(3, end);
+  animation: px-row-in var(--motion-normal) steps(7, end);
   transition:
     transform var(--motion-fast) steps(1),
     box-shadow var(--motion-fast) steps(1);
@@ -1680,7 +1680,7 @@
  * override in base.css simply leaves the face fully visible. */
 
 .clock-face {
-  animation: clock-face-in var(--motion-fast) steps(2, end);
+  animation: clock-face-in var(--motion-fast) steps(4, end);
 }
 
 /* Digital face */
@@ -2258,6 +2258,17 @@
   gap: var(--space-3);
   padding-top: var(--space-3);
   border-top: var(--border-1) solid var(--px-border-soft);
+}
+
+.clock-world__add .px-select {
+  width: 100%;
+}
+
+/* Binding hint under the city dropdown (city ↔ timezone are preset pairs). */
+.clock-world__add-hint {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
 }
 
 /* Narrow dashboard cards: keep the face legible, drop the secondary text. */

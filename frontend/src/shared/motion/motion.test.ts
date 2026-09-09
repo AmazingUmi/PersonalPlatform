@@ -134,7 +134,7 @@ describe("entrance presets", () => {
         opacity: [0, 1],
         translateY: [MOTION_DISTANCE.sm, 0],
         duration: MOTION_DURATION.normal,
-        ease: PIXEL_EASE.snap3,
+        ease: PIXEL_EASE.snap7,
       }),
     );
   });

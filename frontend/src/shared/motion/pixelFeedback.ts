@@ -29,7 +29,7 @@ export function blink(target: MotionTarget, scope?: MotionScope): void {
     {
       opacity: [1, 0.35, 1],
       duration: MOTION_DURATION.fast,
-      ease: PIXEL_EASE.snap2,
+      ease: PIXEL_EASE.snap4,
     },
     scope,
   );
@@ -43,7 +43,7 @@ export function shake(target: MotionTarget, scope?: MotionScope): void {
     {
       translateX: [0, -3, 3, -2, 2, 0],
       duration: MOTION_DURATION.normal,
-      ease: PIXEL_EASE.snap2,
+      ease: PIXEL_EASE.snap7,
     },
     scope,
   );
@@ -56,7 +56,7 @@ export function pickUp(target: MotionTarget, scope?: MotionScope): void {
     {
       scale: [1, MOTION_SCALE.lift],
       duration: MOTION_DURATION.fast,
-      ease: PIXEL_EASE.snap2,
+      ease: PIXEL_EASE.snap4,
     },
     scope,
   );
@@ -69,7 +69,7 @@ export function dropSnap(target: MotionTarget, scope?: MotionScope): void {
     {
       scale: [MOTION_SCALE.lift, MOTION_SCALE.settle, 1],
       duration: MOTION_DURATION.normal,
-      ease: PIXEL_EASE.snap4,
+      ease: PIXEL_EASE.snap7,
     },
     scope,
   );
@@ -82,7 +82,7 @@ export function resizeSnap(target: MotionTarget, scope?: MotionScope): void {
     {
       scale: [1, MOTION_SCALE.settle, 1],
       duration: MOTION_DURATION.fast,
-      ease: PIXEL_EASE.snap2,
+      ease: PIXEL_EASE.snap4,
     },
     scope,
   );
@@ -96,7 +96,7 @@ export function tick(target: MotionTarget, scope?: MotionScope): void {
       translateY: [MOTION_DISTANCE.xs, 0],
       opacity: [0.4, 1],
       duration: MOTION_DURATION.fast,
-      ease: PIXEL_EASE.snap2,
+      ease: PIXEL_EASE.snap4,
     },
     scope,
   );

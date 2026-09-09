@@ -10,6 +10,11 @@ import { expect, test, type Page } from "@playwright/test";
 
 const CORE = "http://127.0.0.1:8902";
 
+/** The canonical legacy layout platform.spec starts from — restored at the
+ * end of the dashboard test so downstream specs (which may run without the
+ * intervening files in subset runs) see the canonical widgets. */
+const CANONICAL_LAYOUT = ["assets:summary", "mini_game:highscore", "tasks:today", "focus:timer"];
+
 const MOTION_LAYOUT = {
   version: 2,
   items: {
@@ -92,7 +97,9 @@ test.describe("prefers-reduced-motion: reduce", () => {
     await expect(dialog).not.toBeVisible();
     await expect(page.locator(".dashboard-card [data-widget-key]")).toHaveCount(6);
 
-    await seedLayout(page, MOTION_LAYOUT);
+    // Restore the canonical layout so subsequent specs are not affected by
+    // this suite's MOTION_LAYOUT (which hides the validation widgets).
+    await seedLayout(page, CANONICAL_LAYOUT);
   });
 
   test("app center, mobile nav and mini game work without animation", async ({ page }) => {
@@ -193,5 +200,11 @@ test("mini game: rapid input keeps the board consistent and saves", async ({ pag
   // The score never decreases and the save lands after the burst.
   const tiles = await readTiles();
   assert(tiles.every((tile) => Number.isFinite(tile.value) && tile.value > 0), "tiles carry values");
+  await expect(page.getByText(/saved/i)).toBeVisible({ timeout: 10_000 });
+
+  // Restore the fresh-board state platform.spec's mini game test expects:
+  // its `>=` count assertion is only stable on a non-double-merge board, and
+  // a random burst board can merge two pairs in one move.
+  await page.getByRole("button", { name: "New Game" }).click();
   await expect(page.getByText(/saved/i)).toBeVisible({ timeout: 10_000 });
 });

@@ -708,13 +708,13 @@ a.px-button:hover {
 .px-dialog {
   width: min(420px, 100%);
   margin: auto;
-  animation: px-dialog-enter var(--motion-normal) steps(3, end);
+  animation: px-dialog-enter var(--motion-normal) steps(7, end);
 }
 
 .px-dialog__message,
 .px-dialog__actions,
 .px-dialog .px-form > * {
-  animation: px-dialog-control-enter var(--motion-fast) steps(2, end) backwards;
+  animation: px-dialog-control-enter var(--motion-fast) steps(4, end) backwards;
 }
 
 .px-dialog__message,

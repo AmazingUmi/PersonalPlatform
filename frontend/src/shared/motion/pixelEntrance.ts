@@ -17,7 +17,7 @@ export function pageEnter(target: MotionTarget, scope?: MotionScope): void {
       opacity: [0, 1],
       translateY: [MOTION_DISTANCE.sm, 0],
       duration: MOTION_DURATION.normal,
-      ease: PIXEL_EASE.snap3,
+      ease: PIXEL_EASE.snap7,
     },
     scope,
   );
@@ -32,7 +32,7 @@ export function windowEnter(target: MotionTarget, scope?: MotionScope): void {
       translateY: [MOTION_DISTANCE.xs, 0],
       scale: [MOTION_SCALE.dialog, 1],
       duration: MOTION_DURATION.normal,
-      ease: PIXEL_EASE.snap3,
+      ease: PIXEL_EASE.snap7,
     },
     scope,
   );
@@ -46,7 +46,7 @@ export function faceEnter(target: MotionTarget, scope?: MotionScope): void {
       opacity: [0, 1],
       scale: [MOTION_SCALE.entrance, 1],
       duration: MOTION_DURATION.fast,
-      ease: PIXEL_EASE.snap2,
+      ease: PIXEL_EASE.snap4,
     },
     scope,
   );
@@ -81,7 +81,7 @@ export function listStagger(
         scale: [MOTION_SCALE.entrance, 1],
         duration: MOTION_DURATION.normal,
         delay: index * step,
-        ease: PIXEL_EASE.snap3,
+        ease: PIXEL_EASE.snap7,
       },
       scope,
     );

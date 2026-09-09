@@ -101,6 +101,13 @@ entrance 0.98. Durations stay inside the guide §29 band (80–160ms; `slow` is
 reserved for overlay pulses). No magic durations in call sites — everything
 goes through tokens/presets.
 
+**Easing ladder — 20ms frames.** Every stepped ease keeps one intermediate
+frame per 20ms (~50fps): `fast` 80ms → `steps(4, end)`, `normal` 140ms →
+`steps(7, end)`, `slow` 200ms → `steps(10, end)` (`PIXEL_EASE.snap4/snap7/
+snap10`; the same counts apply to the CSS `steps()` declarations). Movement
+stays quantized — the pixel feel — but dense enough to read as smooth; linear
+easing is reserved for opacity-only fades and the focus progress fill.
+
 ## 6. Reduced-motion strategy
 
 - **CSS side**: the pre-existing global kill-switch in `base.css`
@@ -128,7 +135,8 @@ goes through tokens/presets.
    on a state flip, or an event handler): `pop(iconEl)`, `blink(iconEl)`,
    `shake(wrapperEl)` — no scope needed for one-shots.
 3. **CSS-side**: new keyframes must use `var(--motion-*)` durations and
-   `steps(n, end)` easing, and end at the element's natural state.
+   `steps(n, end)` easing at the 20ms-frame density (fast=4 / normal=7 /
+   slow=10 steps), and end at the element's natural state.
 4. **Never** let a completion callback, `setTimeout`, or animation state drive
    business logic; animations observe state, never produce it.
 
