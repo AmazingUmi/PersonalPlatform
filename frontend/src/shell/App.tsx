@@ -10,6 +10,7 @@ import { PixelWindow } from "../shared/ui/PixelWindow";
 import { StatusMessage } from "../shared/ui/StatusMessage";
 import { AppCenter } from "./AppCenter";
 import { AppDock } from "./AppDock";
+import { AppStatusProvider } from "./AppStatusContext";
 import { Dashboard } from "./Dashboard";
 import { MobileNav } from "./MobileNav";
 import { NotFound } from "./NotFound";
@@ -113,48 +114,50 @@ export function App() {
   return (
     <BrowserRouter>
       <PresentationProvider value={overrides}>
-        <div className="shell">
-          <a className="skip-link" href="#shell-content">
-            Skip to content
-          </a>
-          <TopBar apps={apps} />
-          <div className="shell__workspace">
-            <AppDock apps={enabled} presentation={overrides} />
-            <main className="shell__content" id="shell-content" tabIndex={-1} aria-busy={refreshing}>
-              {refreshError ? (
-                <StatusMessage tone="error">
-                  <p>Refresh failed: {refreshError} — showing previously loaded data.</p>
-                  <PixelButton variant="secondary" size="sm" onClick={retryRefresh}>
-                    Retry
-                  </PixelButton>
-                </StatusMessage>
-              ) : refreshing ? (
-                <p className="muted" role="status">
-                  Refreshing…
-                </p>
-              ) : null}
-              <Routes>
-                <Route path="/" element={<Dashboard apps={apps} presentation={overrides} />} />
-                <Route
-                  path="/apps"
-                  element={
-                    <AppCenter
-                      apps={apps}
-                      presentation={overrides}
-                      onChanged={() => setRefreshKey((key) => key + 1)}
-                    />
-                  }
-                />
-                <Route path="/settings" element={<Settings apps={apps} />} />
-                {routes.map((route) => (
-                  <Route key={route.path} path={route.path} element={route.element} />
-                ))}
-                <Route path="*" element={<NotFound />} />
-              </Routes>
-            </main>
+        <AppStatusProvider modules={modules}>
+          <div className="shell">
+            <a className="skip-link" href="#shell-content">
+              Skip to content
+            </a>
+            <TopBar apps={apps} />
+            <div className="shell__workspace">
+              <AppDock apps={enabled} presentation={overrides} />
+              <main className="shell__content" id="shell-content" tabIndex={-1} aria-busy={refreshing}>
+                {refreshError ? (
+                  <StatusMessage tone="error">
+                    <p>Refresh failed: {refreshError} — showing previously loaded data.</p>
+                    <PixelButton variant="secondary" size="sm" onClick={retryRefresh}>
+                      Retry
+                    </PixelButton>
+                  </StatusMessage>
+                ) : refreshing ? (
+                  <p className="muted" role="status">
+                    Refreshing…
+                  </p>
+                ) : null}
+                <Routes>
+                  <Route path="/" element={<Dashboard apps={apps} presentation={overrides} />} />
+                  <Route
+                    path="/apps"
+                    element={
+                      <AppCenter
+                        apps={apps}
+                        presentation={overrides}
+                        onChanged={() => setRefreshKey((key) => key + 1)}
+                      />
+                    }
+                  />
+                  <Route path="/settings" element={<Settings apps={apps} />} />
+                  {routes.map((route) => (
+                    <Route key={route.path} path={route.path} element={route.element} />
+                  ))}
+                  <Route path="*" element={<NotFound />} />
+                </Routes>
+              </main>
+            </div>
+            <MobileNav apps={enabled} presentation={overrides} />
           </div>
-          <MobileNav apps={enabled} presentation={overrides} />
-        </div>
+        </AppStatusProvider>
       </PresentationProvider>
     </BrowserRouter>
   );

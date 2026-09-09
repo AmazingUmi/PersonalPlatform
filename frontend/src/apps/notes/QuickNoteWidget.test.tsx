@@ -194,3 +194,18 @@ describe("QuickNoteWidget density (Phase 10)", () => {
     expect(screen.getByLabelText("Quick note content")).toHaveAttribute("rows", "3");
   });
 });
+
+describe("status provider (shell chips)", () => {
+  it("maps the summary note count to a chip, hidden at zero", async () => {
+    const { status } = (await import("./index")).default;
+    let body: { total: number } = { total: 12 };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(body)));
+    await expect(status!.load()).resolves.toEqual([
+      { id: "total", label: "12", tone: "neutral", title: "12 notes" },
+    ]);
+
+    body = { total: 0 };
+    await expect(status!.load()).resolves.toEqual([]);
+    vi.unstubAllGlobals();
+  });
+});

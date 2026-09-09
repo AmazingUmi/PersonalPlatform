@@ -12,9 +12,11 @@ import { PixelBadge, type BadgeTone } from "../../shared/ui/PixelBadge";
 import { PixelButton } from "../../shared/ui/PixelButton";
 import { PixelIcon } from "../../shared/ui/PixelIcon";
 import { PixelInput } from "../../shared/ui/PixelInput";
+import { PixelMeter } from "../../shared/ui/PixelMeter";
 import { PixelWindow } from "../../shared/ui/PixelWindow";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { useAsync } from "../../shared/useAsync";
+import { usePulseOnChange } from "../../shared/motion/usePulseOnChange";
 
 interface Task {
   id: string;
@@ -715,6 +717,16 @@ interface PublicStatusView {
   today: { remainingCount: number };
 }
 
+/** /summary response. doneToday/overdueBeforeToday are the disjoint meter
+ * segments (see the backend route) — additive, older payloads default 0. */
+interface TasksSummaryView {
+  today: number;
+  overdue: number;
+  done: number;
+  doneToday?: number;
+  overdueBeforeToday?: number;
+}
+
 const PUBLIC_STATUS_URL = "/api/apps/tasks/public/status";
 const SUMMARY_URL = "/api/apps/tasks/summary";
 
@@ -741,10 +753,14 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
   const summary = useAsync(
     () =>
       wantSummary
-        ? api<{ today: number; overdue: number; done: number }>(SUMMARY_URL)
+        ? api<TasksSummaryView>(SUMMARY_URL)
         : Promise.resolve(null),
     [density],
   );
+  // Counter pulses (motion system): one pop when a number actually changes.
+  const todayPulse = usePulseOnChange<number, HTMLSpanElement>(summary.data?.today ?? 0);
+  const overduePulse = usePulseOnChange<number, HTMLSpanElement>(summary.data?.overdue ?? 0);
+  const donePulse = usePulseOnChange<number, HTMLSpanElement>(summary.data?.done ?? 0);
   if ((wantStatus && status.loading) || (wantSummary && summary.loading)) {
     return <LoadingState label="Loading…" />;
   }
@@ -776,22 +792,38 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
   }
 
   const data = summary.data ?? { today: 0, overdue: 0, done: 0 };
+  // Today's completion meter over DISJOINT segments (backend contract):
+  // completed today + still open due today + still open from before today.
+  const doneToday = data.doneToday ?? 0;
+  const meterTotal = doneToday + data.today + (data.overdueBeforeToday ?? 0);
+  const meterPercent = meterTotal > 0 ? Math.round((doneToday / meterTotal) * 100) : 0;
   return (
     <div className="tasks-widget">
       <div className="px-stats">
         <div className="px-stat">
           <span className="px-stat__label">Today</span>
-          <span className="px-stat__value">{pad(data.today)}</span>
+          <span className="px-stat__value" ref={todayPulse}>{pad(data.today)}</span>
         </div>
         <div className="px-stat px-stat--danger">
           <span className="px-stat__label">Overdue</span>
-          <span className="px-stat__value">{pad(data.overdue)}</span>
+          <span className="px-stat__value" ref={overduePulse}>{pad(data.overdue)}</span>
         </div>
         <div className="px-stat px-stat--success">
           <span className="px-stat__label">Done</span>
-          <span className="px-stat__value">{data.done}</span>
+          <span className="px-stat__value" ref={donePulse}>{data.done}</span>
         </div>
       </div>
+      {meterTotal > 0 ? (
+        <div className="tasks-widget__progress">
+          <PixelMeter
+            value={doneToday}
+            max={meterTotal}
+            accent="mint"
+            label={`Today: ${doneToday} of ${meterTotal} done`}
+          />
+          <span className="tasks-widget__progress-value">{meterPercent}%</span>
+        </div>
+      ) : null}
       {density === "expanded" ? (
         <div className="tasks-widget__status">
           <p className="tasks-widget__row">
@@ -832,6 +864,16 @@ const app: FrontendAppModule = {
       },
     },
   ],
+  status: {
+    // Dock/top-bar chip: open tasks due today (hidden at zero — an empty
+    // day needs no badge). Same /summary endpoint the widget already uses.
+    load: async () => {
+      const summary = await api<{ today: number }>("/api/apps/tasks/summary");
+      return summary.today > 0
+        ? [{ id: "today", label: String(summary.today), tone: "info", title: `${summary.today} tasks due today` }]
+        : [];
+    },
+  },
 };
 
 export default app;

@@ -265,6 +265,16 @@ async function registerApi(ctx: AppContext): Promise<void> {
     },
   );
 
+  // Lightweight count surface for shell chrome (dock badge / status chip):
+  // the list route materializes every note just to expose `total`, so
+  // polling it from the navigation would be wasteful.
+  ctx.api.get("/summary", async () => {
+    const { rows } = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM notes.notes",
+    );
+    return { total: Number(rows[0]?.count ?? 0) };
+  });
+
   ctx.api.post<{
     Body: {
       content: string;

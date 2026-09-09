@@ -539,6 +539,12 @@ body {
 - 不能影响文字识别；
 - 内容面板保持不透明。
 
+## 7.1 Paper Grain（FE Final Polish 更新）
+
+网格之上再叠一层接近不可见的纸纹噪点（内联 SVG feTurbulence
+data-URI，约 5% alpha，作为 body 的第一个 background 层）。纯 CSS、
+无外部资源、不参与布局；不透明 surface 之下不受影响。
+
 ---
 
 # 8. Shell 架构
@@ -583,22 +589,25 @@ body {
 [ Pixel Logo ] PersonalPlatform   [ Page Title ]    [ Status ]
 ```
 
+Status 区（FE Final Polish 更新）按真实数据渲染，从左到右：
+
+```text
+[ TASKS 4 ] [ FOCUS ● ] [ 6 apps active ] [ 22:34 ]
+```
+
+- per-app 状态 chip 来自 app 模块的可选 `status` provider
+  （真实计数 / 运行标记，零值不渲染）；
+- 分钟级 24h 墙钟；
+- `< 600px` 隐藏 chip 与 apps-active 徽章，只保留时钟
+  （app 数量可从 More 面板 / App Center 获得）。
+
 可选后续功能：
 
 ```text
 Search
 Command Palette
-Clock
 Theme
 Profile
-```
-
-第一版不要全部实现。
-
-建议第一版：
-
-```text
-Logo + 当前页面名称 + Core 状态
 ```
 
 ---
@@ -655,7 +664,7 @@ APPS
 当前页面使用：
 
 ```text
-▸ TASKS
+▌ TASKS
 ```
 
 或：
@@ -663,6 +672,24 @@ APPS
 ```text
 [■] Tasks
 ```
+
+Active 指示条为 4px 宽实心 accent 色块（`--app-accent`，App Center
+自定义色优先），同时 icon 染 accent；非 active 隐藏指示条。
+
+Live Status Chip（FE Final Polish 更新）——右侧对齐的真实状态：
+
+```text
+ASSETS       32
+CLOCK
+FOCUS        ●
+2048
+NOTES        12
+TASKS         4
+```
+
+- 数据来自 app 模块的可选 `status` provider；零值/无数据不渲染；
+- chip 为 `aria-hidden`（行内可访问名保持 app 名不变）；
+- 64px 图标模式下隐藏 chip，active 改为 inset 3px accent 条。
 
 Dock Item：
 
@@ -1053,6 +1080,33 @@ TODAY      OVERDUE       DONE
 ```
 
 Pixel UI 对数据 dashboard 的展示尤其适合数字分块。
+
+### 低密度可视化（FE Final Polish 更新）
+
+数字分块之下的第二层是分段像素条（`PixelMeter`，div 分段而非字符）：
+
+今日完成进度（Tasks，三个不相交分段的比值——今日完成 + 今日待办 +
+今日窗口前遗留）：
+
+```text
+TODAY 03     OVERDUE 01   DONE 17
+████████░░ 75%
+```
+
+类别分布（Assets，Top-3，相对第一名的占比；无数据自然消失）：
+
+```text
+Electronics  ████████  12
+Books        █████      7
+Others       ██         3
+```
+
+规则：
+
+- 分段数默认 10，填充色用 app accent；
+- 可访问值放在 `role="img"` 的 `aria-label`（"3 of 8 done"），
+  颜色不是唯一通道；
+- 只消费既有数据面，不为可视化新建统计。
 
 ---
 

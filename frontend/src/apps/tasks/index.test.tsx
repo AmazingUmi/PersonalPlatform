@@ -140,13 +140,14 @@ describe("TasksTodayWidget density (Phase 10)", () => {
   }
 
   /** Fetch mock asserting which endpoints each density actually calls. */
-  function setupDensityFetch() {
+  function setupDensityFetch(summary?: Record<string, number>) {
     const calls: string[] = [];
     const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
       const url = String(input);
       calls.push(url);
       if (url === STATUS_URL) return jsonResponse(publicStatus);
-      if (url.includes("/summary")) return jsonResponse({ today: 4, overdue: 1, done: 7 });
+      if (url.includes("/summary"))
+        return jsonResponse(summary ?? { today: 4, overdue: 1, done: 7, doneToday: 3, overdueBeforeToday: 1 });
       return jsonResponse(null, false, 404);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -176,6 +177,26 @@ describe("TasksTodayWidget density (Phase 10)", () => {
     expect(calls).not.toContain(STATUS_URL);
   });
 
+  it("normal renders the today completion meter from disjoint summary segments", async () => {
+    setupDensityFetch({ today: 4, overdue: 1, done: 7, doneToday: 3, overdueBeforeToday: 1 });
+    const { container } = renderWidget("normal");
+
+    expect(await screen.findByText("38%")).toBeDefined();
+    // doneToday 3 of total 8 → round(0.375 * 10) = 4 lit segments.
+    const meter = container.querySelector(".tasks-widget__progress .px-meter");
+    expect(meter).not.toBeNull();
+    expect(meter!.getAttribute("aria-label")).toBe("Today: 3 of 8 done");
+    expect(meter!.querySelectorAll(".px-meter__seg--on")).toHaveLength(4);
+  });
+
+  it("hides the meter when today has no tasks at all", async () => {
+    setupDensityFetch({ today: 0, overdue: 0, done: 0, doneToday: 0, overdueBeforeToday: 0 });
+    const { container } = renderWidget("normal");
+
+    expect(await screen.findByText("Today")).toBeDefined();
+    expect(container.querySelector(".tasks-widget__progress")).toBeNull();
+  });
+
   it("expanded adds the current/next/remaining block on top of the counters", async () => {
     setupDensityFetch();
     renderWidget("expanded");
@@ -196,5 +217,20 @@ describe("TasksTodayWidget density (Phase 10)", () => {
       defaultH: 16,
       density: { normal: { minW: 18, minH: 12 }, expanded: { minW: 26, minH: 16 } },
     });
+  });
+});
+
+describe("status provider (shell chips)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("maps the summary today count to a chip, hidden at zero", async () => {
+    let body: { today: number } = { today: 4 };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(body)));
+    await expect(TasksApp.status!.load()).resolves.toEqual([
+      { id: "today", label: "4", tone: "info", title: "4 tasks due today" },
+    ]);
+
+    body = { today: 0 };
+    await expect(TasksApp.status!.load()).resolves.toEqual([]);
   });
 });

@@ -5,6 +5,8 @@ import { resolvePresentation, type PresentationOverrides } from "../shared/prese
 import { prefersReducedMotion } from "../shared/motion/reducedMotion";
 import { appIconName } from "../shared/ui/appIcons";
 import { PixelIcon } from "../shared/ui/PixelIcon";
+import { StatusChip } from "../shared/ui/StatusChip";
+import { useAppStatuses } from "./AppStatusContext";
 
 /** Keyframe name of the panel exit animation (see shell.css). */
 const PANEL_EXIT_ANIMATION = "mobile-nav-panel-out";
@@ -26,6 +28,7 @@ export function MobileNav({ apps, presentation }: { apps: AppInfo[]; presentatio
   const [closing, setClosing] = useState(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const location = useLocation();
+  const statuses = useAppStatuses();
 
   useEffect(() => {
     setOpen(false);
@@ -108,11 +111,23 @@ export function MobileNav({ apps, presentation }: { apps: AppInfo[]; presentatio
               </li>
               {apps.map((app) => {
                 const resolved = resolvePresentation(app, presentation ?? {});
+                const chips = statuses.get(app.id) ?? [];
                 return (
                   <li key={app.id}>
-                    <NavLink to={app.route} className="mobile-nav__panel-link">
+                    <NavLink
+                      to={app.route}
+                      className="mobile-nav__panel-link"
+                      aria-label={resolved.displayName}
+                    >
                       <PixelIcon name={appIconName(app.id)} />
                       {resolved.displayName}
+                      {chips.length > 0 ? (
+                        <span className="mobile-nav__panel-status" aria-hidden="true">
+                          {chips.map((chip) => (
+                            <StatusChip key={chip.id} chip={chip} />
+                          ))}
+                        </span>
+                      ) : null}
                     </NavLink>
                   </li>
                 );

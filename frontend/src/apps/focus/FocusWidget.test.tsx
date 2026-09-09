@@ -181,3 +181,39 @@ describe("FocusWidget", () => {
     expect(container.querySelectorAll(":not(button)[role='button']")).toHaveLength(0);
   });
 });
+
+describe("widget state visuals (FE polish)", () => {
+  it("marks the wrapper with data-state/data-kind for per-state styling", async () => {
+    let state: FocusState = focusStateFixture(activeSession());
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(state)));
+    const first = render(<FocusWidget />);
+    await act(async () => {});
+
+    let wrapper = first.container.querySelector(".focus-widget") as HTMLElement;
+    expect(wrapper.getAttribute("data-state")).toBe("focusing");
+    expect(wrapper.getAttribute("data-kind")).toBe("focus");
+
+    state = focusStateFixture(activeSession({ status: "paused" }));
+    const second = render(<FocusWidget />);
+    await act(async () => {});
+
+    wrapper = second.container.querySelector(".focus-widget") as HTMLElement;
+    expect(wrapper.getAttribute("data-state")).toBe("paused");
+    first.unmount();
+    second.unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("status provider maps an active session to the ● chip", async () => {
+    const { status } = (await import("./index")).default;
+    let body: FocusState = focusStateFixture(activeSession());
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(body)));
+    await expect(status!.load()).resolves.toEqual([
+      { id: "running", label: "●", tone: "success", title: "Focus session in progress" },
+    ]);
+
+    body = focusStateFixture(null);
+    await expect(status!.load()).resolves.toEqual([]);
+    vi.unstubAllGlobals();
+  });
+});

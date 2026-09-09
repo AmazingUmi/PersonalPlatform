@@ -13,6 +13,7 @@ import { PixelBadge } from "../../shared/ui/PixelBadge";
 import { PixelButton } from "../../shared/ui/PixelButton";
 import { PixelIcon } from "../../shared/ui/PixelIcon";
 import { PixelInput } from "../../shared/ui/PixelInput";
+import { PixelMeter } from "../../shared/ui/PixelMeter";
 import type { PixelAccent } from "../../shared/ui/PixelWindow";
 import { PixelWindow } from "../../shared/ui/PixelWindow";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
@@ -1078,17 +1079,30 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
         : api<ItemsListResponse>("/api/apps/assets/items?sortBy=createdAt&order=desc"),
     [density],
   );
-  if ((compact && summary.loading) || (!compact && list.loading)) {
+  // Names for the top-category meters (counts are keyed by category id).
+  const categories = useAsync(
+    () =>
+      compact
+        ? Promise.resolve(null)
+        : api<{ items: Category[] }>("/api/apps/assets/categories"),
+    [density],
+  );
+  if ((compact && summary.loading) || (!compact && (list.loading || categories.loading))) {
     return <LoadingState label="Loading…" />;
   }
-  const error = (compact ? summary.error : null) ?? (compact ? null : list.error);
+  const error =
+    (compact ? summary.error : null) ?? (compact ? null : (list.error ?? categories.error));
   if (error) {
     return (
       <div className="widget-fallback">
         <StatusMessage tone="error">
           <p>{error}</p>
         </StatusMessage>
-        <PixelButton size="sm" variant="secondary" onClick={compact ? summary.reload : list.reload}>
+        <PixelButton
+          size="sm"
+          variant="secondary"
+          onClick={compact ? summary.reload : (list.error ? list.reload : categories.reload)}
+        >
           Retry
         </PixelButton>
       </div>
@@ -1112,6 +1126,16 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
   }
 
   const data = list.data ?? { items: [], counts: { all: 0, categories: {} } };
+  const categoryNames = new Map((categories.data?.items ?? []).map((category) => [category.id, category.name]));
+  // Top-3 category distribution (guide §18 low-density viz): relative to the
+  // leading category, names resolved from the categories endpoint. Degrades
+  // to nothing when no categorized items exist.
+  const topCategories = Object.entries(data.counts.categories)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([id, count]) => ({ id, name: categoryNames.get(id) ?? "Unknown", count }));
+  const leadingCount = topCategories[0]?.count ?? 1;
   const recent = data.items.slice(0, recentLimit);
   return (
     <div className="assets-widget">
@@ -1125,6 +1149,22 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
           <span className="px-stat__value">{Object.keys(data.counts.categories).length}</span>
         </div>
       </div>
+      {topCategories.length > 0 ? (
+        <ul className="assets-widget__categories">
+          {topCategories.map((category) => (
+            <li key={category.id} className="assets-widget__category-row">
+              <span className="assets-widget__category-name">{category.name}</span>
+              <PixelMeter
+                value={category.count}
+                max={leadingCount}
+                accent="yellow"
+                label={`${category.name}: ${category.count} items, most is ${leadingCount}`}
+              />
+              <span className="assets-widget__category-count">{category.count}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       {recent.length > 0 ? (
         <ul className="assets-widget__recent">
           {recent.map((item) => (
@@ -1164,6 +1204,16 @@ const app: FrontendAppModule = {
       },
     },
   ],
+  status: {
+    // Dock/top-bar chip: tracked item count (hidden at zero). Same
+    // /summary endpoint the compact widget already uses.
+    load: async () => {
+      const summary = await api<{ items: number }>("/api/apps/assets/summary");
+      return summary.items > 0
+        ? [{ id: "items", label: String(summary.items), tone: "neutral", title: `${summary.items} tracked items` }]
+        : [];
+    },
+  },
 };
 
 export default app;

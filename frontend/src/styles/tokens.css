@@ -107,6 +107,9 @@
   --shadow-pixel: 4px 4px 0 var(--px-shadow);
   --shadow-pixel-sm: 2px 2px 0 var(--px-shadow);
   --shadow-pixel-strong: 2px 2px 0 var(--px-border), 4px 4px 0 var(--px-shadow);
+  /* Hover lift for interactive windows/cards (guide §14): translate
+   * -2px,-2px pairs with this +6px shadow so the frame keeps "contact". */
+  --shadow-pixel-hover: 6px 6px 0 var(--px-shadow);
 
   /* Motion — JS side mirrors these in src/shared/motion/motionTokens.ts
    * (lockstep enforced by motionTokens.test.ts). */

@@ -4,6 +4,7 @@ import { LoadingState } from "../../shared/ui/LoadingState";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { AnalogClock } from "./AnalogClock";
 import { DigitalClock, type ClockFocusState } from "./DigitalClock";
+import { humanDuration } from "./timeMath";
 import { useClockNow } from "./useClockNow";
 import { useClockSettings, type ClockSettings } from "./useClockSettings";
 import { fetchTasksPublicStatus } from "./tasksPublic";
@@ -96,7 +97,14 @@ export function ClockWidget({ density = "normal" }: { density?: WidgetDensity })
           </p>
           <p className="clock-card__task">
             <span className="clock-card__task-label">NEXT</span>
-            <span className="clock-card__task-title">{status.data.next ? status.data.next.title : "None"}</span>
+            <span className="clock-card__task-title">
+              {status.data.next ? status.data.next.title : "None"}
+              {status.data.next ? (
+                <span className="clock-card__task-eta">
+                  {" "}in {humanDuration(Date.parse(status.data.next.startAt) - minuteNow.getTime())}
+                </span>
+              ) : null}
+            </span>
           </p>
           <p className="clock-card__count">{moreTodayCount(status.data)} MORE TASKS TODAY</p>
         </div>

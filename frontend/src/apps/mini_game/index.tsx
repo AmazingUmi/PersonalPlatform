@@ -7,6 +7,7 @@ import { PixelButton } from "../../shared/ui/PixelButton";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { LoadingState } from "../../shared/ui/LoadingState";
 import { useAsync } from "../../shared/useAsync";
+import { usePulseOnChange } from "../../shared/motion/usePulseOnChange";
 import logo from "./assets/logo.svg";
 import {
   applyMove,
@@ -245,6 +246,7 @@ export function Game2048() {
 
 function HighScoreWidget() {
   const summary = useAsync(() => api<{ highScore: number }>("/api/apps/mini_game/summary"));
+  const scorePulse = usePulseOnChange<number, HTMLSpanElement>(summary.data?.highScore ?? 0);
   if (summary.loading) return <LoadingState label="Loading…" />;
   if (summary.error) {
     return (
@@ -256,11 +258,16 @@ function HighScoreWidget() {
     );
   }
   return (
-    <div className="px-stats">
-      <div className="px-stat">
-        <span className="px-stat__label">High Score</span>
-        <span className="px-stat__value px-stat__value--lg">{summary.data?.highScore ?? 0}</span>
+    <div className="game-widget">
+      <div className="px-stats">
+        <div className="px-stat">
+          <span className="px-stat__label">High Score</span>
+          <span className="px-stat__value px-stat__value--lg" ref={scorePulse}>
+            {summary.data?.highScore ?? 0}
+          </span>
+        </div>
       </div>
+      <p className="game-widget__hint">Beat it on the board.</p>
     </div>
   );
 }

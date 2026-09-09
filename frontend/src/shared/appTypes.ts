@@ -72,8 +72,36 @@ export interface WidgetDefinition {
   render: (context?: WidgetRenderContext) => ReactNode;
 }
 
+/**
+ * One live status fact an app wants the shell chrome (dock badge, top-bar
+ * chip) to display. Purely informational: the shell renders label/tone
+ * generically and never interprets app semantics.
+ */
+export interface AppStatusChip {
+  /** Stable id within the app (e.g. "today") — dedupe/keys only. */
+  id: string;
+  /** Compact text: a count ("4"), a dot ("●"), never a sentence. */
+  label: string;
+  tone: "neutral" | "info" | "success" | "warning" | "danger";
+  /** Accessible explanation for hover/AT (e.g. "3 tasks due today"). */
+  title?: string;
+}
+
+/**
+ * Optional app → shell status feed. `load` is called on shell refresh
+ * triggers (mount, route change, window focus, 60s visible interval);
+ * `subscribe` lets an app push updates (e.g. its BroadcastChannel).
+ * Failures hide the app's chips — status is decorative, never an error
+ * surface.
+ */
+export interface AppStatusProvider {
+  load: () => Promise<AppStatusChip[]>;
+  subscribe?: (onChange: () => void) => () => void;
+}
+
 export interface FrontendAppModule {
   id: string;
   routes: AppRoute[];
   widgets?: WidgetDefinition[];
+  status?: AppStatusProvider;
 }

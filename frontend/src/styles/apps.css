@@ -393,6 +393,28 @@
   margin: 0;
 }
 
+/* Today completion meter: segmented bar + percent, one line. Sits directly
+ * under the Today/Overdue/Done counters and reads as their summary. */
+.tasks-widget__progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.tasks-widget__progress .px-meter {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.tasks-widget__progress-value {
+  flex: none;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  color: var(--px-ink);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------- Assets ---------- */
 
 .assets-toolbar {
@@ -404,6 +426,45 @@
 .assets-widget {
   display: grid;
   gap: var(--space-3);
+}
+
+/* Top-3 category distribution rows: name + relative meter + count. */
+.assets-widget__categories {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.assets-widget__category-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.assets-widget__category-name {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+}
+
+.assets-widget__category-row .px-meter {
+  flex: 0 1 88px;
+}
+
+.assets-widget__category-count {
+  flex: none;
+  min-width: 2ch;
+  text-align: right;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .assets-widget__recent {
@@ -865,6 +926,30 @@
 
 .game__hint {
   margin-top: var(--space-3);
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--px-ink-muted);
+}
+
+/* High-score dashboard widget: framed stat + one-line nudge. */
+.game-widget {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.game-widget .px-stat {
+  border-color: var(--px-violet);
+  background: var(--px-violet-light);
+}
+
+.game-widget .px-stat__value--lg {
+  color: var(--px-violet-text);
+}
+
+.game-widget__hint {
+  margin: 0;
   font-family: var(--font-pixel);
   font-size: var(--text-xs);
   letter-spacing: 0.04em;
@@ -1342,11 +1427,80 @@
 }
 
 .focus-widget__state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   font-family: var(--font-pixel);
   font-size: var(--text-xs);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--px-ink-muted);
+  transition: color var(--motion-fast) linear;
+}
+
+/* State lamp: an 8px status LED in front of the state line — neutral when
+ * ready, coral (blinking) while focusing, warning amber when paused. Color
+ * never carries the state alone: the text label does. */
+.focus-widget__state::before {
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  background: var(--px-ink-soft);
+  transition: background-color var(--motion-fast) linear;
+}
+
+.focus-widget[data-state="focusing"] .focus-widget__state,
+.focus-widget[data-state="focusing"] .focus-widget__time {
+  color: var(--px-coral-text);
+}
+
+.focus-widget[data-state="focusing"] .focus-widget__state::before {
+  background: var(--px-coral);
+  animation: focus-lamp-blink 2s steps(1, end) infinite;
+}
+
+.focus-widget[data-state="paused"] .focus-widget__state,
+.focus-widget[data-state="paused"] .focus-widget__time {
+  color: var(--px-warning-text);
+}
+
+.focus-widget[data-state="paused"] .focus-widget__state::before {
+  background: var(--px-warning);
+}
+
+/* Break sessions (running or queued next) read info-blue regardless of
+ * run state, so FOCUS vs BREAK is distinguishable at a glance. */
+.focus-widget[data-kind="short_break"] .focus-widget__state,
+.focus-widget[data-kind="long_break"] .focus-widget__state,
+.focus-widget[data-kind="short_break"] .focus-widget__time,
+.focus-widget[data-kind="long_break"] .focus-widget__time {
+  color: var(--px-info-text);
+}
+
+.focus-widget[data-kind="short_break"] .focus-widget__state::before,
+.focus-widget[data-kind="long_break"] .focus-widget__state::before {
+  background: var(--px-info);
+}
+
+.focus-widget[data-state="focusing"][data-kind="short_break"] .focus-widget__state::before,
+.focus-widget[data-state="focusing"][data-kind="long_break"] .focus-widget__state::before {
+  background: var(--px-info);
+}
+
+.focus-widget__time {
+  transition: color var(--motion-fast) linear;
+}
+
+@keyframes focus-lamp-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.35;
+  }
 }
 
 .focus-widget__meta {
@@ -1665,6 +1819,13 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* NEXT countdown suffix — minute precision, muted so the title leads. */
+.clock-card__task-eta {
+  color: var(--px-ink-muted);
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
 }
 
 .clock-card__count {

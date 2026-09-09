@@ -247,6 +247,12 @@ async function registerApi(ctx: AppContext): Promise<void> {
     // due_at::date = CURRENT_DATE, which would use the server timezone.
     // Overdue = not done and due_at < now; completed tasks are excluded from
     // both (FP-4.5).
+    // doneToday + overdueBeforeToday extend the snapshot for the dashboard
+    // completion meter. The meter's three segments are disjoint by
+    // construction: doneToday (done, completed today) vs open tasks split by
+    // due date (today window / strictly before it) — a task due 9am and still
+    // todo at 10am counts once, in `today`, unlike the overlapping
+    // today/overdue pair kept for the counters above.
     const { start, end } = ctx.time.todayRangeUtc();
     const today = await db.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM tasks.tasks WHERE status <> 'done' AND due_at IS NOT NULL AND due_at >= $1 AND due_at < $2",
@@ -258,10 +264,20 @@ async function registerApi(ctx: AppContext): Promise<void> {
     const done = await db.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM tasks.tasks WHERE status = 'done'",
     );
+    const doneToday = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM tasks.tasks WHERE status = 'done' AND completed_at >= $1 AND completed_at < $2",
+      [start.toISOString(), end.toISOString()],
+    );
+    const overdueBeforeToday = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM tasks.tasks WHERE status <> 'done' AND due_at IS NOT NULL AND due_at < $1",
+      [start.toISOString()],
+    );
     return {
       today: Number(today.rows[0]?.count ?? 0),
       overdue: Number(overdue.rows[0]?.count ?? 0),
       done: Number(done.rows[0]?.count ?? 0),
+      doneToday: Number(doneToday.rows[0]?.count ?? 0),
+      overdueBeforeToday: Number(overdueBeforeToday.rows[0]?.count ?? 0),
     };
   });
 

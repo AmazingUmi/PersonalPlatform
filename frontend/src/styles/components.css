@@ -158,6 +158,51 @@ a.px-button:hover {
   background: var(--px-info-light);
 }
 
+/* ---------- StatusChip (dock / mobile-nav live badges) ---------- */
+
+/* Visual-only companion to PixelBadge for navigation rows: smaller, harder,
+ * border-led. Tone classes pair a darkened text color with a light fill and
+ * a matching border, so tone survives without color. */
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 4px;
+  border: var(--border-1) solid var(--px-border-soft);
+  border-radius: var(--radius-pixel);
+  background: var(--px-surface-3);
+  color: var(--px-ink-muted);
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-chip--info {
+  border-color: var(--px-info);
+  background: var(--px-info-light);
+  color: var(--px-info-text);
+}
+
+.status-chip--success {
+  border-color: var(--px-success);
+  background: var(--px-success-light);
+  color: var(--px-success-text);
+}
+
+.status-chip--warning {
+  border-color: var(--px-warning);
+  background: var(--px-warning-light);
+  color: var(--px-warning-text);
+}
+
+.status-chip--danger {
+  border-color: var(--px-danger);
+  background: var(--px-danger-light);
+  color: var(--px-danger-text);
+}
+
 /* Accent dimension — same light-fill/dark-text language as the tone rules
  * above, but keyed by the platform accent palette. Attribute selectors
  * outrank the single tone class, so an accent recolors the badge while the
@@ -205,6 +250,40 @@ a.px-button:hover {
 .px-badge[data-accent="coral"] {
   color: var(--px-coral-text);
   background: var(--px-coral-light);
+}
+
+/* ---------- PixelMeter ---------- */
+
+/* Segmented meter: filled blocks carry the accent, empty blocks stay paper.
+ * [data-accent] maps to the shared accent palette (default primary). */
+.px-meter {
+  display: inline-flex;
+  gap: 2px;
+  height: 10px;
+  flex: 0 0 auto;
+  --meter-fill: var(--px-primary);
+}
+
+.px-meter[data-accent="primary"] { --meter-fill: var(--px-primary); }
+.px-meter[data-accent="success"] { --meter-fill: var(--px-success); }
+.px-meter[data-accent="warning"] { --meter-fill: var(--px-warning); }
+.px-meter[data-accent="danger"] { --meter-fill: var(--px-danger); }
+.px-meter[data-accent="info"] { --meter-fill: var(--px-info); }
+.px-meter[data-accent="mint"] { --meter-fill: var(--px-mint); }
+.px-meter[data-accent="yellow"] { --meter-fill: var(--px-yellow); }
+.px-meter[data-accent="violet"] { --meter-fill: var(--px-violet); }
+.px-meter[data-accent="coral"] { --meter-fill: var(--px-coral); }
+
+.px-meter__seg {
+  flex: 1 1 0;
+  min-width: 4px;
+  background: var(--px-surface-3);
+  box-shadow: inset 0 0 0 1px rgb(38 50 71 / 0.08);
+}
+
+.px-meter__seg--on {
+  background: var(--meter-fill);
+  box-shadow: none;
 }
 
 /* ---------- PixelWindow ---------- */

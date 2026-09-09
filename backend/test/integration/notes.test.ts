@@ -322,6 +322,18 @@ describe("list response shape and quick note minimal create (P7A1-05/09)", () =>
     assert.equal(listed.body.total, 1);
     assert.equal(listed.body.items[0]!.id, response.body.id);
   });
+
+  it("summary returns the note count without materializing rows (FE polish chips)", async () => {
+    // Delta-based: other tests on this platform may already own notes.
+    const before = await json<{ total: number }>("GET", "/api/apps/notes/summary");
+    assert.equal(before.status, 200);
+    assert.deepEqual(Object.keys(before.body).sort(), ["total"]);
+    assert.ok(Number.isInteger(before.body.total));
+
+    await json<NoteView>("POST", "/api/apps/notes/notes", { content: "summary probe" });
+    const after = await json<{ total: number }>("GET", "/api/apps/notes/summary");
+    assert.equal(after.body.total, before.body.total + 1);
+  });
 });
 
 describe("mood validation (P7A1-04)", () => {

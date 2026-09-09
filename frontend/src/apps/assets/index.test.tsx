@@ -456,7 +456,11 @@ describe("AssetSummaryWidget density (Phase 10)", () => {
     );
   }
 
-  function setupWidgetFetch(items: TestItem[], counts?: { all: number; categories: Record<string, number> }) {
+  function setupWidgetFetch(
+    items: TestItem[],
+    counts?: { all: number; categories: Record<string, number> },
+    widgetCategories: TestCategory[] = categories,
+  ) {
     const calls: string[] = [];
     const fetchMock = vi.fn(async (input: URL | RequestInfo) => {
       const url = String(input);
@@ -464,6 +468,7 @@ describe("AssetSummaryWidget density (Phase 10)", () => {
       if (url.includes("/summary")) return jsonResponse({ items: 42, categories: 5 });
       if (url.includes("/api/apps/assets/items"))
         return jsonResponse({ items, counts: counts ?? { all: items.length, categories: { "cat-1": 2, "cat-2": 1 } } });
+      if (url.includes("/api/apps/assets/categories")) return jsonResponse({ items: widgetCategories });
       return jsonResponse(null, false, 404);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -492,7 +497,37 @@ describe("AssetSummaryWidget density (Phase 10)", () => {
     expect(screen.queryByText("Recent item 3")).toBeNull();
     // Faceted counts drive the stats, not the summary endpoint.
     expect(screen.getByText("6")).toBeDefined(); // counts.all
-    expect(screen.getByText("2")).toBeDefined(); // two category ids
+    expect(screen.getAllByText("2").length).toBeGreaterThan(0); // two category ids / counts
+    // Top-category distribution resolves names from the categories endpoint.
+    expect(screen.getByText("Books")).toBeDefined();
+    expect(screen.getByText("Tools")).toBeDefined();
+  });
+
+  it("normal caps the category distribution at the top 3 by count", async () => {
+    setupWidgetFetch(recentItems, {
+      all: recentItems.length,
+      categories: { "cat-1": 4, "cat-2": 3, "cat-3": 2, "cat-1x": 1 },
+    });
+    renderWidget("normal");
+
+    expect(await screen.findByText("Books")).toBeDefined();
+    expect(screen.getByText("Tools")).toBeDefined();
+    expect(screen.getByText("Games")).toBeDefined();
+    expect(screen.queryByText("Unknown")).toBeNull();
+    // The meters are relative to the leading category (4).
+    const meters = document.querySelectorAll(".assets-widget__categories .px-meter");
+    expect(meters).toHaveLength(3);
+    expect(meters[0]!.querySelectorAll(".px-meter__seg--on")).toHaveLength(10);
+    expect(meters[1]!.querySelectorAll(".px-meter__seg--on")).toHaveLength(8);
+    expect(meters[2]!.querySelectorAll(".px-meter__seg--on")).toHaveLength(5);
+  });
+
+  it("normal degrades to no distribution when nothing is categorized", async () => {
+    setupWidgetFetch(recentItems, { all: recentItems.length, categories: {} });
+    renderWidget("normal");
+
+    expect(await screen.findByText("Recent item 0")).toBeDefined();
+    expect(document.querySelector(".assets-widget__categories")).toBeNull();
   });
 
   it("expanded widens the recent list to five items", async () => {
@@ -511,5 +546,19 @@ describe("AssetSummaryWidget density (Phase 10)", () => {
       defaultH: 16,
       density: { normal: { minW: 16, minH: 12 }, expanded: { minW: 24, minH: 16 } },
     });
+  });
+});
+
+describe("status provider (shell chips)", () => {
+  it("maps the summary item count to a chip, hidden at zero", async () => {
+    let body: { items: number } = { items: 32 };
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(body)));
+    await expect(AssetsApp.status!.load()).resolves.toEqual([
+      { id: "items", label: "32", tone: "neutral", title: "32 tracked items" },
+    ]);
+
+    body = { items: 0 };
+    await expect(AssetsApp.status!.load()).resolves.toEqual([]);
+    vi.unstubAllGlobals();
   });
 });

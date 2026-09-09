@@ -13,7 +13,7 @@ import {
 export type FocusAction = "start" | "pause" | "resume" | "stop";
 
 /** Cross-tab sync channel; arbitrary focus tabs/widgets stay coherent. */
-const CHANNEL_NAME = "focus";
+export const FOCUS_CHANNEL = "focus";
 /** Background poll safety net while the tab is visible. */
 const POLL_INTERVAL_MS = 15_000;
 
@@ -125,7 +125,7 @@ export function useFocusState(): {
   // Cross-tab sync: broadcast after our own mutations, refetch on others'.
   useEffect(() => {
     if (typeof BroadcastChannel === "undefined") return;
-    const channel = new BroadcastChannel(CHANNEL_NAME);
+    const channel = new BroadcastChannel(FOCUS_CHANNEL);
     channel.onmessage = () => {
       void refetch();
     };

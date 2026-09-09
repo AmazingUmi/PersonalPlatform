@@ -53,6 +53,9 @@ export function FocusWidget() {
   const kind = active?.kind ?? nextKind;
 
   const stateLabel = active === null ? "READY" : active.status === "running" ? "FOCUSING" : "PAUSED";
+  // State/kind drive the per-state visuals (apps.css): READY neutral,
+  // FOCUSING coral + lamp blink, PAUSED warning; break kinds read info-blue.
+  const stateKey = active === null ? "ready" : active.status === "running" ? "focusing" : "paused";
   const time =
     active === null
       ? formatDuration(defaultSecondsFor(kind, settings))
@@ -61,7 +64,7 @@ export function FocusWidget() {
         : formatDuration(active.remainingSeconds);
 
   return (
-    <div>
+    <div className="focus-widget" data-state={stateKey} data-kind={kind}>
       <div className="focus-widget__state">
         {stateLabel} · {kindLabel(kind)}
       </div>

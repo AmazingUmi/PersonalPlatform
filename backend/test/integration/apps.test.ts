@@ -492,7 +492,13 @@ describe("tasks app API", () => {
 
   it("summarizes today, overdue and done counts", async () => {
     const baseline = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/summary" });
-    const before = baseline.json() as { today: number; overdue: number; done: number };
+    const before = baseline.json() as {
+      today: number;
+      overdue: number;
+      done: number;
+      doneToday: number;
+      overdueBeforeToday: number;
+    };
 
     // Due strictly between now and the end of the platform-timezone "today"
     // window (fixtures default to UTC), so it counts as due today but is
@@ -524,10 +530,30 @@ describe("tasks app API", () => {
     });
 
     const summary = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/summary" });
-    const counts = summary.json() as { today: number; overdue: number; done: number };
+    const counts = summary.json() as {
+      today: number;
+      overdue: number;
+      done: number;
+      doneToday: number;
+      overdueBeforeToday: number;
+    };
     assert.equal(counts.today, before.today + 1, "one extra task due today");
     assert.equal(counts.overdue, before.overdue + 1, "one extra overdue task");
     assert.equal(counts.done, before.done + 1, "one extra done task");
+    // Meter segments (FE polish): the PATCH above completed "Already Done"
+    // inside the platform-local today window, and "Overdue One" (3 days
+    // back) fell strictly before it. "Due Today" is still open and due
+    // within the window — it must land in exactly ONE segment (today), not
+    // double-count into the pre-window overdue bucket.
+    assert.equal(counts.doneToday, before.doneToday + 1, "one extra completed-today task");
+    assert.equal(
+      counts.overdueBeforeToday,
+      before.overdueBeforeToday + 1,
+      "one extra open task due before today's window",
+    );
+    assert.equal(counts.today + counts.doneToday + counts.overdueBeforeToday,
+      before.today + before.doneToday + before.overdueBeforeToday + 3,
+      "disjoint segments sum to the three created tasks");
   });
 
   it("publishes tasks.task.completed.v1 once per completion", async () => {

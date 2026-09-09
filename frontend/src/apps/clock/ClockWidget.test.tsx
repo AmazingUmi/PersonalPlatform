@@ -198,6 +198,8 @@ describe("ClockWidget density (Phase 10)", () => {
     expect(container.textContent).toContain("Deep work");
     expect(container.textContent).toContain("NEXT");
     expect(container.textContent).toContain("Review PR");
+    // NEXT carries the minute-precision countdown (next starts in 1h).
+    expect(container.textContent).toContain("in 1h 00m");
     // next (1) + remainingCount (2).
     expect(container.textContent).toContain("3 MORE TASKS TODAY");
     // The clock stays the primary visual — the face is still there.

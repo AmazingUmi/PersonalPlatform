@@ -67,6 +67,20 @@
 
 .topbar__status {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+/* OS status-bar clock: minute precision, pixel font, lit like an LCD readout. */
+.topbar__clock {
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+  letter-spacing: 0.06em;
+  color: var(--px-inverse);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- Workspace: dock + content ---------- */
@@ -149,9 +163,14 @@
 }
 
 .dock__item::before {
-  content: "▸";
-  flex: 0 0 10px;
-  color: var(--px-primary);
+  /* Active marker: a solid 4px accent bar (▌) instead of a glyph — crisper
+   * at pixel scale and colorable per app via --app-accent. */
+  content: "";
+  flex: 0 0 4px;
+  align-self: center;
+  height: 18px;
+  margin-right: var(--space-1);
+  background: transparent;
   visibility: hidden;
   transform: translateX(calc(-1 * var(--motion-distance-xs)));
   transition: transform var(--motion-fast) steps(4);
@@ -187,6 +206,7 @@
 
 .dock__item[aria-current="page"]::before {
   visibility: visible;
+  background: var(--app-accent, var(--px-primary));
   transform: translateX(0);
 }
 
@@ -195,8 +215,19 @@
 }
 
 .dock__item-label {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Live status chips (app-status providers): real counts / running markers
+ * only, right-aligned; hidden at zero by construction (no chips rendered). */
+.dock__item-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-left: auto;
 }
 
 /* ---------- Page scaffolding ---------- */
@@ -326,7 +357,8 @@
 
   .dock__label,
   .dock__item-label,
-  .dock__item::before {
+  .dock__item::before,
+  .dock__item-status {
     display: none;
   }
 
@@ -336,7 +368,7 @@
   }
 
   .dock__item[aria-current="page"] {
-    box-shadow: inset 3px 0 0 var(--px-primary);
+    box-shadow: inset 3px 0 0 var(--app-accent, var(--px-primary));
   }
 }
 
@@ -346,6 +378,14 @@
   }
 
   .topbar__title {
+    display: none;
+  }
+
+  /* Chips and the apps-active badge don't fit next to the shrinking brand
+   * on phones; the wall clock stays as the one status signal (app count is
+   * available in the More launcher / App Center). */
+  .topbar__status-chip,
+  .topbar__status .px-badge {
     display: none;
   }
 
@@ -473,6 +513,13 @@
     color: var(--px-ink-muted);
   }
 
+  .mobile-nav__panel-status {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    margin-left: auto;
+  }
+
   .mobile-nav__panel-link[aria-current="page"] {
     background: var(--px-surface-2);
     border-color: var(--px-border);
@@ -503,7 +550,25 @@
 .dashboard-card .px-window {
   transition:
     box-shadow var(--motion-fast) steps(2),
-    filter var(--motion-fast) linear;
+    filter var(--motion-fast) linear,
+    transform var(--motion-fast) steps(2);
+}
+
+/* Navigable cards (normal mode) read as physical keys: hover / keyboard
+ * focus lifts the window 2px with a +6px shadow, the press sinks it back.
+ * Edit-mode and error-fallback cards have no __hit wrapper and never get
+ * these — their transform story belongs to dnd-kit and the motion presets
+ * on __inner. The transform lives on the window, never on .dashboard-card
+ * (placement) or .dashboard-card__inner (Anime.js), so nothing can fight. */
+.dashboard-card__hit:hover .px-window,
+.dashboard-card__hit:focus-visible .px-window {
+  transform: translate(calc(-1 * var(--motion-distance-xs)), calc(-1 * var(--motion-distance-xs)));
+  box-shadow: var(--shadow-pixel-hover);
+}
+
+.dashboard-card__hit:active .px-window {
+  transform: translate(1px, 1px);
+  box-shadow: var(--shadow-pixel-sm);
 }
 
 .dashboard-card--dragging .dashboard-card__inner .px-window,
