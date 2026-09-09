@@ -8,7 +8,10 @@ import { useClockNow } from "./useClockNow";
 import { useClockSettings, type ClockSettings } from "./useClockSettings";
 import { fetchTasksPublicStatus } from "./tasksPublic";
 
-/** Shared face rendering for the card and the page (same settings row). */
+/** Shared face rendering for the card and the page (same settings row).
+ * The wrapper carries the display-mode key so switching digital↔analog remounts
+ * the face and replays the `clock-face-in` entrance (apps.css) — a pure CSS
+ * mount keyframe; both faces occupy the same box so layout never shifts. */
 export function ClockFace({
   now,
   settings,
@@ -23,10 +26,14 @@ export function ClockFace({
   /** Information density from the container (dashboard resize); page = normal. */
   density?: WidgetDensity;
 }) {
-  return settings.displayMode === "analog" ? (
-    <AnalogClock now={now} settings={settings} variant={variant} focus={focus} density={density} />
-  ) : (
-    <DigitalClock now={now} settings={settings} variant={variant} focus={focus} density={density} />
+  return (
+    <div className="clock-face" key={settings.displayMode}>
+      {settings.displayMode === "analog" ? (
+        <AnalogClock now={now} settings={settings} variant={variant} focus={focus} density={density} />
+      ) : (
+        <DigitalClock now={now} settings={settings} variant={variant} focus={focus} density={density} />
+      )}
+    </div>
   );
 }
 

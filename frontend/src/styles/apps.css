@@ -18,6 +18,37 @@
   justify-items: start;
 }
 
+/* Mount-time row entrance, shared by Tasks / Notes / Assets lists. Lists are
+ * keyed (task.id / note.id / item.id), so React mounts DOM only for newly
+ * added items (and on initial list load) — existing rows never replay on
+ * reorder/filter. Final state = natural state (no fill mode), so nothing can
+ * get stuck at the offset, and the global reduced-motion kill-switch in
+ * base.css neutralizes it. */
+@keyframes px-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--motion-distance-sm));
+  }
+}
+
+/* One-shot pop when a Tasks checkbox flips to :checked. Declared on the
+ * :checked state itself, so it runs exactly once per unchecked → checked
+ * transition (see .task .px-checkbox:checked below). Scale geometry lives in
+ * the keyframe; duration/easing come from tokens at the call site. */
+@keyframes px-check-pop {
+  from {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.12);
+  }
+
+  to {
+    transform: scale(1);
+  }
+}
+
 /* ---------- Dashboard ---------- */
 
 /*
@@ -235,6 +266,9 @@
   min-height: 48px;
   padding: var(--space-2) var(--space-1);
   border-bottom: var(--border-1) solid var(--px-border-soft);
+  /* New-row entrance only: keyed <li> means the keyframe runs solely on
+   * mounted rows (new task / initial load), never on reorder or filter. */
+  animation: px-row-in var(--motion-normal) steps(3, end);
 }
 
 .task:last-child {
@@ -259,6 +293,24 @@
 .task--done .task__title {
   text-decoration: line-through;
   color: var(--px-ink-muted);
+}
+
+/* Done-state fade: gaining .task--done flips the same persistent elements
+ * (class change on the <li>, no remount), so the color change transitions.
+ * The line-through is text-decoration on the persistent .task__title, so its
+ * color (currentColor) fades together with the text. */
+.task__title,
+.task__meta {
+  transition:
+    color var(--motion-normal) linear,
+    opacity var(--motion-normal) linear,
+    text-decoration-color var(--motion-normal) linear;
+}
+
+/* Checked pop: scoped to task rows so checkboxes elsewhere (Notes filters,
+ * Clock controls) stay static. Runs once on the unchecked → checked flip. */
+.task .px-checkbox:checked {
+  animation: px-check-pop var(--motion-fast) steps(4, end);
 }
 
 .task__delete {
@@ -447,6 +499,9 @@
   border-radius: var(--radius-pixel);
   background: var(--px-surface);
   box-shadow: 3px 3px 0 var(--px-shadow);
+  /* Mount entrance (keyed <li> — new cards / initial grid only). The one-shot
+   * animation outranks the hover transform only while it runs (140ms). */
+  animation: px-row-in var(--motion-normal) steps(3, end);
   transition:
     transform var(--motion-fast) steps(1),
     box-shadow var(--motion-fast) steps(1);
@@ -657,9 +712,13 @@
 
 .game__board {
   --game-cell: clamp(52px, calc((100vw - 148px) / 4), 76px);
+  --game-board-pad: 6px;
+  position: relative;
   display: grid;
+  grid-template-columns: repeat(4, var(--game-cell));
+  grid-template-rows: repeat(4, var(--game-cell));
   gap: var(--space-1);
-  padding: 6px;
+  padding: var(--game-board-pad);
   background: var(--px-surface-2);
   border: var(--border-4) solid var(--px-border);
   box-shadow: var(--shadow-pixel);
@@ -667,10 +726,10 @@
   max-width: 100%;
 }
 
-.game__row {
-  display: grid;
-  grid-template-columns: repeat(4, var(--game-cell));
-  gap: var(--space-1);
+/* Game over: short pixel shake via the independent `translate` property
+ * (the board itself never uses transform). Ends at the natural state. */
+.game__board--over {
+  animation: game-over-pulse var(--motion-slow) steps(2, end);
 }
 
 .game__cell {
@@ -688,33 +747,116 @@
   color: var(--px-ink);
 }
 
+/* Background grid cells always render the neutral empty look; values live on
+ * the tile overlay. The mark keeps occupied cells :not(:empty) for the e2e
+ * occupancy contract — it is visually covered by the tile above it. */
 .game__cell--0 {
   border-width: var(--border-1);
   border-color: var(--px-border-soft);
   background: var(--px-bg);
 }
 
-.game__cell--2 { background: var(--px-surface); }
-.game__cell--4 { background: var(--px-warning-light); }
-.game__cell--8 { background: var(--px-yellow); }
-.game__cell--16 { background: var(--px-warning); }
-.game__cell--32 { background: var(--px-coral); }
-.game__cell--64 { background: var(--px-danger); color: var(--px-inverse); }
-.game__cell--128 { background: var(--px-mint); }
-.game__cell--256 { background: var(--px-info); }
-.game__cell--512 { background: var(--px-primary); color: var(--px-inverse); }
-.game__cell--1024 { background: var(--px-primary-dark); color: var(--px-inverse); }
-.game__cell--2048 { background: var(--px-ink); color: var(--px-yellow); }
+.game__cell-mark {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
 
-.game__cell--128,
-.game__cell--256,
-.game__cell--512 {
+/* Tile overlay (FE-MOTION-4): one DOM node per tile id, positioned by an
+ * inline transform. One cell pitch = the tile's own width (100% of the
+ * overlay) plus one grid gap; translate() percentages resolve against the
+ * element's own size, so r/c pitches land exactly on grid cell (r, c). The
+ * transition slides the tile whenever the transform changes; rapid input
+ * retargets mid-transition with no state coupling. */
+.game__tiles {
+  position: absolute;
+  inset: var(--game-board-pad);
+  pointer-events: none;
+}
+
+.game__tile {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: calc((100% - 3 * var(--space-1)) / 4);
+  height: calc((100% - 3 * var(--space-1)) / 4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: var(--border-2) solid var(--px-border);
+  border-radius: var(--radius-pixel);
+  background: var(--px-surface);
+  font-family: var(--font-pixel);
+  font-size: var(--text-lg);
+  line-height: 1;
+  color: var(--px-ink);
+  transition: transform var(--motion-normal) steps(3, end);
+}
+
+.game__tile--2 { background: var(--px-surface); }
+.game__tile--4 { background: var(--px-warning-light); }
+.game__tile--8 { background: var(--px-yellow); }
+.game__tile--16 { background: var(--px-warning); }
+.game__tile--32 { background: var(--px-coral); }
+.game__tile--64 { background: var(--px-danger); color: var(--px-inverse); }
+.game__tile--128 { background: var(--px-mint); }
+.game__tile--256 { background: var(--px-info); }
+.game__tile--512 { background: var(--px-primary); color: var(--px-inverse); }
+.game__tile--1024 { background: var(--px-primary-dark); color: var(--px-inverse); }
+.game__tile--2048 { background: var(--px-ink); color: var(--px-yellow); }
+
+.game__tile--128,
+.game__tile--256,
+.game__tile--512 {
   font-size: var(--text-md);
 }
 
-.game__cell--1024,
-.game__cell--2048 {
+.game__tile--1024,
+.game__tile--2048 {
   font-size: var(--text-sm);
+}
+
+/* Merge pop / spawn-in. The data attribute value alternates "0"/"1" between
+ * moves (see index.tsx MoveFx): a tile merging on consecutive moves must
+ * restart its keyframes, which CSS only does when animation-name changes.
+ * Pop/spawn animate the independent `scale` property (and opacity) so they
+ * compose with the positional `transform` translate instead of fighting the
+ * slide transition. */
+.game__tile[data-merged="0"] {
+  animation: game-merge-pop var(--motion-fast) steps(4, end);
+}
+
+.game__tile[data-merged="1"] {
+  animation: game-merge-pop-alt var(--motion-fast) steps(4, end);
+}
+
+.game__tile[data-spawn] {
+  animation: game-spawn-in var(--motion-fast) steps(2, end);
+}
+
+@keyframes game-merge-pop {
+  0%, 100% { scale: 1; }
+  50% { scale: 1.12; }
+}
+
+/* Duplicate of game-merge-pop — exists only under another name so the
+ * animation restarts when the parity attribute flips. */
+@keyframes game-merge-pop-alt {
+  0%, 100% { scale: 1; }
+  50% { scale: 1.12; }
+}
+
+@keyframes game-spawn-in {
+  from {
+    opacity: 0;
+    scale: 0.5;
+  }
+}
+
+@keyframes game-over-pulse {
+  0%, 100% { translate: 0 0; }
+  25% { translate: calc(-1 * var(--motion-distance-xs)) 0; }
+  75% { translate: var(--motion-distance-xs) 0; }
 }
 
 .game__over {
@@ -1042,6 +1184,9 @@
   letter-spacing: 0.04em;
   font-variant-numeric: tabular-nums;
   color: var(--px-ink);
+  /* Running ↔ idle swaps only the color; transition it so entering/leaving
+   * the idle de-emphasis lands smoothly. */
+  transition: color var(--motion-normal) linear;
 }
 
 .focus-clock--idle {
@@ -1058,6 +1203,12 @@
 .focus-progress__fill {
   height: 100%;
   background: var(--app-accent, var(--px-primary));
+  /* Deliberately 1s linear, not a motion token: it matches the per-second
+   * state tick exactly, so each width step glides into the next instead of
+   * jumping. Mount paints the initial width without animating (no previous
+   * computed value); the reduced-motion kill-switch makes the steps instant
+   * for those users. */
+  transition: width 1s linear;
 }
 
 .focus-controls {
@@ -1262,6 +1413,8 @@
   box-shadow: 3px 3px 0 var(--px-shadow);
   color: var(--px-ink);
   text-decoration: none;
+  /* Mount entrance (keyed cards — new notes / initial timeline only). */
+  animation: px-row-in var(--motion-normal) steps(3, end);
   transition:
     transform var(--motion-fast) steps(1),
     box-shadow var(--motion-fast) steps(1);
@@ -1521,6 +1674,15 @@
   color: var(--px-ink-muted);
 }
 
+/* Face swap container (digital ↔ analog). The wrapper is keyed to the display
+ * mode in ClockFace, so a mode switch remounts it and replays the entrance
+ * below. It animates from an offset to the natural state — the reduced-motion
+ * override in base.css simply leaves the face fully visible. */
+
+.clock-face {
+  animation: clock-face-in var(--motion-fast) steps(2, end);
+}
+
 /* Digital face */
 
 .clock-digital {
@@ -1547,6 +1709,19 @@
   border-color: var(--px-warning-text);
   background-color: var(--px-warning-light);
   animation: clock-focus-pulse 2s steps(2) infinite;
+}
+
+/* Task focus state toggles this class in place (no remount) — these are the
+ * only properties it recolors, so the amber accent lands with a short fade
+ * instead of a hard switch. */
+
+.clock-digital,
+.clock-digital__label,
+.clock-digital__seconds {
+  transition:
+    color var(--motion-fast) linear,
+    border-color var(--motion-fast) linear,
+    background-color var(--motion-fast) linear;
 }
 
 .clock-digital__top {
@@ -1660,6 +1835,13 @@
   50%,
   100% {
     box-shadow: var(--shadow-pixel-sm), 3px 3px 0 var(--px-warning-light);
+  }
+}
+
+@keyframes clock-face-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
   }
 }
 

@@ -1536,6 +1536,30 @@ INFO
 - continuous floating；
 - 大面积 parallax。
 
+## 29.1 Motion System（FE-MOTION 更新）
+
+前端现已接入统一的 Motion System（Anime.js v4 WAAPI 引擎 +
+`frontend/src/shared/motion/`）。实现细则、token 表、Dashboard transform
+所有权规则与接入方式见：
+
+```text
+doc/FRONTEND_MOTION_SYSTEM.md
+```
+
+要点：
+
+- 所有 JS 动画走 `shared/motion` 的 tokens 与 presets，禁止散落 magic
+  numbers；duration token：`instant 0 / fast 80 / normal 140 / slow 200ms`。
+- 动画一律 from-offset → natural state、无 fill：跳过（reduced motion /
+  无 WAAPI）时元素即为静态样式，不存在卡在中间态。
+- `prefers-reduced-motion: reduce`：CSS 全局 kill-switch（base.css）+
+  JS 侧 `prefersReducedMotion()` 双保险；e2e 有专门覆盖
+  （`frontend/e2e/motion.spec.ts`）。
+- Dashboard 的 `.dashboard-card` transform 归 dnd-kit / placement 所有，
+  动画只作用于 `.dashboard-card__inner` presentation wrapper。
+- 禁止让动画驱动业务 state（completion callback / setTimeout / API
+  sequencing）；删除动画层后功能必须完整。
+
 ---
 
 # 30. Responsive Rules
@@ -2026,6 +2050,10 @@ React + CSS + SVG
 完全足够。
 
 以后组件数量达到明显维护压力后再评估。
+
+> FE-MOTION 修订：`animejs`（v4，仅 WAAPI 引擎 + scope）作为 Motion
+> System 的唯一动画库被引入（见 §29.1 与 doc/FRONTEND_MOTION_SYSTEM.md）。
+> 其余清单不变 —— 仍不引入 Framer Motion / Emotion / Tailwind 等。
 
 ---
 

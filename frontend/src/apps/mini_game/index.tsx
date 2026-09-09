@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../shared/api";
 import { useAppDisplayName } from "../../shared/PresentationContext";
 import type { FrontendAppModule } from "../../shared/appTypes";
@@ -9,13 +9,16 @@ import { LoadingState } from "../../shared/ui/LoadingState";
 import { useAsync } from "../../shared/useAsync";
 import logo from "./assets/logo.svg";
 import {
+  applyMove,
+  boardFromTiles,
   canMove,
-  emptyBoard,
   isValidBoard,
   keyToDirection,
-  moveBoard,
-  spawnTile,
+  SIZE,
+  spawnTileInTiles,
+  tilesFromBoard,
   type Board,
+  type Tile,
 } from "./logic";
 
 interface SaveState {
@@ -25,17 +28,50 @@ interface SaveState {
   revision: number;
 }
 
+/** Two random tiles, matching the old spawnTile(spawnTile(emptyBoard())) run. */
+function freshTiles(): Tile[] {
+  const first = spawnTileInTiles([]);
+  return [first, spawnTileInTiles([first])];
+}
+
+/**
+ * One cell pitch for the tile overlay: the tile's own width (100%) plus one
+ * grid gap. translate() percentages refer to the element's own size, so
+ * translating by r/c pitches lands exactly on grid cell (r, c) — the board
+ * grid uses the same --space-1 gap.
+ */
+function tileTransform(r: number, c: number): string {
+  const pitch = "(100% + var(--space-1))";
+  return `translate(calc(${c} * ${pitch}), calc(${r} * ${pitch}))`;
+}
+
+/**
+ * Presentation-only move hints (FE-MOTION-4): which tile just spawned or
+ * merged, for CSS mount/merge keyframes. `seq` increments per accepted move;
+ * its parity alternates the data-attribute value so a tile merging on
+ * consecutive moves replays its keyframes (a stable value would not restart
+ * a running-name animation). Nothing here ever feeds back into game state.
+ */
+interface MoveFx {
+  seq: number;
+  mergedIds: number[];
+  spawnId: number | null;
+}
+
+const NO_FX: MoveFx = { seq: 0, mergedIds: [], spawnId: null };
+
 export function Game2048() {
   const displayName = useAppDisplayName({ id: "mini_game", name: "Mini Game (2048)" });
   // Loading gate (FP-13.1): the initial board is NOT randomized until the
   // save round-trip finishes, and moves / New Game are blocked while loading
   // so user input can never interleave with the async load.
   const [phase, setPhase] = useState<"loading" | "ready">("loading");
-  const [board, setBoard] = useState<Board>(emptyBoard);
+  const [tiles, setTiles] = useState<Tile[]>([]);
   const [score, setScore] = useState(0);
   const [highScore, setHighScore] = useState(0);
   const [over, setOver] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [moveFx, setMoveFx] = useState<MoveFx>(NO_FX);
   // Monotonic local revision: every accepted local state bumps it, and the
   // backend rejects writes whose revision is not newer, so a slow older save
   // can never overwrite a newer board (FP-2A.4).
@@ -47,19 +83,21 @@ export function Game2048() {
       // Defensive validation (FP-13.2): a corrupted board never renders; the
       // player simply gets a fresh run.
       if (body.save && isValidBoard(body.save.board)) {
-        setBoard(body.save.board);
+        setTiles(tilesFromBoard(body.save.board));
         setScore(body.save.score);
         setHighScore(body.save.highScore);
         revision.current = body.save.revision;
+        setMoveFx(NO_FX);
         setPhase("ready");
         return;
       }
     } catch {
       // Offline / error: fall through to a fresh local run.
     }
-    setBoard(spawnTile(spawnTile(emptyBoard())));
+    setTiles(freshTiles());
     setScore(0);
     setOver(false);
+    setMoveFx(NO_FX);
     setPhase("ready");
   }, []);
 
@@ -92,29 +130,41 @@ export function Game2048() {
       const direction = keyToDirection(event.key);
       if (!direction || over || phase !== "ready") return;
       event.preventDefault();
-      const result = moveBoard(board, direction);
+      const result = applyMove(tiles, direction);
       if (!result.moved) return;
-      const nextBoard = spawnTile(result.board);
+      const spawned = spawnTileInTiles(result.tiles);
+      const nextTiles = [...result.tiles, spawned];
+      const nextBoard = boardFromTiles(nextTiles);
       const nextScore = score + result.gained;
-      setBoard(nextBoard);
+      setTiles(nextTiles);
       setScore(nextScore);
       setHighScore((current) => Math.max(current, nextScore));
       setOver(!canMove(nextBoard));
+      setMoveFx((fx) => ({ seq: fx.seq + 1, mergedIds: result.mergedIds, spawnId: spawned.id }));
       void save(nextBoard, nextScore);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [board, score, over, phase, save]);
+  }, [tiles, score, over, phase, save]);
 
   function newGame() {
     if (phase !== "ready") return;
-    const fresh = spawnTile(spawnTile(emptyBoard()));
-    setBoard(fresh);
+    const fresh = freshTiles();
+    setTiles(fresh);
     setScore(0);
     setOver(false);
+    setMoveFx(NO_FX);
     // New Game resets the run only; the historical high score stays.
-    void save(fresh, 0);
+    void save(boardFromTiles(fresh), 0);
   }
+
+  const occupiedCells = useMemo(() => {
+    const occupied = new Set<number>();
+    for (const tile of tiles) occupied.add(tile.r * SIZE + tile.c);
+    return occupied;
+  }, [tiles]);
+  // Parity string ("0"/"1") alternates per accepted move; see MoveFx above.
+  const fxParity = moveFx.seq % 2 === 0 ? "0" : "1";
 
   return (
     <div className="page game" data-app="mini_game">
@@ -151,16 +201,36 @@ export function Game2048() {
       {phase === "loading" ? (
         <LoadingState label="Loading save…" />
       ) : (
-      <div className="game__board">
-        {board.map((row, r) => (
-          <div key={r} className="game__row">
-            {row.map((value, c) => (
-              <div key={c} className={`game__cell game__cell--${value}`}>
-                {value !== 0 ? value : ""}
-              </div>
-            ))}
-          </div>
-        ))}
+      <div className={over ? "game__board game__board--over" : "game__board"}>
+        {/* Background grid: exactly 16 .game__cell slots. The empty span mark
+            * keeps occupied cells :not(:empty) for the e2e contract; the value
+            * itself lives on the tile overlay above. */}
+        {Array.from({ length: SIZE * SIZE }, (_, index) => {
+          const r = Math.floor(index / SIZE);
+          const c = index % SIZE;
+          return (
+            <div key={`${r}-${c}`} className="game__cell game__cell--0">
+              {occupiedCells.has(r * SIZE + c) ? (
+                <span className="game__cell-mark" aria-hidden="true" />
+              ) : null}
+            </div>
+          );
+        })}
+        {/* Tile overlay: one DOM node per tile id, so a move only changes the
+            * inline transform and CSS transitions the slide. */}
+        <div className="game__tiles">
+          {tiles.map((tile) => (
+            <div
+              key={tile.id}
+              className={`game__tile game__tile--${tile.value}`}
+              style={{ transform: tileTransform(tile.r, tile.c) }}
+              data-merged={moveFx.mergedIds.includes(tile.id) ? fxParity : undefined}
+              data-spawn={moveFx.spawnId === tile.id ? fxParity : undefined}
+            >
+              {tile.value}
+            </div>
+          ))}
+        </div>
       </div>
       )}
       {over && (

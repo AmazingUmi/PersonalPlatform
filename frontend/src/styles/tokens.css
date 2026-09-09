@@ -108,8 +108,16 @@
   --shadow-pixel-sm: 2px 2px 0 var(--px-shadow);
   --shadow-pixel-strong: 2px 2px 0 var(--px-border), 4px 4px 0 var(--px-shadow);
 
-  /* Motion */
+  /* Motion — JS side mirrors these in src/shared/motion/motionTokens.ts
+   * (lockstep enforced by motionTokens.test.ts). */
+  --motion-instant: 0ms;
   --motion-fast: 80ms;
+  --motion-normal: 140ms;
+  --motion-slow: 200ms;
+  --motion-stagger: 35ms;
+  --motion-distance-xs: 2px;
+  --motion-distance-sm: 4px;
+  --motion-distance-md: 8px;
 
   /* Shell layout */
   --topbar-h: 56px;

@@ -1,4 +1,6 @@
+import { useEffect, useRef } from "react";
 import type { WidgetDensity } from "../../shared/appTypes";
+import { tick } from "../../shared/motion/pixelFeedback";
 import type { ClockSettings } from "./useClockSettings";
 import { dateLine, humanDuration, timeParts, weekdayLabel } from "./timeMath";
 
@@ -36,6 +38,24 @@ interface DigitalClockProps {
 }
 
 /**
+ * Digit-group tick: runs the short WAAPI tick preset whenever the rendered
+ * string changes (once per second/minute on one small span — no per-frame JS).
+ * Presentation-only: `tick` no-ops under reduced motion / without WAAPI, and
+ * nothing here feeds back into state or timing.
+ */
+function useTickRef(value: string) {
+  const ref = useRef<HTMLSpanElement | null>(null);
+  const prev = useRef(value);
+  useEffect(() => {
+    if (prev.current !== value) {
+      prev.current = value;
+      tick(ref.current);
+    }
+  }, [value]);
+  return ref;
+}
+
+/**
  * Pixel digital clock face. Visual hierarchy (guide §Pixel): pixel-font
  * tabular digits, blinking colon, amber focus mode when a task is running.
  * The colon blink and focus dot are CSS animations — both are neutralized by
@@ -46,6 +66,9 @@ export function DigitalClock({ now, settings, variant, focus, density = "normal"
   const date = dateLine(now);
   const hours = settings.hourFormat === 12 ? parts.hours12 : parts.hours24;
   const compact = density === "compact";
+  const hoursRef = useTickRef(hours);
+  const minutesRef = useTickRef(parts.minutes);
+  const secondsRef = useTickRef(parts.seconds);
   return (
     <div
       className={[
@@ -70,13 +93,19 @@ export function DigitalClock({ now, settings, variant, focus, density = "normal"
         </div>
       )}
       <div className="clock-digital__time">
-        <span className="clock-digital__digits">{hours}</span>
+        <span className="clock-digital__digits" ref={hoursRef}>
+          {hours}
+        </span>
         <span className="clock-digital__colon" aria-hidden="true">
           :
         </span>
-        <span className="clock-digital__digits">{parts.minutes}</span>
+        <span className="clock-digital__digits" ref={minutesRef}>
+          {parts.minutes}
+        </span>
         {settings.showSeconds ? (
-          <span className="clock-digital__seconds">{parts.seconds}</span>
+          <span className="clock-digital__seconds" ref={secondsRef}>
+            {parts.seconds}
+          </span>
         ) : null}
         {settings.hourFormat === 12 ? (
           <span className="clock-digital__meridiem">{parts.meridiem}</span>

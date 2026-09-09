@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { putSetting, setAppEnabled, type AppInfo, type AppStatus } from "../shared/api";
 import {
   ACCENT_OPTIONS,
@@ -15,6 +15,9 @@ import { PixelWindow } from "../shared/ui/PixelWindow";
 import { StatusMessage } from "../shared/ui/StatusMessage";
 import { appIconName } from "../shared/ui/appIcons";
 import { useMutation } from "../shared/useMutation";
+import { listStagger } from "../shared/motion/pixelEntrance";
+import { blink, pop } from "../shared/motion/pixelFeedback";
+import { useAnimeScope } from "../shared/motion/useAnimeScope";
 
 const STATUS_TONES: Record<AppStatus, BadgeTone> = {
   enabled: "success",
@@ -154,6 +157,37 @@ export function AppCenter({
   const [error, setError] = useState<string | null>(null);
   const [customizing, setCustomizing] = useState<AppInfo | null>(null);
 
+  // Presentation-only motion; presets self-skip under reduced motion / jsdom.
+  const gridRef = useRef<HTMLUListElement | null>(null);
+  const motionScope = useAnimeScope(gridRef);
+  /** First-paint stagger plays once per mount, never on later re-renders. */
+  const entrancePlayedRef = useRef(false);
+
+  useLayoutEffect(() => {
+    if (entrancePlayedRef.current || apps.length === 0) return;
+    entrancePlayedRef.current = true;
+    const grid = gridRef.current;
+    if (!grid) return;
+    listStagger(grid.querySelectorAll(".app-card"), motionScope.current);
+  }, [apps.length, motionScope]);
+
+  /** Enable/disable success pulse; the first run only records the baseline. */
+  const prevEnabledRef = useRef<Record<string, boolean> | null>(null);
+
+  useEffect(() => {
+    const grid = gridRef.current;
+    const prev = prevEnabledRef.current;
+    prevEnabledRef.current = Object.fromEntries(apps.map((app) => [app.id, app.enabled]));
+    if (!prev || !grid) return;
+    for (const app of apps) {
+      if (prev[app.id] === undefined || prev[app.id] === app.enabled) continue;
+      const card = grid.querySelector(`[data-app="${app.id}"]`);
+      if (!card) continue;
+      blink(card.querySelector(".app-card__icon"));
+      pop(card.querySelector(".app-card__foot .px-badge"));
+    }
+  }, [apps, motionScope]);
+
   async function toggle(app: AppInfo, enabled: boolean) {
     setBusy(app.id);
     setError(null);
@@ -180,7 +214,7 @@ export function AppCenter({
           <p>{error}</p>
         </StatusMessage>
       )}
-      <ul className="app-grid">
+      <ul className="app-grid" ref={gridRef}>
         {apps.map((app) => {
           const resolved = resolvePresentation(app, overrides);
           return (

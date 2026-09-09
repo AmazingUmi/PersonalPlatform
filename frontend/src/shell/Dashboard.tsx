@@ -27,6 +27,9 @@ import { ErrorBoundary } from "../shared/ErrorBoundary";
 import { getSetting, putSetting, type AppInfo } from "../shared/api";
 import type { WidgetDensity, WidgetLayoutSpec, WidgetRenderContext } from "../shared/appTypes";
 import { resolvePresentation, type PresentationOverrides } from "../shared/presentation";
+import { useAnimeScope } from "../shared/motion/useAnimeScope";
+import { listStagger } from "../shared/motion/pixelEntrance";
+import { dropSnap, pickUp, resizeSnap, shake } from "../shared/motion/pixelFeedback";
 import { ConfirmDialog } from "../shared/ui/ConfirmDialog";
 import { EmptyState } from "../shared/ui/EmptyState";
 import { LoadingState } from "../shared/ui/LoadingState";
@@ -129,6 +132,18 @@ interface DraftLayout {
 }
 
 /**
+ * Presentation-only card feedback pulse (motion system): emitted by drag /
+ * resize completion so the matching card can play its settle or shake preset
+ * on the inner wrapper. The signal never participates in layout, persistence
+ * or interaction decisions.
+ */
+interface CardFeedback {
+  key: string;
+  kind: "drop-ok" | "drop-bad" | "resize-ok" | "resize-bad";
+  id: number;
+}
+
+/**
  * Dashboard is a pure widget container: widgets come from enabled frontend
  * app modules. The desktop canvas gives every widget an independent 2D grid
  * placement `{x, y, w, h}` (Free Layout V2 + Phase 10 adaptive resize)
@@ -157,6 +172,9 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
   const [canvasWidth, setCanvasWidth] = useState(0);
   const [activeDrag, setActiveDrag] = useState<DragPreview | null>(null);
   const [activeResize, setActiveResize] = useState<ResizePreview | null>(null);
+  const [cardFeedback, setCardFeedback] = useState<CardFeedback | null>(null);
+  /** Monotonic id so a repeated same-kind pulse still re-triggers effects. */
+  const feedbackIdRef = useRef(0);
   /** Mirror of activeResize so pointer-up handlers never read a stale closure. */
   const activeResizeRef = useRef<ResizePreview | null>(null);
   /**
@@ -218,6 +236,12 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
   const updateResize = useCallback((next: ResizePreview | null) => {
     activeResizeRef.current = next;
     setActiveResize(next);
+  }, []);
+
+  /** Fire a one-shot card feedback pulse (drop settle / invalid shake). */
+  const emitCardFeedback = useCallback((key: string, kind: CardFeedback["kind"]) => {
+    feedbackIdRef.current += 1;
+    setCardFeedback({ key, kind, id: feedbackIdRef.current });
   }, []);
 
   // Widget layout contracts (grid units) resolved against platform defaults.
@@ -288,6 +312,20 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
   useEffect(() => {
     if (!editMode || !desktop) updateResize(null);
   }, [editMode, desktop, updateResize]);
+
+  // ---------- dashboard motion (presentation-only) ----------
+
+  const motionScope = useAnimeScope(canvasRef);
+  /** Load entrance plays once per Dashboard mount, never on later re-renders. */
+  const entrancePlayedRef = useRef(false);
+
+  useLayoutEffect(() => {
+    if (entrancePlayedRef.current || !effective) return;
+    entrancePlayedRef.current = true;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    listStagger(canvas.querySelectorAll(".dashboard-card__inner"), motionScope.current);
+  }, [effective, motionScope]);
 
   // ---------- free-layout drag ----------
 
@@ -367,6 +405,9 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
           applyDraft(next);
           void saveLayout(serializeLayout(next.items, next.hidden));
         }
+        emitCardFeedback(key, "drop-ok");
+      } else if (!valid) {
+        emitCardFeedback(key, "drop-bad");
       }
     }
     setActiveDrag(null);
@@ -441,8 +482,13 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
   const onResizeEnd = (commit: boolean) => {
     const current = activeResizeRef.current;
     updateResize(null);
-    if (!current || !commit || !current.valid) return;
+    if (!current || !commit) return;
+    if (!current.valid) {
+      emitCardFeedback(current.key, "resize-bad");
+      return;
+    }
     commitResize(current.key, current.size);
+    emitCardFeedback(current.key, "resize-ok");
   };
 
   const onResizeKeyDown = (key: string, event: ReactKeyboardEvent<HTMLButtonElement>) => {
@@ -721,6 +767,7 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
                     onNavigate={openWidget}
                     onHide={editMode ? () => hideWidget(key) : undefined}
                     dropInvalid={activeDrag?.key === key && !activeDrag.valid}
+                    feedback={cardFeedback?.key === key ? cardFeedback : undefined}
                   >
                     {resolved.widget.render(context)}
                   </DashboardCard>
@@ -785,6 +832,8 @@ interface DashboardCardProps {
   onHide?: () => void;
   accent?: ReturnType<typeof resolvePresentation>["accent"];
   dropInvalid?: boolean;
+  /** Presentation-only pulse from drag / resize completion (motion system). */
+  feedback?: CardFeedback;
   errorFallback?: boolean;
   children: React.ReactNode;
 }
@@ -796,6 +845,12 @@ interface DashboardCardProps {
  * through the bottom-right grip — card clicks and widget content stay
  * unaffected (FP-5.2/FP-5.3). Position and size come from the grid
  * placement, never from DOM order or measured content.
+ *
+ * Motion ownership (motion system): the outer `.dashboard-card` node is
+ * owned by dnd-kit (transform while dragging) and by the placement styles
+ * (left/top/width/height). Every animation runs on the inner presentation
+ * wrapper `.dashboard-card__inner` instead, so the two can never fight over
+ * the same transform.
  */
 function DashboardCard({
   resolved,
@@ -815,6 +870,7 @@ function DashboardCard({
   onHide,
   accent,
   dropInvalid,
+  feedback,
   errorFallback,
   children,
 }: DashboardCardProps) {
@@ -824,6 +880,27 @@ function DashboardCard({
     id: key,
     disabled: !editMode || !desktop || isResizing || dragLocked,
   });
+
+  const innerRef = useRef<HTMLDivElement | null>(null);
+
+  // "Picked up" pulse when a drag actually starts (keyboard or pointer).
+  const wasDraggingRef = useRef(false);
+  useEffect(() => {
+    if (isDragging && !wasDraggingRef.current) pickUp(innerRef.current);
+    wasDraggingRef.current = isDragging;
+  }, [isDragging]);
+
+  // Drop / resize feedback pulses. Each signal id fires exactly once.
+  const lastFeedbackIdRef = useRef(0);
+  useEffect(() => {
+    if (!feedback || feedback.id === lastFeedbackIdRef.current) return;
+    lastFeedbackIdRef.current = feedback.id;
+    const inner = innerRef.current;
+    if (!inner) return;
+    if (feedback.kind === "drop-ok") dropSnap(inner);
+    else if (feedback.kind === "resize-ok") resizeSnap(inner);
+    else shake(inner);
+  }, [feedback]);
 
   const interactive = editMode || errorFallback;
   const style: CSSProperties = desktop
@@ -885,31 +962,33 @@ function DashboardCard({
       data-widget={key}
       data-density={density}
     >
-      {interactive ? (
-        card
-      ) : (
-        <div
-          role="button"
-          tabIndex={0}
-          className="dashboard-card__hit"
-          aria-label={`Open ${resolved.widget.title}`}
-          onClick={(event) => {
-            if (isInteractiveTarget(event.target)) return;
-            onNavigate(resolved);
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter" && event.key !== " ") return;
-            // Same guard as the click path (FP-14.1): Enter/Space pressed on
-            // an inner control (hide button, drag handle) must not also
-            // navigate to the app.
-            if (isInteractiveTarget(event.target)) return;
-            event.preventDefault();
-            onNavigate(resolved);
-          }}
-        >
-          {card}
-        </div>
-      )}
+      <div className="dashboard-card__inner" ref={innerRef}>
+        {interactive ? (
+          card
+        ) : (
+          <div
+            role="button"
+            tabIndex={0}
+            className="dashboard-card__hit"
+            aria-label={`Open ${resolved.widget.title}`}
+            onClick={(event) => {
+              if (isInteractiveTarget(event.target)) return;
+              onNavigate(resolved);
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              // Same guard as the click path (FP-14.1): Enter/Space pressed on
+              // an inner control (hide button, drag handle) must not also
+              // navigate to the app.
+              if (isInteractiveTarget(event.target)) return;
+              event.preventDefault();
+              onNavigate(resolved);
+            }}
+          >
+            {card}
+          </div>
+        )}
+      </div>
       {isResizing ? (
         <span className="dashboard-resize-badge" aria-hidden="true">
           {size.w} × {size.h}

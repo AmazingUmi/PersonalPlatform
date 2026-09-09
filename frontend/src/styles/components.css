@@ -665,6 +665,30 @@ a.px-button:hover {
 
 /* ---------- Confirm dialog / modal panels ---------- */
 
+/* Dialog motion (motion system): backdrop fades in while the window rises and
+ * scales up from 0.96; form controls follow in a short micro-stagger. All of
+ * it is mount-time CSS — unmount stays instant so Escape/close never wait for
+ * an animation, and the reduced-motion kill-switch neutralizes the entrance. */
+@keyframes px-dialog-backdrop-enter {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes px-dialog-enter {
+  from {
+    opacity: 0;
+    transform: translateY(var(--motion-distance-sm)) scale(0.96);
+  }
+}
+
+@keyframes px-dialog-control-enter {
+  from {
+    opacity: 0;
+    transform: translateY(var(--motion-distance-xs));
+  }
+}
+
 .px-dialog-backdrop {
   position: fixed;
   inset: 0;
@@ -678,11 +702,45 @@ a.px-button:hover {
   /* A dialog can outgrow the viewport (e.g. a long chip list inside a form);
      scroll the backdrop instead of pushing the actions out of reach. */
   overflow-y: auto;
+  animation: px-dialog-backdrop-enter var(--motion-normal) linear;
 }
 
 .px-dialog {
   width: min(420px, 100%);
   margin: auto;
+  animation: px-dialog-enter var(--motion-normal) steps(3, end);
+}
+
+.px-dialog__message,
+.px-dialog__actions,
+.px-dialog .px-form > * {
+  animation: px-dialog-control-enter var(--motion-fast) steps(2, end) backwards;
+}
+
+.px-dialog__message,
+.px-dialog .px-form > :nth-child(1) {
+  animation-delay: var(--motion-stagger);
+}
+
+.px-dialog__actions,
+.px-dialog .px-form > :nth-child(2) {
+  animation-delay: calc(var(--motion-stagger) * 2);
+}
+
+.px-dialog .px-form > :nth-child(3) {
+  animation-delay: calc(var(--motion-stagger) * 3);
+}
+
+.px-dialog .px-form > :nth-child(4) {
+  animation-delay: calc(var(--motion-stagger) * 4);
+}
+
+.px-dialog .px-form > :nth-child(5) {
+  animation-delay: calc(var(--motion-stagger) * 5);
+}
+
+.px-dialog .px-form > :nth-child(n + 6) {
+  animation-delay: calc(var(--motion-stagger) * 6);
 }
 
 .px-dialog__message {
