@@ -592,7 +592,7 @@ data-URI，约 5% alpha，作为 body 的第一个 background 层）。纯 CSS�
 Status 区（FE Final Polish 更新）按真实数据渲染，从左到右：
 
 ```text
-[ TASKS 4 ] [ FOCUS ● ] [ 6 apps active ] [ 22:34 ]
+[ CLOCK WED 14:30 ] [ TASKS 4 ] [ FOCUS ● ] [ 6 apps active ] [ 22:34 ]
 ```
 
 - per-app 状态 chip 来自 app 模块的可选 `status` provider
@@ -679,15 +679,18 @@ Active 指示条为 4px 宽实心 accent 色块（`--app-accent`，App Center
 Live Status Chip（FE Final Polish 更新）——右侧对齐的真实状态：
 
 ```text
-ASSETS       32
-CLOCK
+ASSETS
+CLOCK   WED 14:30
 FOCUS        ●
 2048
-NOTES        12
+NOTES
 TASKS         4
 ```
 
 - 数据来自 app 模块的可选 `status` provider；零值/无数据不渲染；
+- **政策：chip 只承载 time-sensitive 信号**（今日到期数、进行中的
+  会话、下一个闹钟）。慢漂移的聚合数字（库存总数、笔记总数、历史
+  高分）不展示——Assets / Notes / 2048 因此无 chip；
 - chip 为 `aria-hidden`（行内可访问名保持 app 名不变）；
 - 64px 图标模式下隐藏 chip，active 改为 inset 3px accent 条。
 

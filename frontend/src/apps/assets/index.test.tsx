@@ -550,15 +550,7 @@ describe("AssetSummaryWidget density (Phase 10)", () => {
 });
 
 describe("status provider (shell chips)", () => {
-  it("maps the summary item count to a chip, hidden at zero", async () => {
-    let body: { items: number } = { items: 32 };
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(body)));
-    await expect(AssetsApp.status!.load()).resolves.toEqual([
-      { id: "items", label: "32", tone: "neutral", title: "32 tracked items" },
-    ]);
-
-    body = { items: 0 };
-    await expect(AssetsApp.status!.load()).resolves.toEqual([]);
-    vi.unstubAllGlobals();
+  it("deliberately registers none — inventory totals are not time-sensitive chips", () => {
+    expect(AssetsApp.status).toBeUndefined();
   });
 });

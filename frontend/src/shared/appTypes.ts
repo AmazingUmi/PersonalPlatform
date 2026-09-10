@@ -93,6 +93,11 @@ export interface AppStatusChip {
  * `subscribe` lets an app push updates (e.g. its BroadcastChannel).
  * Failures hide the app's chips — status is decorative, never an error
  * surface.
+ *
+ * Policy: chips are for TIME-SENSITIVE signals a user might act on soon —
+ * due counts, live sessions, the next alarm. Slowly drifting aggregates
+ * (inventory totals, note counts, all-time scores) do not qualify; an app
+ * whose only numbers are aggregates should not register a provider at all.
  */
 export interface AppStatusProvider {
   load: () => Promise<AppStatusChip[]>;

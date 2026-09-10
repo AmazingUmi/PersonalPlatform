@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AlarmView } from "./AlarmSection";
 import { ClockWidget } from "./ClockWidget";
 import type { ClockSettings } from "./useClockSettings";
 
@@ -225,4 +226,46 @@ describe("ClockWidget density (Phase 10)", () => {
   function containerHasDate(): boolean {
     return document.querySelector(".clock-digital__date") !== null;
   }
+});
+
+describe("status provider (shell chips)", () => {
+  const alarmFixture = (overrides: Partial<AlarmView> = {}): AlarmView => ({
+    id: "a1",
+    time: "14:30",
+    label: "Stretch",
+    enabled: true,
+    repeatDays: [] as number[],
+    createdAt: "2026-09-01T00:00:00.000Z",
+    updatedAt: "2026-09-01T00:00:00.000Z",
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // Wednesday 2026-09-09, 12:00 local — 14:30 same day is still ahead.
+    vi.setSystemTime(new Date(2026, 8, 9, 12, 0, 0));
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  async function loadWith(items: unknown[]) {
+    const clockApp = (await import("./index")).default;
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ items })));
+    return clockApp.status!.load();
+  }
+
+  it("surfaces the next armed alarm as a warning chip", async () => {
+    await expect(loadWith([alarmFixture()])).resolves.toEqual([
+      { id: "next-alarm", label: "WED 14:30", tone: "warning", title: "Next alarm WED 14:30" },
+    ]);
+  });
+
+  it("hides the chip when no alarm is armed", async () => {
+    await expect(loadWith([alarmFixture({ enabled: false })])).resolves.toEqual([]);
+    await expect(loadWith([])).resolves.toEqual([]);
+  });
 });

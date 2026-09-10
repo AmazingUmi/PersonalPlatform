@@ -1204,16 +1204,9 @@ const app: FrontendAppModule = {
       },
     },
   ],
-  status: {
-    // Dock/top-bar chip: tracked item count (hidden at zero). Same
-    // /summary endpoint the compact widget already uses.
-    load: async () => {
-      const summary = await api<{ items: number }>("/api/apps/assets/summary");
-      return summary.items > 0
-        ? [{ id: "items", label: String(summary.items), tone: "neutral", title: `${summary.items} tracked items` }]
-        : [];
-    },
-  },
+  // No `status` provider on purpose: shell chips are for time-sensitive
+  // signals (due counts, running sessions, next alarm). A slowly drifting
+  // inventory total is not a notification — Assets stays badge-free.
 };
 
 export default app;

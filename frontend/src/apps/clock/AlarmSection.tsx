@@ -247,8 +247,9 @@ export function AlarmSection() {
   );
 }
 
-/** "MON 07:30" label of the earliest armed alarm occurrence. */
-function computeNextAlarm(items: AlarmView[], now: Date): { label: string } | null {
+/** "MON 07:30" label of the earliest armed alarm occurrence. Exported for
+ * the module status provider (dock/top-bar next-alarm chip). */
+export function computeNextAlarm(items: AlarmView[], now: Date): { label: string } | null {
   let best: { at: Date; alarm: AlarmView } | null = null;
   for (const alarm of items) {
     const at = nextAlarmOccurrence(alarm, now);
