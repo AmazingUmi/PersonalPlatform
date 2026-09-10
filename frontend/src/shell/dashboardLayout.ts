@@ -549,8 +549,17 @@ export function resolveEffectiveLayout(
     items = repairCollisions(clamped, specs, canvasWidthPx);
   }
   const occupied = () => Object.entries(items).map(([key, p]) => placementRect(p, defaultsOf(key)));
-  for (const key of availableKeys) {
-    if (items[key] !== undefined || hiddenSet.has(key)) continue;
+  // Auto-placed widgets (fresh install, newly shipped widgets) settle
+  // largest-footprint-first so the declared hero anchors the top-left of the
+  // default composition; equal areas keep registration order (stable sort).
+  const unplaced = availableKeys
+    .filter((key) => items[key] === undefined && !hiddenSet.has(key))
+    .sort((a, b) => {
+      const da = defaultsOf(a);
+      const db = defaultsOf(b);
+      return db.w * db.h - da.w * da.h;
+    });
+  for (const key of unplaced) {
     items[key] = findFirstFreePosition(defaultsOf(key), occupied(), canvasWidthPx);
   }
   // Final normalization: the returned layout guarantees explicit w/h on

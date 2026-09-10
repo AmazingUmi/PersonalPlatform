@@ -7,7 +7,9 @@
 :root {
   /* Canvas */
   --px-bg: #ebe5d1;
-  --px-bg-grid: rgb(38 50 71 / 0.035);
+  /* Ambient grid — kept at the guide's 5% ceiling so it registers as paper
+   * texture without competing with content. */
+  --px-bg-grid: rgb(38 50 71 / 0.05);
 
   /* Surfaces */
   --px-surface: #fff9e8;

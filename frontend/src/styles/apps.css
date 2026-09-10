@@ -138,6 +138,324 @@
   color: var(--px-danger-text);
 }
 
+/* ---------- Dashboard visual system (static redesign) ----------
+ * Per-app widget identity scoped to the dashboard canvas only — app detail
+ * pages keep the full PixelWindow chrome. Every satellite differs in more
+ * than two dimensions: accent top strip + header treatment + primary-metric
+ * treatment + decorative pixel motif.
+ */
+
+/* Per-app accent on the widget's window frame (4px top strip). */
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .px-window { --widget-accent: var(--px-warning); }
+.dashboard-canvas .dashboard-card[data-app-id="tasks"] .px-window { --widget-accent: var(--px-mint); }
+.dashboard-canvas .dashboard-card[data-app-id="assets"] .px-window { --widget-accent: var(--px-yellow); }
+.dashboard-canvas .dashboard-card[data-app-id="focus"] .px-window { --widget-accent: var(--px-coral); }
+.dashboard-canvas .dashboard-card[data-app-id="notes"] .px-window { --widget-accent: var(--px-info); }
+.dashboard-canvas .dashboard-card[data-app-id="mini_game"] .px-window { --widget-accent: var(--px-violet); }
+
+.dashboard-canvas .dashboard-card .px-window {
+  border-top: var(--border-4) solid var(--widget-accent, var(--px-border));
+}
+
+/* Weakened window header: a label row instead of desktop-window chrome. */
+.dashboard-canvas .dashboard-card .px-window__header {
+  min-height: 34px;
+  padding-top: var(--space-2);
+  background: transparent;
+  border-bottom: var(--border-1) dashed var(--px-border-soft);
+}
+
+.dashboard-canvas .dashboard-card .px-window__title {
+  font-size: 13px;
+  color: var(--px-ink);
+}
+
+/* ---- Hero (clock): dark system strips + LCD time block ---- */
+
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .px-window__header {
+  min-height: 40px;
+  background: var(--px-ink);
+  border-bottom: var(--border-2) solid var(--px-ink);
+}
+
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .px-window__title,
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .px-window__header > .px-icon {
+  color: var(--px-warning);
+}
+
+.clock-hero {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  height: 100%;
+}
+
+/* The face zone absorbs the hero's slack so the card composes tall instead
+ * of leaving trailing blank space; the mode toggle pins to the bottom. */
+.clock-hero .clock-face {
+  flex: 1;
+  min-height: 0;
+}
+
+.clock-hero .clock-card__footer {
+  margin-top: auto;
+}
+
+.clock-hero__datebar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: 0;
+  padding-bottom: var(--space-2);
+  border-bottom: var(--border-2) solid var(--px-border);
+}
+
+.clock-hero__weekday {
+  font-family: var(--font-pixel);
+  font-size: var(--text-lg);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--px-ink);
+}
+
+.clock-hero__date {
+  font-family: var(--font-pixel);
+  font-size: var(--text-sm);
+  letter-spacing: 0.08em;
+  color: var(--px-ink-muted);
+}
+
+/* Hero LCD: the dashboard's single dark large-area block. Scope hides the
+ * face's own label/date/focus rows — the hero datebar and agenda carry them. */
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-digital {
+  background-color: var(--px-ink);
+  border-color: var(--px-ink);
+  padding: var(--space-6) var(--space-4);
+  /* The LCD block absorbs the hero's slack: its face zone flexes, so the
+   * whole card composes tall instead of leaving trailing blank space. */
+  display: grid;
+  align-content: center;
+}
+
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-digital__top,
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-digital__date,
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-digital__focus-line {
+  display: none;
+}
+
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-digital__time {
+  font-size: clamp(56px, 5vw, 80px);
+  letter-spacing: 0.02em;
+  color: var(--px-inverse);
+}
+
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-digital__seconds {
+  align-self: flex-end;
+  padding-bottom: 10px;
+  font-size: 0.32em;
+  color: var(--px-inverse-muted);
+}
+
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-digital--focus {
+  background-color: var(--px-ink);
+  border-color: var(--px-warning);
+  animation: none;
+}
+
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-digital--focus .clock-digital__time {
+  color: var(--px-yellow);
+}
+
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-analog {
+  flex: 1;
+  align-content: center;
+}
+
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-analog__svg {
+  max-width: 200px;
+}
+
+/* Agenda zone: always visible on the hero (data-independent composition). */
+.clock-hero__agenda {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: var(--border-1) dashed var(--px-border-soft);
+  border-bottom: var(--border-1) dashed var(--px-border-soft);
+}
+
+.clock-hero__row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: baseline;
+  margin: 0;
+  min-width: 0;
+}
+
+.clock-hero__row-label {
+  flex: none;
+  width: 60px;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  color: var(--px-ink-muted);
+}
+
+.clock-hero__row-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  color: var(--px-ink);
+}
+
+.clock-hero__row-eta {
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+}
+
+/* Remaining-tasks strip: a dark footer bar mirroring the hero header. */
+.clock-hero__remaining {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--px-ink);
+  color: var(--px-warning);
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  box-shadow: var(--shadow-pixel-sm);
+}
+
+.clock-hero__remaining-arrow {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 6px solid var(--px-warning);
+}
+
+/* ---- Tasks: mint lead metric + always-on completion meter ---- */
+
+.dashboard-canvas .tasks-widget .px-stat--lead {
+  border-color: var(--px-mint);
+  background: var(--px-mint-light);
+}
+
+.dashboard-canvas .tasks-widget .px-stat--lead .px-stat__value {
+  color: var(--px-mint-text);
+  font-size: 28px;
+}
+
+.tasks-widget__progress-value--empty {
+  color: var(--px-ink-muted);
+  letter-spacing: 0.04em;
+}
+
+/* ---- Assets: ledger rows with dotted leaders ---- */
+
+.assets-widget__recent-row {
+  align-items: baseline;
+}
+
+.assets-widget__recent-leader {
+  flex: 1;
+  min-width: 12px;
+  border-bottom: var(--border-1) dotted var(--px-border-soft);
+  transform: translateY(-3px);
+}
+
+.assets-widget__recent-leader--ghost {
+  display: block;
+  flex: none;
+  width: 100%;
+}
+
+.assets-widget__empty {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+}
+
+.assets-widget__empty-title {
+  margin: 0;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--px-ink-muted);
+}
+
+/* ---- Focus: coral countdown panel + round pips ---- */
+
+.dashboard-canvas .focus-widget__time {
+  font-size: 34px;
+  padding: var(--space-3) var(--space-4);
+  background: var(--px-coral-light);
+  border-left: var(--border-4) solid var(--px-coral);
+}
+
+.focus-widget__rounds {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.focus-widget__pip {
+  width: 10px;
+  height: 10px;
+  border: var(--border-1) solid var(--px-border-soft);
+  background: var(--px-surface-2);
+}
+
+.focus-widget__pip--on {
+  border-color: var(--px-border);
+  background: var(--px-coral);
+}
+
+/* ---- Notes: lined-paper input ---- */
+
+.dashboard-canvas .notes-quick__input {
+  line-height: 24px;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 23px,
+    var(--px-border-soft) 23px,
+    var(--px-border-soft) 24px
+  );
+  background-clip: content-box;
+}
+
+/* ---- Mini Game: board silhouette motif ---- */
+
+.game-widget__tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 3px;
+  width: 72px;
+  padding: 3px;
+  border: var(--border-1) solid var(--px-border-soft);
+  background: var(--px-surface-2);
+}
+
+.game-widget__tile {
+  aspect-ratio: 1;
+  border: var(--border-1) solid var(--px-border-soft);
+  background: var(--px-surface);
+}
+
+.game-widget__tile--on {
+  border-color: var(--px-violet);
+  background: var(--px-violet);
+}
+
 /* ---------- App Center ---------- */
 
 .app-grid {
@@ -501,7 +819,6 @@
   margin: 0;
   color: var(--px-ink-muted);
 }
-
 .assets-add {
   display: flex;
   gap: var(--space-2);
@@ -936,7 +1253,7 @@
 /* High-score dashboard widget: framed stat + one-line nudge. */
 .game-widget {
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 
 .game-widget .px-stat {

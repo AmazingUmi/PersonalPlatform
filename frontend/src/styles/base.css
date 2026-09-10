@@ -20,10 +20,10 @@ body {
   background-color: var(--px-bg);
   /* Paper canvas (guide §7): a near-invisible fractal-noise grain tiled
    * over the 16px grid — the ink-and-paper equivalent of fiber texture.
-   * Pure CSS (inline SVG data URI, ~5% alpha), no external asset and no
+   * Pure CSS (inline SVG data URI, ~8% alpha), no external asset and no
    * layout impact; opaque surfaces sit above it untouched. */
   background-image:
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' opacity='0.05'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' opacity='0.08'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E"),
     linear-gradient(to right, var(--px-bg-grid) 1px, transparent 1px),
     linear-gradient(to bottom, var(--px-bg-grid) 1px, transparent 1px);
   background-size: 120px 120px, 16px 16px, 16px 16px;

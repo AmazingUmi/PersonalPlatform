@@ -15,8 +15,10 @@ const app: FrontendAppModule = {
       layout: {
         minW: 16,
         minH: 12,
-        defaultW: 20,
-        defaultH: 16,
+        /* Hero footprint (Dashboard redesign): the clock card anchors the
+         * default layout as the tallest, widest widget. */
+        defaultW: 28,
+        defaultH: 34,
         density: {
           normal: { minW: 18, minH: 14 },
           expanded: { minW: 26, minH: 20 },

@@ -62,6 +62,11 @@ export function FocusWidget() {
       : active.status === "running"
         ? formatDuration(remainingSeconds)
         : formatDuration(active.remainingSeconds);
+  // Round pips: completed rounds (capped at the long-break interval) as
+  // filled pixel squares — always rendered, so a READY card still shows the
+  // four-slot rhythm. Purely decorative; the count lives in the meta line.
+  const roundPips = Math.max(1, Math.min(8, settings.longBreakInterval));
+  const roundsDone = Math.min(today.completedRounds, roundPips);
 
   return (
     <div className="focus-widget" data-state={stateKey} data-kind={kind}>
@@ -69,6 +74,11 @@ export function FocusWidget() {
         {stateLabel} · {kindLabel(kind)}
       </div>
       <div className="focus-widget__time">{time}</div>
+      <div className="focus-widget__rounds" aria-hidden="true">
+        {Array.from({ length: roundPips }, (_, index) => (
+          <span key={index} className={index < roundsDone ? "focus-widget__pip focus-widget__pip--on" : "focus-widget__pip"} />
+        ))}
+      </div>
       <div className="focus-widget__meta">
         Focused {secondsToHumanLabel(today.focusedSeconds)} · {today.completedRounds} rounds
       </div>

@@ -219,7 +219,9 @@ test("dashboard: free-layout drag persists after reload (V1 -> V2)", async ({ pa
   // target is 25 units; dnd-kit's auto-scroll may add a unit of page scroll
   // to the drop delta, so accept the 25-27 unit band.
   const tasksPlacementAfter = await placement("tasks:today");
-  assert.equal(tasksPlacementAfter.left, "640px", "tasks moved 2 grid units left");
+  // Defaults (dashboard redesign): assets 20 wide at x0, mini_game 16 wide at
+  // x21, tasks 20 wide at x38 (608px); 2 units left lands on 576px.
+  assert.equal(tasksPlacementAfter.left, "576px", "tasks moved 2 grid units left");
   const topUnits = Number.parseInt(tasksPlacementAfter.top, 10) / 16;
   assert.ok(
     topUnits >= 25 && topUnits <= 27,
@@ -385,9 +387,11 @@ test("dashboard: resize auto-saves without Done; other cards never move", async 
   assert.equal(clockAfter.top, "0px", "clock y anchored");
   assert.equal(clockAfter.width, "416px", "clock grew to 26 units");
   assert.equal(clockAfter.height, "320px", "clock grew to 20 units");
-  // 26x20 crosses the clock's expanded threshold: attribute + content switch.
+  // 26x20 crosses the clock's expanded threshold: the density attribute
+  // switches (the hero agenda is density-independent by design — every
+  // non-compact hero shows the CURRENT/NEXT zone).
   expect(clockAfter.density).toBe("expanded");
-  await expect(page.locator('[data-widget-key="clock:clock"]')).toContainText("MORE TASKS TODAY");
+  await expect(page.locator('[data-widget-key="clock:clock"]')).toContainText("CURRENT");
   for (const [index, key] of keys.entries()) {
     if (key === "clock:clock") continue;
     expect(await cardGeometry(page, key)).toEqual(before[index]);
@@ -570,10 +574,21 @@ test("dashboard: Reset Layout restores deterministic defaults from normal mode",
   await dialog.getByRole("button", { name: /reset layout/i }).click();
 
   // Every available widget returns at its default size, hidden cleared.
+  // Defaults (dashboard redesign): the clock is the 28x34 hero, focus is one
+  // unit wider (22x16), mini_game is the smallest card (16x16), the rest
+  // stay 20x16.
+  const defaultSizes: Record<string, { width: string; height: string; w: number; h: number }> = {
+    "clock:clock": { width: "448px", height: "544px", w: 28, h: 34 },
+    "focus:timer": { width: "352px", height: "256px", w: 22, h: 16 },
+    "mini_game:highscore": { width: "256px", height: "256px", w: 16, h: 16 },
+    "tasks:today": { width: "320px", height: "256px", w: 20, h: 16 },
+    "assets:summary": { width: "320px", height: "256px", w: 20, h: 16 },
+    "notes:quick_note": { width: "320px", height: "256px", w: 20, h: 16 },
+  };
   const cards = page.locator(".dashboard-canvas[data-desktop='true'] .dashboard-card");
   await expect(cards).toHaveCount(6);
-  for (const key of ["clock:clock", "tasks:today", "assets:summary", "mini_game:highscore", "focus:timer", "notes:quick_note"]) {
-    expect(await cardGeometry(page, key)).toMatchObject({ width: "320px", height: "256px" });
+  for (const [key, size] of Object.entries(defaultSizes)) {
+    expect(await cardGeometry(page, key)).toMatchObject({ width: size.width, height: size.height });
   }
   await expect(page.getByText(/\d+ widget\(s\) hidden/)).toHaveCount(0);
 
@@ -594,8 +609,8 @@ test("dashboard: Reset Layout restores deterministic defaults from normal mode",
     ["assets:summary", "clock:clock", "focus:timer", "mini_game:highscore", "notes:quick_note", "tasks:today"].sort(),
   );
   expect(saved.value.hidden).toEqual([]);
-  for (const item of Object.values(saved.value.items)) {
-    expect(item).toMatchObject({ w: 20, h: 16 });
+  for (const [key, item] of Object.entries(saved.value.items)) {
+    expect(item).toMatchObject({ w: defaultSizes[key]!.w, h: defaultSizes[key]!.h });
   }
 
   // And it survives a reload.

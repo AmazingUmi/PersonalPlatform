@@ -800,7 +800,7 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
   return (
     <div className="tasks-widget">
       <div className="px-stats">
-        <div className="px-stat">
+        <div className="px-stat px-stat--lead">
           <span className="px-stat__label">Today</span>
           <span className="px-stat__value" ref={todayPulse}>{pad(data.today)}</span>
         </div>
@@ -823,7 +823,16 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
           />
           <span className="tasks-widget__progress-value">{meterPercent}%</span>
         </div>
-      ) : null}
+      ) : (
+        /* Empty days keep the meter's silhouette (ten hollow segments) so the
+         * card never collapses into blank space (dashboard empty-state rule). */
+        <div className="tasks-widget__progress">
+          <PixelMeter value={0} max={1} accent="mint" label="No tasks scheduled today" />
+          <span className="tasks-widget__progress-value tasks-widget__progress-value--empty">
+            NO TASKS SCHEDULED
+          </span>
+        </div>
+      )}
       {density === "expanded" ? (
         <div className="tasks-widget__status">
           <p className="tasks-widget__row">

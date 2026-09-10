@@ -189,12 +189,18 @@ describe("TasksTodayWidget density (Phase 10)", () => {
     expect(meter!.querySelectorAll(".px-meter__seg--on")).toHaveLength(4);
   });
 
-  it("hides the meter when today has no tasks at all", async () => {
+  it("keeps the meter silhouette with an explicit empty label when today has no tasks", async () => {
     setupDensityFetch({ today: 0, overdue: 0, done: 0, doneToday: 0, overdueBeforeToday: 0 });
     const { container } = renderWidget("normal");
 
     expect(await screen.findByText("Today")).toBeDefined();
-    expect(container.querySelector(".tasks-widget__progress")).toBeNull();
+    // Dashboard empty-state rule: zero-task days still render the ten hollow
+    // segments plus a text label — never blank space, never a bare 0%.
+    const meter = container.querySelector(".tasks-widget__progress .px-meter");
+    expect(meter).not.toBeNull();
+    expect(meter!.getAttribute("aria-label")).toBe("No tasks scheduled today");
+    expect(meter!.querySelectorAll(".px-meter__seg--on")).toHaveLength(0);
+    expect(screen.getByText("NO TASKS SCHEDULED")).toBeDefined();
   });
 
   it("expanded adds the current/next/remaining block on top of the counters", async () => {

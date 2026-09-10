@@ -169,10 +169,12 @@ describe("ClockWidget density (Phase 10)", () => {
     expect(screen.getByRole("timer")).toBeTruthy();
     expect(container.querySelector(".clock-digital__top")).toBeNull();
     expect(container.querySelector(".clock-digital__date")).toBeNull();
+    expect(container.querySelector(".clock-hero__datebar")).toBeNull();
+    expect(container.querySelector(".clock-hero__agenda")).toBeNull();
     expect(screen.queryByRole("button", { name: "DIGITAL" })).toBeNull();
   });
 
-  it("normal renders the full face with the mode toggle", async () => {
+  it("normal renders the full face with the mode toggle and the hero agenda", async () => {
     stubDensityFetch(statusWith(null, null, 0));
     render(<ClockWidget density="normal" />);
     await act(async () => {});
@@ -180,8 +182,12 @@ describe("ClockWidget density (Phase 10)", () => {
     expect(screen.getByText("CLOCK")).toBeTruthy();
     expect(containerHasDate()).toBe(true);
     expect(screen.getByRole("button", { name: "DIGITAL" })).toBeTruthy();
-    // The Tasks zone belongs to expanded only.
-    expect(screen.queryByText("MORE TASKS TODAY")).toBeNull();
+    // Hero redesign: the agenda zone belongs to every non-compact density —
+    // with no tasks at all it reads as explicit empty states.
+    expect(screen.getByText("CURRENT")).toBeTruthy();
+    expect(screen.getByText("Nothing running")).toBeTruthy();
+    expect(screen.getByText("Nothing scheduled")).toBeTruthy();
+    expect(screen.getByText("NOTHING ELSE TODAY")).toBeTruthy();
   });
 
   it("expanded adds the current/next/remaining task zone", async () => {

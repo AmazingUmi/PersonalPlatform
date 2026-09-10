@@ -267,6 +267,13 @@ function HighScoreWidget() {
           </span>
         </div>
       </div>
+      {/* Board silhouette (dashboard empty-state rule): a static 4×4 tile
+       * motif so the card reads as the 2048 board even at score 0. */}
+      <div className="game-widget__tiles" aria-hidden="true">
+        {Array.from({ length: 16 }, (_, index) => (
+          <span key={index} className={index === 5 || index === 6 || index === 9 ? "game-widget__tile game-widget__tile--on" : "game-widget__tile"} />
+        ))}
+      </div>
       <p className="game-widget__hint">Beat it on the board.</p>
     </div>
   );
@@ -275,7 +282,16 @@ function HighScoreWidget() {
 const app: FrontendAppModule = {
   id: "mini_game",
   routes: [{ path: "", label: "2048", element: <Game2048 /> }],
-  widgets: [{ id: "highscore", title: "2048 High Score", render: () => <HighScoreWidget /> }],
+  widgets: [
+    {
+      id: "highscore",
+      title: "2048 High Score",
+      render: () => <HighScoreWidget />,
+      /* Deliberately the smallest default card — score + board silhouette —
+       * so the dashboard's satellite row isn't five identical boxes. */
+      layout: { minW: 12, minH: 14, defaultW: 16, defaultH: 16 },
+    },
+  ],
 };
 
 export default app;

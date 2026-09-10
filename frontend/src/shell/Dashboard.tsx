@@ -575,10 +575,18 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
     if (await saveLayout(serializeLayout(current.items, current.hidden))) setEditMode(false);
   };
 
-  /** Deterministic default layout: every available widget at its default size. */
+  /**
+   * Deterministic default layout: every available widget at its default size.
+   * Composition rule (Dashboard redesign): the widget with the largest default
+   * footprint anchors the top-left as the hero (stable sort — equal areas keep
+   * registration order), the rest pack after it. Only the DEFAULT composition
+   * changes; persisted user layouts are untouched.
+   */
   const defaultLayout = (): DraftLayout => ({
     items: generateDefaultLayout(
-      availableKeys.map((key) => ({ key, size: defaultsOf(key) })),
+      [...availableKeys]
+        .map((key) => ({ key, size: defaultsOf(key) }))
+        .sort((a, b) => b.size.w * b.size.h - a.size.w * a.size.h),
       canvasWidth,
     ),
     hidden: [],
@@ -651,8 +659,13 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
 
   return (
     <div className="page">
-      <header className="page-header">
-        <h1 className="page-header__title">Dashboard</h1>
+      <header className="page-header page-header--dashboard">
+        <h1 className="page-header__title">
+          Dashboard
+          {/* Modular-apps glyph: three pixel squares standing for the app
+           * modules this dashboard composes (purely decorative). */}
+          <span className="page-header__glyph" aria-hidden="true" />
+        </h1>
         <p className="page-header__subtitle">System overview</p>
         <div className="page-header__actions">
           {/* Reset Layout is available in BOTH modes (Phase 11): one explicit
@@ -960,6 +973,7 @@ function DashboardCard({
       className={classes}
       style={style}
       data-widget={key}
+      data-app-id={resolved.appId}
       data-density={density}
     >
       <div className="dashboard-card__inner" ref={innerRef}>

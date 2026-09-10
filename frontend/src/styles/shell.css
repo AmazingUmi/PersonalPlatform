@@ -196,17 +196,22 @@
 }
 
 .dock__item[aria-current="page"] {
-  background: var(--px-surface);
+  /* Selection block (dashboard redesign): accent-tinted fill + a full-height
+   * 4px accent bar, so the active destination reads from across the room. */
+  background: color-mix(in srgb, var(--app-accent, var(--px-primary)) 14%, var(--px-surface));
   border-color: var(--px-border);
-  box-shadow: var(--shadow-pixel-sm);
+  box-shadow:
+    inset 4px 0 0 var(--app-accent, var(--px-primary)),
+    var(--shadow-pixel-sm);
   /* Active pointer nudge (motion system): a 2px step reads as the cursor
    * landing on the item. */
   transform: translateX(var(--motion-distance-xs));
 }
 
+/* The old 18px marker bar is superseded by the full-height inset bar; the
+ * pseudo-element stays as a hidden spacer so active/inactive icons align. */
 .dock__item[aria-current="page"]::before {
-  visibility: visible;
-  background: var(--app-accent, var(--px-primary));
+  visibility: hidden;
   transform: translateX(0);
 }
 
@@ -289,6 +294,19 @@
   text-transform: uppercase;
   color: var(--px-ink);
   animation: px-page-header-enter var(--motion-fast) steps(4, end) var(--motion-fast) backwards;
+}
+
+/* Dashboard title glyph: three pixel squares — one per composed app module.
+ * Purely decorative (aria-hidden in the markup). */
+.page-header__glyph {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-left: var(--space-2);
+  background: var(--px-primary);
+  box-shadow:
+    10px 0 0 0 var(--px-mint),
+    20px 0 0 0 var(--px-warning);
 }
 
 .page-header__subtitle {

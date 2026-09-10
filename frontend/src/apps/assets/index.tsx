@@ -1170,12 +1170,20 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
           {recent.map((item) => (
             <li key={item.id} className="assets-widget__recent-row">
               <span className="assets-widget__recent-name">{item.name}</span>
+              <span className="assets-widget__recent-leader" aria-hidden="true" />
               <span className="assets-widget__recent-qty">×{item.quantity}</span>
             </li>
           ))}
         </ul>
       ) : (
-        <p className="assets-widget__empty">No items tracked yet.</p>
+        /* Ledger keeps its ruled silhouette even when empty (dashboard
+         * empty-state rule): ghost leader lines instead of blank space. */
+        <div className="assets-widget__empty">
+          <p className="assets-widget__empty-title">NOTHING TRACKED YET</p>
+          <span className="assets-widget__recent-leader assets-widget__recent-leader--ghost" aria-hidden="true" />
+          <span className="assets-widget__recent-leader assets-widget__recent-leader--ghost" aria-hidden="true" />
+          <span className="assets-widget__recent-leader assets-widget__recent-leader--ghost" aria-hidden="true" />
+        </div>
       )}
     </div>
   );
