@@ -15,13 +15,17 @@ const app: FrontendAppModule = {
       layout: {
         minW: 16,
         minH: 12,
-        /* Hero footprint (Dashboard redesign): the clock card anchors the
-         * default layout as the tallest, widest widget. */
-        defaultW: 28,
-        defaultH: 34,
+        /* Horizontal hero (composition pass): 80 units = the full 1280px
+         * design row, scaled to the real canvas by the default-layout
+         * generator. Anchors the default composition's first row. */
+        defaultW: 80,
+        defaultH: 22,
+        defaultOrder: 10,
         density: {
-          normal: { minW: 18, minH: 14 },
-          expanded: { minW: 26, minH: 20 },
+          /* Below the wide threshold the hero stacks vertically (datebar,
+           * face, agenda); at compact it degrades to time-only. */
+          normal: { minW: 18, minH: 12 },
+          expanded: { minW: 44, minH: 16 },
         },
       },
     },

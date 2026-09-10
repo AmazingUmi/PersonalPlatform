@@ -153,6 +153,28 @@
 .dashboard-canvas .dashboard-card[data-app-id="notes"] .px-window { --widget-accent: var(--px-info); }
 .dashboard-canvas .dashboard-card[data-app-id="mini_game"] .px-window { --widget-accent: var(--px-violet); }
 
+/* Dashboard header (composition pass): title block left, actions right on
+ * one baseline row — the browsing header carries a single Edit Layout
+ * action; Reset Layout lives in edit mode next to Done. */
+.page-header--dashboard {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  column-gap: var(--space-4);
+}
+
+.page-header--dashboard .page-header__heading {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.page-header--dashboard .page-header__actions {
+  margin-top: 0;
+  flex: none;
+}
+
 .dashboard-canvas .dashboard-card .px-window {
   border-top: var(--border-4) solid var(--widget-accent, var(--px-border));
 }
@@ -183,24 +205,6 @@
   color: var(--px-warning);
 }
 
-.clock-hero {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-  height: 100%;
-}
-
-/* The face zone absorbs the hero's slack so the card composes tall instead
- * of leaving trailing blank space; the mode toggle pins to the bottom. */
-.clock-hero .clock-face {
-  flex: 1;
-  min-height: 0;
-}
-
-.clock-hero .clock-card__footer {
-  margin-top: auto;
-}
-
 .clock-hero__datebar {
   display: flex;
   align-items: baseline;
@@ -226,15 +230,85 @@
   color: var(--px-ink-muted);
 }
 
-/* Hero LCD: the dashboard's single dark large-area block. Scope hides the
- * face's own label/date/focus rows — the hero datebar and agenda carry them. */
+/* Compound selector: the later base `.clock-card { display: grid }` must
+ * not override the hero's flex column (grid auto tracks size to
+ * max-content, which would blow out narrow flow columns). */
+.clock-card.clock-hero {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  height: 100%;
+}
+
+/* Vertical hero (narrower cards): the main zone is transparent so the face
+ * and the agenda stack as direct flex children; the face absorbs the slack
+ * and centers its content vertically. */
+.clock-hero__main {
+  display: contents;
+}
+
+.clock-hero .clock-face {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+/* Wide hero (expanded density): horizontal composition — face left, agenda
+ * right, mode toggle + remaining strip in one bottom row. */
+.clock-hero[data-density="expanded"] {
+  gap: var(--space-4);
+}
+
+.clock-hero[data-density="expanded"] .clock-hero__main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: var(--space-5);
+}
+
+.clock-hero[data-density="expanded"] .clock-face {
+  flex: 0 0 32%;
+  min-width: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  place-items: center;
+}
+
+/* Wide hero: the analog wrapper fills the zone (definite tracks so
+ * percentages resolve) and the dial letterboxes inside it — never spilling
+ * over the bottom row. */
+.clock-hero[data-density="expanded"] .clock-analog {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  place-items: center;
+}
+
+.clock-hero[data-density="expanded"] .clock-analog__svg {
+  width: 100%;
+  height: 100%;
+  max-width: 200px;
+}
+
+/* Hero LCD/analog: the dashboard's single dark large-area element. Scope
+ * hides the face's own label/date/focus/meta rows — the hero datebar and
+ * agenda carry them exactly once (dedup rule). */
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-analog__meta {
+  display: none;
+}
+
 .dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-digital {
   background-color: var(--px-ink);
   border-color: var(--px-ink);
   padding: var(--space-6) var(--space-4);
-  /* The LCD block absorbs the hero's slack: its face zone flexes, so the
-   * whole card composes tall instead of leaving trailing blank space. */
   display: grid;
+  /* minmax(0,1fr) keeps the readout inside the card on narrow flow columns
+   * (the 320px no-overflow guarantee). */
+  grid-template-columns: minmax(0, 1fr);
   align-content: center;
 }
 
@@ -245,9 +319,16 @@
 }
 
 .dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-digital__time {
-  font-size: clamp(56px, 5vw, 80px);
+  font-size: clamp(44px, 5vw, 80px);
   letter-spacing: 0.02em;
   color: var(--px-inverse);
+  min-width: 0;
+}
+
+/* Wide hero: the LCD block shares the row with the agenda, so the digits
+ * step down from the vertical hero's giant readout. */
+.clock-hero[data-density="expanded"] .clock-digital__time {
+  font-size: clamp(44px, 3.2vw, 60px);
 }
 
 .dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-digital__seconds {
@@ -267,48 +348,108 @@
   color: var(--px-yellow);
 }
 
-.dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-analog {
-  flex: 1;
-  align-content: center;
-}
-
 .dashboard-canvas .dashboard-card[data-app-id="clock"] .clock-analog__svg {
-  max-width: 200px;
+  max-width: min(200px, 100%);
 }
 
-/* Agenda zone: always visible on the hero (data-independent composition). */
+/* Agenda zone: the single place the current task is spelled out. */
 .clock-hero__agenda {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-3);
+  align-content: center;
   padding: var(--space-3) 0;
   border-top: var(--border-1) dashed var(--px-border-soft);
   border-bottom: var(--border-1) dashed var(--px-border-soft);
 }
 
-.clock-hero__row {
-  display: flex;
-  gap: var(--space-2);
-  align-items: baseline;
-  margin: 0;
+.clock-hero[data-density="expanded"] .clock-hero__agenda {
+  flex: 1;
+  min-width: 0;
+  padding: 0 0 0 var(--space-5);
+  border-top: none;
+  border-bottom: none;
+  border-left: var(--border-1) dashed var(--px-border-soft);
+}
+
+.clock-hero__current,
+.clock-hero__next {
+  /* minmax(0,1fr) so the ellipsized title rows can shrink below their
+   * max-content width (the 320px no-overflow guarantee). */
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-1);
   min-width: 0;
 }
 
 .clock-hero__row-label {
-  flex: none;
-  width: 60px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
   font-family: var(--font-pixel);
   font-size: var(--text-xs);
   letter-spacing: 0.08em;
   color: var(--px-ink-muted);
 }
 
-.clock-hero__row-title {
-  min-width: 0;
+/* RUNNING status chip: state only — never repeats the task title. */
+.clock-hero__live {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 1px 6px;
+  background: var(--px-warning-light);
+  color: var(--px-warning-text);
+}
+
+.clock-hero__live-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--px-warning);
+  animation: clock-blink 2s steps(1) infinite;
+}
+
+.clock-hero__current-title {
+  margin: 0;
+  font-size: var(--text-md);
+  color: var(--px-ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.clock-hero__next-title {
+  margin: 0;
   font-size: var(--text-sm);
   color: var(--px-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Elapsed: the agenda's sub-metric — shown once, prominent. */
+.clock-hero__elapsed {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 0;
+}
+
+.clock-hero__elapsed-time {
+  font-family: var(--font-pixel);
+  font-size: 28px;
+  line-height: 1;
+  letter-spacing: 0.03em;
+  font-variant-numeric: tabular-nums;
+  color: var(--px-warning-text);
+}
+
+.clock-hero__elapsed-label {
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  color: var(--px-ink-muted);
 }
 
 .clock-hero__row-eta {
@@ -317,11 +458,20 @@
   color: var(--px-ink-muted);
 }
 
-/* Remaining-tasks strip: a dark footer bar mirroring the hero header. */
-.clock-hero__remaining {
+/* Bottom row: mode toggle left, remaining strip right — one line instead of
+ * a full-width dark band (density). Wraps on narrow flow columns. */
+.clock-hero__bottom {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
+  gap: var(--space-3);
+  margin-top: auto;
+}
+
+.clock-hero__remaining {
+  display: inline-flex;
+  align-items: center;
   gap: var(--space-2);
   margin: 0;
   padding: var(--space-2) var(--space-3);
@@ -330,6 +480,7 @@
   font-family: var(--font-pixel);
   font-size: var(--text-xs);
   letter-spacing: 0.08em;
+  white-space: nowrap;
   box-shadow: var(--shadow-pixel-sm);
 }
 
@@ -395,11 +546,40 @@
 
 /* ---- Focus: coral countdown panel + round pips ---- */
 
-.dashboard-canvas .focus-widget__time {
-  font-size: 34px;
-  padding: var(--space-3) var(--space-4);
+/* The dial panel absorbs the card's slack: the timer is the first visual
+ * element, the pips and the rounds label live inside the panel, and the
+ * controls pin to the bottom at a stable full-card width. */
+.dashboard-canvas .focus-widget {
+  height: 100%;
+}
+
+.dashboard-canvas .focus-widget__dial {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-3);
   background: var(--px-coral-light);
   border-left: var(--border-4) solid var(--px-coral);
+}
+
+.dashboard-canvas .focus-widget__time {
+  font-size: 44px;
+  padding: 0;
+  background: none;
+  border: none;
+}
+
+.dashboard-canvas .focus-widget__controls {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.dashboard-canvas .focus-widget__controls .px-button {
+  flex: 1 1 0;
+  min-height: 40px;
 }
 
 .focus-widget__rounds {
@@ -419,9 +599,24 @@
   background: var(--px-coral);
 }
 
+.focus-widget__rounds-label {
+  margin: 0;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  color: var(--px-ink-muted);
+}
+
 /* ---- Notes: lined-paper input ---- */
 
+.dashboard-canvas .notes-quick {
+  height: 100%;
+}
+
 .dashboard-canvas .notes-quick__input {
+  flex: 1;
+  min-height: 84px;
+  resize: none;
   line-height: 24px;
   background-image: repeating-linear-gradient(
     to bottom,
@@ -433,13 +628,47 @@
   background-clip: content-box;
 }
 
-/* ---- Mini Game: board silhouette motif ---- */
+.dashboard-canvas .notes-quick__actions {
+  justify-content: flex-end;
+}
+
+/* ---- Mini Game: high score hero + live board miniature ---- */
+
+.game-widget__label {
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--px-ink-muted);
+}
+
+.game-widget__best-value {
+  font-family: var(--font-pixel);
+  font-size: 40px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--px-violet-text);
+}
+
+.game-widget__run {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.game-widget__run-value {
+  font-family: var(--font-pixel);
+  font-size: var(--text-lg);
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+  color: var(--px-ink);
+}
 
 .game-widget__tiles {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 3px;
-  width: 72px;
+  width: min(200px, 100%);
+  gap: 2px;
   padding: 3px;
   border: var(--border-1) solid var(--px-border-soft);
   background: var(--px-surface-2);
@@ -447,13 +676,18 @@
 
 .game-widget__tile {
   aspect-ratio: 1;
+  display: grid;
+  place-items: center;
   border: var(--border-1) solid var(--px-border-soft);
   background: var(--px-surface);
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  color: var(--px-violet-text);
 }
 
 .game-widget__tile--on {
   border-color: var(--px-violet);
-  background: var(--px-violet);
+  background: var(--px-violet-light);
 }
 
 /* ---------- App Center ---------- */
@@ -733,6 +967,16 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Open-work summary line (normal density): spelled out so a zero-data day
+ * still reads as a complete sentence. */
+.tasks-widget__summary {
+  margin: 0;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.04em;
+  color: var(--px-ink-muted);
+}
+
 /* ---------- Assets ---------- */
 
 .assets-toolbar {
@@ -772,7 +1016,7 @@
 }
 
 .assets-widget__category-row .px-meter {
-  flex: 0 1 88px;
+  flex: 0 1 120px;
 }
 
 .assets-widget__category-count {
@@ -1250,19 +1494,21 @@
   color: var(--px-ink-muted);
 }
 
-/* High-score dashboard widget: framed stat + one-line nudge. */
+/* High-score dashboard widget: score hero + run stats + board miniature. */
 .game-widget {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.game-widget__best {
   display: grid;
   gap: var(--space-2);
 }
 
-.game-widget .px-stat {
-  border-color: var(--px-violet);
-  background: var(--px-violet-light);
-}
-
-.game-widget .px-stat__value--lg {
-  color: var(--px-violet-text);
+.game-widget__run-stat {
+  display: grid;
+  gap: 2px;
 }
 
 .game-widget__hint {
@@ -1733,6 +1979,12 @@
 }
 
 /* Dashboard widget (APP-1 FocusWidget). */
+
+.focus-widget {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
 
 .focus-widget__time {
   font-family: var(--font-pixel);

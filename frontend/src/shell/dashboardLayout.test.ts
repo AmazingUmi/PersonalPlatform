@@ -12,6 +12,7 @@ import {
   canvasHeightFor,
   clampPlacement,
   clampWidgetSize,
+  compareDefaultOrder,
   findFirstFreePosition,
   generateDefaultLayout,
   gridKeyboardCoordinateGetter,
@@ -420,8 +421,10 @@ describe("findFirstFreePosition", () => {
 });
 
 describe("generateDefaultLayout", () => {
-  it("packs entries left-to-right and wraps at the canvas edge", () => {
-    // 65-unit canvas: cards at 20 units + 1 gap pitch -> x 0, 21, 42, then wrap.
+  it("packs entries left-to-right, scales widths to the canvas and justifies rows", () => {
+    // 65-unit canvas: 20-unit defaults scale to 16 (reference 80); the shared
+    // row is justified to fill the canvas exactly, the orphan keeps its
+    // scaled width and wraps.
     const items = generateDefaultLayout(
       [
         { key: "a", size: units(20, 7) },
@@ -432,10 +435,10 @@ describe("generateDefaultLayout", () => {
       1040,
     );
     expect(items).toEqual({
-      a: { x: 0, y: 0, w: 20, h: 7 },
-      b: { x: 21, y: 0, w: 20, h: 7 },
-      c: { x: 42, y: 0, w: 20, h: 7 },
-      d: { x: 0, y: 8, w: 20, h: 7 }, // 7 units + 1 gap
+      a: { x: 0, y: 0, w: 21, h: 7 },
+      b: { x: 22, y: 0, w: 21, h: 7 },
+      c: { x: 44, y: 0, w: 21, h: 7 },
+      d: { x: 0, y: 8, w: 16, h: 7 }, // 7 units + 1 gap, unscaled orphan
     });
   });
 
@@ -462,7 +465,70 @@ describe("generateDefaultLayout", () => {
 
   it("uses the fallback capacity when the canvas width is unknown", () => {
     const items = generateDefaultLayout([{ key: "a", size: units(20, 7) }], 0);
-    expect(items.a).toEqual({ x: 0, y: 0, w: 20, h: 7 });
+    expect(items.a).toEqual({ x: 0, y: 0, w: 16, h: 7 }); // 20 scaled 65/80
+  });
+
+  it("composes the horizontal-hero template at the design reference width", () => {
+    // Reference canvas (80 units): an 80-unit hero owns the full first row,
+    // three satellites share the second exactly, the wide pair fills the last.
+    const items = generateDefaultLayout(
+      [
+        { key: "hero", size: units(80, 22) },
+        { key: "s1", size: units(26, 18) },
+        { key: "s2", size: units(26, 18) },
+        { key: "s3", size: units(26, 18) },
+        { key: "wide", size: units(48, 18) },
+        { key: "pair", size: units(31, 18) },
+      ],
+      1280,
+    );
+    expect(items.hero).toEqual({ x: 0, y: 0, w: 80, h: 22 });
+    expect(items.s1).toEqual({ x: 0, y: 23, w: 26, h: 18 });
+    expect(items.s2).toEqual({ x: 27, y: 23, w: 26, h: 18 });
+    expect(items.s3).toEqual({ x: 54, y: 23, w: 26, h: 18 });
+    expect(items.wide).toEqual({ x: 0, y: 42, w: 48, h: 18 });
+    expect(items.pair).toEqual({ x: 49, y: 42, w: 31, h: 18 });
+  });
+
+  it("scales the same composition to a narrower canvas without dead rows", () => {
+    // 1008px canvas (63 units, e.g. a 1280 viewport): every shared row still
+    // ends exactly at the canvas edge after justification.
+    const items = generateDefaultLayout(
+      [
+        { key: "hero", size: units(80, 22) },
+        { key: "s1", size: units(26, 18) },
+        { key: "s2", size: units(26, 18) },
+        { key: "s3", size: units(26, 18) },
+        { key: "wide", size: units(48, 18) },
+        { key: "pair", size: units(31, 18) },
+      ],
+      1008,
+    );
+    expect(items.hero).toEqual({ x: 0, y: 0, w: 63, h: 22 });
+    const rowEnd = (key: string) => items[key]!.x + items[key]!.w!;
+    expect(rowEnd("s1")).toBeLessThanOrEqual(63);
+    expect(rowEnd("s3")).toBe(63);
+    expect(rowEnd("pair")).toBe(63);
+  });
+
+  it("respects the entry minW floor after capacity scaling", () => {
+    const items = generateDefaultLayout(
+      [{ key: "a", size: units(20, 7), minW: 16 }],
+      704, // 44-unit canvas: 20 scaled -> 11, floored at 16
+    );
+    expect(items.a).toEqual({ x: 0, y: 0, w: 16, h: 7 });
+  });
+});
+
+describe("compareDefaultOrder", () => {
+  it("orders by declared defaultOrder first, then descending footprint", () => {
+    const sorted = [
+      { key: "big", size: units(30, 20) },
+      { key: "hero", size: units(80, 22), order: 10 },
+      { key: "mid", size: units(20, 16), order: 20 },
+      { key: "small", size: units(12, 12), order: 20 },
+    ].sort(compareDefaultOrder);
+    expect(sorted.map((entry) => entry.key)).toEqual(["hero", "mid", "small", "big"]);
   });
 });
 
@@ -475,15 +541,17 @@ describe("migrateLegacyLayout", () => {
       1040,
     );
     expect(layout.version).toBe(2);
-    expect(layout.items["beta:w"]).toEqual({ x: 0, y: 0, w: 20, h: 7 });
-    expect(layout.items["alpha:w"]).toEqual({ x: 21, y: 0, w: 20, h: 7 });
+    // 65-unit canvas: the two 20-unit defaults scale to 16 and the row is
+    // justified to fill it (32 + 32).
+    expect(layout.items["beta:w"]).toEqual({ x: 0, y: 0, w: 32, h: 7 });
+    expect(layout.items["alpha:w"]).toEqual({ x: 33, y: 0, w: 32, h: 7 });
     // V1 semantics: available but unlisted widgets stay hidden.
     expect(layout.hidden).toEqual(["gamma:w"]);
   });
 
   it("drops stale keys from the legacy order without occupying slots", () => {
     const layout = migrateLegacyLayout(["gone:w", "alpha:w"], ["alpha:w"], { "alpha:w": units(20, 7) }, 1040);
-    expect(layout.items).toEqual({ "alpha:w": { x: 0, y: 0, w: 20, h: 7 } });
+    expect(layout.items).toEqual({ "alpha:w": { x: 0, y: 0, w: 16, h: 7 } });
     expect(layout.hidden).toEqual([]);
   });
 
@@ -544,6 +612,21 @@ describe("resolveEffectiveLayout", () => {
     );
     // plain lands one gap right of the 24-wide clock.
     expect(effective.items.plain).toEqual({ x: 25, y: 0, w: DEFAULT_CARD_WIDTH_UNITS, h: DEFAULT_CARD_HEIGHT_UNITS });
+  });
+
+  it("auto-places in defaultOrder and clamps a default wider than the canvas", () => {
+    // Fresh-install path: nothing saved. hero declares defaultOrder 10 and a
+    // 80-unit default on a 63-unit canvas — it must clamp to the canvas (never
+    // overflow) and place before the unordered satellite.
+    const wide: Record<string, WidgetLayoutSpec | undefined> = {
+      hero: { defaultW: 80, defaultH: 22, minW: 16, minH: 12, defaultOrder: 10 },
+      sat: { defaultW: 26, defaultH: 18, minW: 16, minH: 12 },
+    };
+    const effective = resolveEffectiveLayout({ kind: "none" }, ["sat", "hero"], wide, 1008);
+    expect(effective.items.hero).toEqual({ x: 0, y: 0, w: 63, h: 22 });
+    // The satellite settles below the full-width hero, inside the canvas.
+    expect(effective.items.sat).toMatchObject({ y: 23, w: 26, h: 18 });
+    expect(effective.items.sat!.x + effective.items.sat!.w!).toBeLessThanOrEqual(63);
   });
 });
 
@@ -655,13 +738,13 @@ describe("default layout collision (Phase 11)", () => {
     for (const width of [0, 500, 700, 960, 1040, 1280, 1920]) expectDefaultCollisionFree(width);
   });
 
-  it("default sizes are never shrunk to fit a narrow canvas (wrap instead)", () => {
+  it("default widths scale down to a narrow canvas (shared rows still fill it)", () => {
     const items = generateDefaultLayout(
       heteroKeys.map((key) => ({ key, size: units(heteroSpecs[key]!.defaultW!, heteroSpecs[key]!.defaultH!) })),
-      320, // 20-unit canvas: nothing fits beside A (30 wide) — pack downward.
+      320, // 20-unit canvas: defaults scale hard, rows pack downward.
     );
-    expect(items.A).toEqual({ x: 0, y: 0, w: 30, h: 20 });
-    expect(items.B!.w).toBe(14);
+    expect(items.A).toEqual({ x: 0, y: 0, w: 8, h: 20 }); // 30 scaled 20/80
+    expect(items.B!.w).toBe(4); // 14 scaled
     expect(items.B!.h).toBe(10);
   });
 

@@ -12,9 +12,7 @@ const app: FrontendAppModule = {
       id: "timer",
       title: "Focus Timer",
       render: () => <FocusWidget />,
-      /* Slightly wider than the other satellites so its countdown panel
-       * breathes and the first dashboard row fills edge to edge. */
-      layout: { minW: 16, minH: 12, defaultW: 22, defaultH: 16 },
+      layout: { minW: 16, minH: 12, defaultW: 26, defaultH: 18, defaultOrder: 21 },
     },
   ],
   status: {

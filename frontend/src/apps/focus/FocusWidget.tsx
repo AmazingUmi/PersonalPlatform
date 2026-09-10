@@ -73,15 +73,19 @@ export function FocusWidget() {
       <div className="focus-widget__state">
         {stateLabel} · {kindLabel(kind)}
       </div>
-      <div className="focus-widget__time">{time}</div>
-      <div className="focus-widget__rounds" aria-hidden="true">
-        {Array.from({ length: roundPips }, (_, index) => (
-          <span key={index} className={index < roundsDone ? "focus-widget__pip focus-widget__pip--on" : "focus-widget__pip"} />
-        ))}
+      {/* Timer zone: the card's first visual element. The panel absorbs the
+       * card's slack so an idle card composes tall instead of trailing off
+       * into blank space; the round pips live inside it as the rhythm row. */}
+      <div className="focus-widget__dial">
+        <div className="focus-widget__time">{time}</div>
+        <div className="focus-widget__rounds" aria-hidden="true">
+          {Array.from({ length: roundPips }, (_, index) => (
+            <span key={index} className={index < roundsDone ? "focus-widget__pip focus-widget__pip--on" : "focus-widget__pip"} />
+          ))}
+        </div>
+        <p className="focus-widget__rounds-label">{today.completedRounds} ROUNDS</p>
       </div>
-      <div className="focus-widget__meta">
-        Focused {secondsToHumanLabel(today.focusedSeconds)} · {today.completedRounds} rounds
-      </div>
+      <div className="focus-widget__meta">Focused {secondsToHumanLabel(today.focusedSeconds)}</div>
       {error !== null ? (
         <StatusMessage tone="error">
           <p>{error}</p>

@@ -833,6 +833,16 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
           </span>
         </div>
       )}
+      {density !== "expanded" ? (
+        /* Summary line at normal density (the expanded block carries the
+         * richer CURRENT/NEXT zone instead): open work, spelled out so a
+         * zero-data day still reads as a complete sentence. */
+        <p className="tasks-widget__summary">
+          {data.today + data.overdue > 0
+            ? `${data.today + data.overdue} TASK${data.today + data.overdue === 1 ? "" : "S"} REMAINING`
+            : "ALL DONE FOR TODAY"}
+        </p>
+      ) : null}
       {density === "expanded" ? (
         <div className="tasks-widget__status">
           <p className="tasks-widget__row">
@@ -864,11 +874,12 @@ const app: FrontendAppModule = {
       layout: {
         minW: 16,
         minH: 10,
-        defaultW: 20,
-        defaultH: 16,
+        defaultW: 26,
+        defaultH: 18,
+        defaultOrder: 20,
         density: {
           normal: { minW: 18, minH: 12 },
-          expanded: { minW: 26, minH: 16 },
+          expanded: { minW: 20, minH: 16 },
         },
       },
     },

@@ -319,13 +319,13 @@ describe("Dashboard interaction (FP-5.2 / FP-5.3 / FP-5.4)", () => {
     const showChip = await screen.findByRole("button", { name: /alpha widget/i });
     fireEvent.click(showChip);
 
-    // beta occupies (0,0); alpha is placed one gap to the right (21 units)
-    // — verified through the persisted placement below.
+    // beta occupies (0,0) at its scaled default (16 wide on the fallback
+    // canvas); alpha is re-added one gap to the right at its default size.
     fireEvent.click(screen.getByRole("button", { name: /^done$/i }));
     await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalled());
     expect(vi.mocked(putSetting).mock.calls[0]![1]).toEqual({
       version: 2,
-      items: { "beta:w2": { x: 0, y: 0, w: 20, h: 16 }, "alpha:w1": { x: 21, y: 0, w: 20, h: 16 } },
+      items: { "beta:w2": { x: 0, y: 0, w: 16, h: 16 }, "alpha:w1": { x: 17, y: 0, w: 20, h: 16 } },
       hidden: [],
     });
   });
@@ -341,11 +341,13 @@ describe("Dashboard interaction (FP-5.2 / FP-5.3 / FP-5.4)", () => {
     fireEvent.click(screen.getByRole("button", { name: /reset layout/i }));
     fireEvent.click(within(screen.getByTestId("confirm-dialog")).getByRole("button", { name: /reset layout/i }));
 
-    // Phase 11: reset persists immediately — no Done press needed.
+    // Phase 11: reset persists immediately — no Done press needed. On the
+    // fallback (65-unit) canvas the two 20-unit defaults scale to 16 and the
+    // shared row is justified: 32 + gap + 32 = 65.
     await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalledTimes(1));
     expect(vi.mocked(putSetting).mock.calls[0]![1]).toEqual({
       version: 2,
-      items: { "alpha:w1": { x: 0, y: 0, w: 20, h: 16 }, "beta:w2": { x: 21, y: 0, w: 20, h: 16 } },
+      items: { "alpha:w1": { x: 0, y: 0, w: 32, h: 16 }, "beta:w2": { x: 33, y: 0, w: 32, h: 16 } },
       hidden: [],
     });
 
@@ -693,15 +695,16 @@ describe("Dashboard resize (Phase 10, desktop)", () => {
     fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
     fireEvent.click(screen.getByRole("button", { name: /reset layout/i }));
     fireEvent.click(within(screen.getByTestId("confirm-dialog")).getByRole("button", { name: /reset layout/i }));
-    await waitFor(() => expect(cardNode("alpha:w1").style.width).toBe("320px"));
+    // Justified default row on the fallback canvas: 32 units wide each.
+    await waitFor(() => expect(cardNode("alpha:w1").style.width).toBe("512px"));
     expect(cardNode("alpha:w1").style.height).toBe("256px");
 
     await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalled());
     expect(vi.mocked(putSetting).mock.calls[0]![1]).toEqual({
       version: 2,
       items: {
-        "alpha:w1": { x: 0, y: 0, w: 20, h: 16 },
-        "beta:w2": { x: 21, y: 0, w: 20, h: 16 },
+        "alpha:w1": { x: 0, y: 0, w: 32, h: 16 },
+        "beta:w2": { x: 33, y: 0, w: 32, h: 16 },
       },
       hidden: [],
     });
@@ -929,7 +932,7 @@ describe("Dashboard layout stabilization (Phase 11, desktop)", () => {
     expect(vi.mocked(putSetting)).not.toHaveBeenCalled();
   });
 
-  it("Reset Layout is available in normal mode and persists immediately", async () => {
+  it("Reset Layout lives in edit mode only and persists immediately", async () => {
     vi.mocked(getSetting).mockResolvedValue({
       version: 2,
       items: {
@@ -941,22 +944,25 @@ describe("Dashboard layout stabilization (Phase 11, desktop)", () => {
     const { unmount } = renderDashboard([app("alpha"), app("beta")]);
     await screen.findByText("Alpha Widget");
 
-    // Normal mode header: Reset Layout + Edit Layout side by side.
-    expect(screen.getByRole("button", { name: /reset layout/i })).toBeDefined();
+    // Composition pass: the browsing header carries a single Edit Layout —
+    // the destructive Reset is an edit-mode action next to Done.
+    expect(screen.queryByRole("button", { name: /reset layout/i })).toBeNull();
     expect(screen.getByRole("button", { name: /edit layout/i })).toBeDefined();
 
+    fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
+    expect(screen.getByRole("button", { name: /reset layout/i })).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: /reset layout/i }));
     fireEvent.click(within(screen.getByTestId("confirm-dialog")).getByRole("button", { name: /reset layout/i }));
 
     await waitFor(() => expect(vi.mocked(putSetting)).toHaveBeenCalledTimes(1));
     expect(vi.mocked(putSetting).mock.calls[0]![1]).toEqual({
       version: 2,
-      items: { "alpha:w1": { x: 0, y: 0, w: 20, h: 16 }, "beta:w2": { x: 21, y: 0, w: 20, h: 16 } },
+      items: { "alpha:w1": { x: 0, y: 0, w: 32, h: 16 }, "beta:w2": { x: 33, y: 0, w: 32, h: 16 } },
       hidden: [],
     });
-    // The committed state updated: defaults render without entering edit mode.
+    // The committed state updated: defaults render inside the open edit mode.
     await waitFor(() => expect(cardNode("alpha:w1").style.top).toBe("0px"));
-    expect(cardNode("alpha:w1").style.width).toBe("320px");
+    expect(cardNode("alpha:w1").style.width).toBe("512px");
 
     // Simulated reload: the saved value is served again.
     unmount();
@@ -964,7 +970,7 @@ describe("Dashboard layout stabilization (Phase 11, desktop)", () => {
     renderDashboard([app("alpha"), app("beta")]);
     await screen.findByText("Alpha Widget");
     expect(cardNode("alpha:w1").style.top).toBe("0px");
-    expect(cardNode("beta:w2").style.left).toBe("336px");
+    expect(cardNode("beta:w2").style.left).toBe("528px"); // 33 units
   });
 
   it("Reset Layout also clears hidden widgets (all available widgets return)", async () => {
@@ -977,6 +983,7 @@ describe("Dashboard layout stabilization (Phase 11, desktop)", () => {
     await screen.findByText("Beta Widget");
     expect(screen.queryByText("Alpha Widget")).toBeNull();
 
+    fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
     fireEvent.click(screen.getByRole("button", { name: /reset layout/i }));
     fireEvent.click(within(screen.getByTestId("confirm-dialog")).getByRole("button", { name: /reset layout/i }));
 
@@ -991,6 +998,7 @@ describe("Dashboard layout stabilization (Phase 11, desktop)", () => {
     renderDashboard([app("alpha"), app("beta")]);
     await screen.findByText("Alpha Widget");
 
+    fireEvent.click(screen.getByRole("button", { name: /edit layout/i }));
     fireEvent.click(screen.getByRole("button", { name: /reset layout/i }));
     fireEvent.click(within(screen.getByTestId("confirm-dialog")).getByRole("button", { name: /cancel/i }));
 

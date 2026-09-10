@@ -3,11 +3,11 @@ import { useAsync } from "../../shared/useAsync";
 import { LoadingState } from "../../shared/ui/LoadingState";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { AnalogClock } from "./AnalogClock";
-import { DigitalClock, type ClockFocusState } from "./DigitalClock";
+import { DigitalClock, focusElapsedClock, type ClockFocusState } from "./DigitalClock";
 import { dateLine, humanDuration, timeParts, weekdayLabel } from "./timeMath";
 import { useClockNow } from "./useClockNow";
 import { useClockSettings, type ClockSettings } from "./useClockSettings";
-import { fetchTasksPublicStatus } from "./tasksPublic";
+import { fetchTasksPublicStatus, type TasksPublicStatus } from "./tasksPublic";
 
 /** Shared face rendering for the card and the page (same settings row).
  * The wrapper carries the display-mode key so switching digital↔analog remounts
@@ -67,15 +67,83 @@ function HeroDateBar({ now }: { now: Date }) {
 }
 
 /**
- * Dashboard clock HERO card. The clock is the dashboard's visual anchor: a
- * date bar, a large LCD time block (digital) or a big dial (analog), the
- * CURRENT / NEXT agenda and a "N MORE TASKS TODAY" strip — all static, no
- * data required to look composed. Fetches the same settings row as the app
- * page (one source of truth — toggling here syncs everywhere) and ticks at
+ * The hero agenda: the single place the current task is spelled out.
+ * Deduplication rule (composition pass): the task title appears exactly
+ * once and the elapsed time exactly once — both here, never again in the
+ * clock face. "RUNNING" is a status chip next to the CURRENT label, not a
+ * repeated title line. In the wide hero the elapsed becomes the agenda's
+ * sub-metric (tabular MM:SS + ELAPSED label).
+ */
+function HeroAgenda({
+  agenda,
+  focus,
+  now,
+  wide,
+}: {
+  agenda: TasksPublicStatus;
+  focus: ClockFocusState | null;
+  now: Date;
+  wide: boolean;
+}) {
+  const next = agenda.next;
+  const nextAt = next ? new Date(Date.parse(next.startAt)) : null;
+  const nextParts = nextAt ? timeParts(nextAt) : null;
+  return (
+    <div className="clock-hero__agenda">
+      <section className="clock-hero__current">
+        <p className="clock-hero__row-label">
+          CURRENT
+          {focus ? (
+            <span className="clock-hero__live">
+              <span className="clock-hero__live-dot" aria-hidden="true" />
+              RUNNING
+            </span>
+          ) : null}
+        </p>
+        <p className="clock-hero__current-title">
+          {agenda.current ? agenda.current.title : "Nothing running"}
+        </p>
+        {focus ? (
+          wide ? (
+            <p className="clock-hero__elapsed">
+              <span className="clock-hero__elapsed-time">{focusElapsedClock(focus, now)}</span>
+              <span className="clock-hero__elapsed-label">ELAPSED</span>
+            </p>
+          ) : (
+            <p className="clock-hero__row-eta">
+              {humanDuration(now.getTime() - Date.parse(focus.startedAt))} elapsed
+            </p>
+          )
+        ) : null}
+      </section>
+      <section className="clock-hero__next">
+        <p className="clock-hero__row-label">NEXT</p>
+        <p className="clock-hero__next-title">
+          {next ? next.title : "Nothing scheduled"}
+          {next && nextParts ? (
+            <span className="clock-hero__row-eta">
+              {" "}
+              {nextParts.hours24}:{nextParts.minutes} · in{" "}
+              {humanDuration(Date.parse(next.startAt) - now.getTime())}
+            </span>
+          ) : null}
+        </p>
+      </section>
+    </div>
+  );
+}
+
+/**
+ * Dashboard clock HERO card. The clock is the dashboard's visual anchor.
+ * Wide (expanded) cards compose horizontally: date bar on top, face left,
+ * CURRENT/NEXT agenda right, mode toggle + remaining strip in one bottom
+ * row. Narrower cards stack the same zones vertically; compact (a
+ * user-resized small card) degrades to time-only. All static — no data
+ * required to look composed. Fetches the same settings row as the app page
+ * (one source of truth — toggling here syncs everywhere) and ticks at
  * second precision only when seconds are visible or a task is running. The
- * mode buttons are native <button>s, so Dashboard's isInteractiveTarget keeps
- * control presses from navigating the card. compact (a user-resized small
- * card) degrades to time-only.
+ * mode buttons are native <button>s, so Dashboard's isInteractiveTarget
+ * keeps control presses from navigating the card.
  */
 export function ClockWidget({ density = "normal" }: { density?: WidgetDensity }) {
   const { settings, loading, error, reload, save } = useClockSettings();
@@ -102,53 +170,19 @@ export function ClockWidget({ density = "normal" }: { density?: WidgetDensity })
   };
 
   const compact = density === "compact";
+  const wide = density === "expanded";
   const agenda = !compact ? (status.data ?? null) : null;
   const remaining = agenda ? moreTodayCount(agenda) : 0;
-  const next = agenda ? agenda.next : null;
-  const nextAt = next ? new Date(Date.parse(next.startAt)) : null;
-  const nextParts = nextAt ? timeParts(nextAt) : null;
 
   return (
     <div className="clock-card clock-hero" data-density={density}>
       {!compact ? <HeroDateBar now={minuteNow} /> : null}
-      <ClockFace now={faceNow} settings={settings} variant="card" focus={focus} density={density} />
-      {agenda ? (
-        <div className="clock-hero__agenda">
-          <p className="clock-hero__row">
-            <span className="clock-hero__row-label">CURRENT</span>
-            <span className="clock-hero__row-title">
-              {agenda.current ? agenda.current.title : "Nothing running"}
-              {focus ? (
-                <span className="clock-hero__row-eta">
-                  {" "}
-                  {humanDuration(minuteNow.getTime() - Date.parse(focus.startedAt))} elapsed
-                </span>
-              ) : null}
-            </span>
-          </p>
-          <p className="clock-hero__row">
-            <span className="clock-hero__row-label">NEXT</span>
-            <span className="clock-hero__row-title">
-              {next ? next.title : "Nothing scheduled"}
-              {next && nextParts ? (
-                <span className="clock-hero__row-eta">
-                  {" "}
-                  {nextParts.hours24}:{nextParts.minutes} · in{" "}
-                  {humanDuration(Date.parse(next.startAt) - minuteNow.getTime())}
-                </span>
-              ) : null}
-            </span>
-          </p>
-        </div>
-      ) : null}
+      <div className="clock-hero__main">
+        <ClockFace now={faceNow} settings={settings} variant="card" focus={focus} density={density} />
+        {agenda ? <HeroAgenda agenda={agenda} focus={focus} now={minuteNow} wide={wide} /> : null}
+      </div>
       {!compact ? (
-          <p className="clock-hero__remaining">
-            {remaining > 0 ? `${remaining} MORE TASKS TODAY` : "NOTHING ELSE TODAY"}
-            <span className="clock-hero__remaining-arrow" aria-hidden="true" />
-          </p>
-      ) : null}
-      {!compact ? (
-        <div className="clock-card__footer">
+        <div className="clock-hero__bottom">
           <div className="px-seg" role="group" aria-label="Clock display mode">
             <button
               type="button"
@@ -167,6 +201,10 @@ export function ClockWidget({ density = "normal" }: { density?: WidgetDensity })
               ANALOG
             </button>
           </div>
+          <p className="clock-hero__remaining">
+            {remaining > 0 ? `${remaining} MORE TASKS TODAY` : "NOTHING ELSE TODAY"}
+            <span className="clock-hero__remaining-arrow" aria-hidden="true" />
+          </p>
         </div>
       ) : null}
     </div>

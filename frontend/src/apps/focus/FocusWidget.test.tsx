@@ -87,7 +87,8 @@ describe("FocusWidget", () => {
 
     expect(screen.getByText("READY · Focus")).toBeTruthy();
     expect(screen.getByText("25:00")).toBeTruthy();
-    expect(screen.getByText("Focused 1h 30m · 2 rounds")).toBeTruthy();
+    expect(screen.getByText("Focused 1h 30m")).toBeTruthy();
+    expect(screen.getByText("2 ROUNDS")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Start" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Pause" })).toBeNull();
   });

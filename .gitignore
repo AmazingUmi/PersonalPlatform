@@ -34,3 +34,7 @@ frontend/playwright-report/
 htmlcov/
 coverage/
 test-results/
+
+# Agents
+.agents/
+.codebuddy/

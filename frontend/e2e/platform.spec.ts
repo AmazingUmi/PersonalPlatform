@@ -202,8 +202,8 @@ test("dashboard: free-layout drag persists after reload (V1 -> V2)", async ({ pa
 
   await page.getByRole("button", { name: /edit layout/i }).click();
   // Drag the tasks card's handle down-left into empty space (2 units left,
-  // 25 units down): well clear of the second row and of the right edge, so
-  // the drop lands on the exact snapped grid slot.
+  // 6 units down — under the second row, clear of the viewport bottom so
+  // dnd-kit's auto-scroll never adds scroll drift to the drop).
   const handle = page.locator('.dashboard-card[data-widget="tasks:today"] .drag-handle');
   const source = await handle.boundingBox();
   assert(source, "drag handle box resolved");
@@ -211,7 +211,7 @@ test("dashboard: free-layout drag persists after reload (V1 -> V2)", async ({ pa
   const startY = source.y + source.height / 2;
   await page.mouse.move(startX, startY);
   await page.mouse.down();
-  await page.mouse.move(startX - 32, startY + 400, { steps: 20 });
+  await page.mouse.move(startX - 32, startY + 96, { steps: 20 });
   await page.mouse.up();
 
   // Only the dragged card moved, onto its snapped slot; the other cards keep
@@ -219,20 +219,24 @@ test("dashboard: free-layout drag persists after reload (V1 -> V2)", async ({ pa
   // target is 25 units; dnd-kit's auto-scroll may add a unit of page scroll
   // to the drop delta, so accept the 25-27 unit band.
   const tasksPlacementAfter = await placement("tasks:today");
-  // Defaults (dashboard redesign): assets 20 wide at x0, mini_game 16 wide at
-  // x21, tasks 20 wide at x38 (608px); 2 units left lands on 576px.
-  assert.equal(tasksPlacementAfter.left, "576px", "tasks moved 2 grid units left");
+  // Migrated defaults (composition pass, 63-unit canvas): the V1 order packs
+  // scaled and justified — assets+mini_game fill row 1, so tasks starts row 2
+  // at x0; the 2-unit-left drag clamps at the canvas edge and stays there.
+  assert.equal(tasksPlacementAfter.left, "0px", "tasks clamped at the left canvas edge");
+  // Pointer drags carry a few px of sensor-activation slack; assert the
+  // snapped delta (target 6 units) instead of an absolute slot.
+  const topBeforeUnits = Number.parseInt(beforePlacement[2]!.top, 10) / 16;
   const topUnits = Number.parseInt(tasksPlacementAfter.top, 10) / 16;
   assert.ok(
-    topUnits >= 25 && topUnits <= 27,
-    `tasks moved ~25 grid units down (got ${tasksPlacementAfter.top})`,
+    topUnits - topBeforeUnits >= 5 && topUnits - topBeforeUnits <= 8,
+    `tasks moved ~6 grid units down from row 2 (got ${tasksPlacementAfter.top}, was ${beforePlacement[2]!.top})`,
   );
   for (const [index, key] of keys.entries()) {
     if (key === "tasks:today") continue;
     expect(await placement(key)).toEqual(beforePlacement[index]);
   }
   const tasksBoxAfter = round(await cardBox("tasks:today"));
-  assert.ok(tasksBoxAfter.y > tasksBoxBefore.y + 350, "tasks card visually moved far down");
+  assert.ok(tasksBoxAfter.y > tasksBoxBefore.y + 60, "tasks card visually moved down");
 
   // The canvas grew downward to make room for the lower card.
   const canvasAfter = await page.locator(".dashboard-canvas").boundingBox();
@@ -387,10 +391,11 @@ test("dashboard: resize auto-saves without Done; other cards never move", async 
   assert.equal(clockAfter.top, "0px", "clock y anchored");
   assert.equal(clockAfter.width, "416px", "clock grew to 26 units");
   assert.equal(clockAfter.height, "320px", "clock grew to 20 units");
-  // 26x20 crosses the clock's expanded threshold: the density attribute
-  // switches (the hero agenda is density-independent by design — every
-  // non-compact hero shows the CURRENT/NEXT zone).
-  expect(clockAfter.density).toBe("expanded");
+  // 26x20 stays a VERTICAL hero (composition pass: expanded = the wide
+  // horizontal composition, w >= 44): the density attribute reads normal and
+  // the agenda is density-independent by design — every non-compact hero
+  // shows the CURRENT/NEXT zone.
+  expect(clockAfter.density).toBe("normal");
   await expect(page.locator('[data-widget-key="clock:clock"]')).toContainText("CURRENT");
   for (const [index, key] of keys.entries()) {
     if (key === "clock:clock") continue;
@@ -418,7 +423,7 @@ test("dashboard: resize auto-saves without Done; other cards never move", async 
     top: "0px",
     width: "416px",
     height: "320px",
-    density: "expanded",
+    density: "normal",
   });
   // Every other card kept its exact placement across the resize + reload.
   for (const [index, key] of keys.entries()) {
@@ -469,8 +474,11 @@ test("dashboard: narrow viewport ignores saved desktop sizes without overflow", 
   await page.goto("/");
   await expect(page.locator(".dashboard-card [data-widget-key]").first()).toBeVisible();
 
-  // The Reset Layout action stays reachable on mobile (Phase 11).
+  // The Reset Layout action stays reachable on mobile (Phase 11) — one
+  // Edit Layout hop away, never surfaced in the browsing header.
+  await page.getByRole("button", { name: /edit layout/i }).click();
   await expect(page.getByRole("button", { name: /reset layout/i })).toBeVisible();
+  await page.getByRole("button", { name: /^done$/i }).click();
 
   // Narrow mode must not apply desktop geometry: flow layout, no inline size.
   await expect(page.locator(".dashboard-canvas[data-desktop='true']")).toHaveCount(0);
@@ -546,7 +554,7 @@ test("dashboard: default layout without a saved setting renders collision free",
   });
 });
 
-test("dashboard: Reset Layout restores deterministic defaults from normal mode", async ({ page }) => {
+test("dashboard: Reset Layout restores deterministic defaults from edit mode", async ({ page }) => {
   // Heavily customized persisted layout: shifted, resized, three widgets hidden.
   await setAppEnabled("clock", true);
   await setAppEnabled("notes", true);
@@ -566,24 +574,26 @@ test("dashboard: Reset Layout restores deterministic defaults from normal mode",
   await expect(page.locator(".dashboard-canvas[data-desktop='true'] .dashboard-card")).toHaveCount(3);
   expect(await cardGeometry(page, "clock:clock")).toMatchObject({ width: "480px", height: "384px" });
 
-  // Reset is available in the NORMAL header (no Edit Layout detour) and asks
-  // for confirmation first.
+  // Composition pass: Reset lives in edit mode only — the browsing header
+  // carries a single Edit Layout action.
+  await expect(page.getByRole("button", { name: /reset layout/i })).toHaveCount(0);
+  await page.getByRole("button", { name: /edit layout/i }).click();
   await page.getByRole("button", { name: /reset layout/i }).click();
   const dialog = page.getByTestId("confirm-dialog");
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: /reset layout/i }).click();
 
   // Every available widget returns at its default size, hidden cleared.
-  // Defaults (dashboard redesign): the clock is the 28x34 hero, focus is one
-  // unit wider (22x16), mini_game is the smallest card (16x16), the rest
-  // stay 20x16.
+  // Defaults (composition pass, 1280x720 viewport = 63-unit canvas): the
+  // 80-unit clock hero scales to the full row; the three satellites and the
+  // notes/2048 pair fill their rows exactly (justified).
   const defaultSizes: Record<string, { width: string; height: string; w: number; h: number }> = {
-    "clock:clock": { width: "448px", height: "544px", w: 28, h: 34 },
-    "focus:timer": { width: "352px", height: "256px", w: 22, h: 16 },
-    "mini_game:highscore": { width: "256px", height: "256px", w: 16, h: 16 },
-    "tasks:today": { width: "320px", height: "256px", w: 20, h: 16 },
-    "assets:summary": { width: "320px", height: "256px", w: 20, h: 16 },
-    "notes:quick_note": { width: "320px", height: "256px", w: 20, h: 16 },
+    "clock:clock": { width: "1008px", height: "352px", w: 63, h: 22 },
+    "tasks:today": { width: "336px", height: "288px", w: 21, h: 18 },
+    "focus:timer": { width: "320px", height: "288px", w: 20, h: 18 },
+    "assets:summary": { width: "320px", height: "288px", w: 20, h: 18 },
+    "notes:quick_note": { width: "608px", height: "288px", w: 38, h: 18 },
+    "mini_game:highscore": { width: "384px", height: "288px", w: 24, h: 18 },
   };
   const cards = page.locator(".dashboard-canvas[data-desktop='true'] .dashboard-card");
   await expect(cards).toHaveCount(6);
@@ -601,7 +611,7 @@ test("dashboard: Reset Layout restores deterministic defaults from normal mode",
   }
   assertBoxesDoNotOverlap(boxes);
 
-  // The reset persisted immediately (no Done — we never entered edit mode).
+  // The reset persisted immediately (no Done press needed).
   const saved = (await (
     await page.request.get(`${CORE}/api/core/settings/dashboard.widgets`)
   ).json()) as { value: { items: Record<string, { w: number; h: number }>; hidden: string[] } };

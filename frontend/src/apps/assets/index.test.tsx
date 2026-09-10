@@ -530,20 +530,21 @@ describe("AssetSummaryWidget density (Phase 10)", () => {
     expect(document.querySelector(".assets-widget__categories")).toBeNull();
   });
 
-  it("expanded widens the recent list to five items", async () => {
+  it("expanded widens the recent list to four items", async () => {
     setupWidgetFetch(recentItems);
     renderWidget("expanded");
 
-    expect(await screen.findByText("Recent item 4")).toBeDefined();
-    expect(screen.queryByText("Recent item 5")).toBeNull();
+    expect(await screen.findByText("Recent item 3")).toBeDefined();
+    expect(screen.queryByText("Recent item 4")).toBeNull();
   });
 
   it("declares its layout contract for the dashboard", () => {
     expect(widget.layout).toEqual({
       minW: 14,
       minH: 10,
-      defaultW: 20,
-      defaultH: 16,
+      defaultW: 26,
+      defaultH: 18,
+      defaultOrder: 22,
       density: { normal: { minW: 16, minH: 12 }, expanded: { minW: 24, minH: 16 } },
     });
   });

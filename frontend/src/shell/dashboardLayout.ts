@@ -46,6 +46,15 @@ export const DASHBOARD_DESKTOP_MEDIA_QUERY = `(min-width: ${DASHBOARD_DESKTOP_BR
 /** Canvas width assumed when no DOM measurement is available (65 units). */
 export const FALLBACK_CANVAS_WIDTH_PX = 1040;
 
+/**
+ * Reference canvas for default composition sizing: the page content max
+ * (tokens.css --content-max 1280px) in grid units. Keep in sync with
+ * --content-max. Default widths are declared against this reference and
+ * scaled to the real canvas so the default composition fills every desktop
+ * width instead of leaving a right-hand gap on narrower canvases.
+ */
+export const DEFAULT_LAYOUT_REFERENCE_UNITS = 80;
+
 /** Defensive ceiling for stored/suggested coordinates and sizes (160,000px). */
 export const MAX_GRID_UNITS = 10_000;
 
@@ -399,13 +408,25 @@ export function findFirstFreePosition(
 export interface DefaultLayoutEntry {
   key: string;
   size: SizeUnits;
+  /** Width floor (the widget's minW) applied after capacity scaling. */
+  minW?: number;
 }
 
 /**
- * Deterministic default layout: pack entries left-to-right in list order,
- * wrap when the row is full (compact by design — the user's own layout is
- * never compacted). Every placement carries the entry's size so restoring
- * defaults also restores default sizes.
+ * Deterministic default layout (capacity-relative composition):
+ *
+ * 1. Every entry's default width is scaled from the 80-unit design reference
+ *    down/up to the actual canvas capacity (heights stay content-driven).
+ * 2. Entries pack greedily left-to-right in the given order, wrapping when
+ *    the row is full (compact by design — the user's own layout is never
+ *    compacted).
+ * 3. Multi-member rows are justified: the rounding slack is handed out in
+ *    whole units so every shared row fills the canvas exactly. A
+ *    single-member row is never stretched — a lone widget keeps its declared
+ *    (scaled) width.
+ *
+ * Every placement carries the entry's size so restoring defaults also
+ * restores default sizes.
  */
 export function generateDefaultLayout(
   entries: DefaultLayoutEntry[],
@@ -413,21 +434,64 @@ export function generateDefaultLayout(
 ): Record<string, DashboardWidgetPlacement> {
   const capacity = canvasCapacityUnits(canvasWidthPx) || canvasCapacityUnits(FALLBACK_CANVAS_WIDTH_PX);
   const items: Record<string, DashboardWidgetPlacement> = {};
-  let cursorX = 0;
-  let cursorY = 0;
-  let rowHeightUnits = 0;
+  type Row = { key: string; w: number; h: number }[];
+  const rows: Row[] = [];
+  let row: Row = [];
+  let usedUnits = 0; // width + inner gaps of the current row
   for (const entry of entries) {
-    const { w, h } = entry.size;
-    if (cursorX > 0 && cursorX + w > capacity) {
-      cursorX = 0;
-      cursorY += rowHeightUnits + COLLISION_GAP_UNITS;
-      rowHeightUnits = 0;
+    const scaledW = Math.round((entry.size.w * capacity) / DEFAULT_LAYOUT_REFERENCE_UNITS);
+    const w = Math.max(1, Math.min(capacity, Math.max(entry.minW ?? 1, scaledW)));
+    const needed = row.length === 0 ? w : usedUnits + COLLISION_GAP_UNITS + w;
+    if (row.length > 0 && needed > capacity) {
+      rows.push(row);
+      row = [];
+      usedUnits = 0;
     }
-    items[entry.key] = { x: cursorX, y: cursorY, w, h };
-    cursorX += w + COLLISION_GAP_UNITS;
-    rowHeightUnits = Math.max(rowHeightUnits, h);
+    row.push({ key: entry.key, w, h: entry.size.h });
+    usedUnits = row.length === 1 ? w : usedUnits + COLLISION_GAP_UNITS + w;
+  }
+  if (row.length > 0) rows.push(row);
+  let cursorY = 0;
+  for (const currentRow of rows) {
+    // Justify shared rows: distribute the integer slack left-to-right.
+    if (currentRow.length > 1) {
+      let slack =
+        capacity -
+        (currentRow.reduce((sum, member) => sum + member.w, 0) +
+          (currentRow.length - 1) * COLLISION_GAP_UNITS);
+      let index = 0;
+      while (slack > 0) {
+        currentRow[index % currentRow.length]!.w += 1;
+        slack -= 1;
+        index += 1;
+      }
+    }
+    let cursorX = 0;
+    let rowHeightUnits = 0;
+    for (const member of currentRow) {
+      items[member.key] = { x: cursorX, y: cursorY, w: member.w, h: member.h };
+      cursorX += member.w + COLLISION_GAP_UNITS;
+      rowHeightUnits = Math.max(rowHeightUnits, member.h);
+    }
+    cursorY += rowHeightUnits + COLLISION_GAP_UNITS;
   }
   return items;
+}
+
+/**
+ * Composition order for default placements: declared defaultOrder first
+ * (lower earlier), then descending footprint, then registration order (the
+ * stable sort keeps it for ties). Shared by Reset Layout and fresh-install
+ * auto-placement so both produce the same composition.
+ */
+export function compareDefaultOrder(
+  a: { key: string; size: SizeUnits; order?: number },
+  b: { key: string; size: SizeUnits; order?: number },
+): number {
+  const orderA = a.order ?? Number.MAX_SAFE_INTEGER;
+  const orderB = b.order ?? Number.MAX_SAFE_INTEGER;
+  if (orderA !== orderB) return orderA - orderB;
+  return b.size.w * b.size.h - a.size.w * a.size.h;
 }
 
 /**
@@ -549,18 +613,17 @@ export function resolveEffectiveLayout(
     items = repairCollisions(clamped, specs, canvasWidthPx);
   }
   const occupied = () => Object.entries(items).map(([key, p]) => placementRect(p, defaultsOf(key)));
-  // Auto-placed widgets (fresh install, newly shipped widgets) settle
-  // largest-footprint-first so the declared hero anchors the top-left of the
-  // default composition; equal areas keep registration order (stable sort).
+  // Auto-placed widgets (fresh install, newly shipped widgets) settle in the
+  // default composition order (declared defaultOrder, then largest footprint
+  // first) and their size is clamped to the canvas so a wide default can
+  // never overflow or mask the placement scan.
   const unplaced = availableKeys
     .filter((key) => items[key] === undefined && !hiddenSet.has(key))
-    .sort((a, b) => {
-      const da = defaultsOf(a);
-      const db = defaultsOf(b);
-      return db.w * db.h - da.w * da.h;
-    });
-  for (const key of unplaced) {
-    items[key] = findFirstFreePosition(defaultsOf(key), occupied(), canvasWidthPx);
+    .map((key) => ({ key, size: defaultsOf(key), order: specs[key]?.defaultOrder }))
+    .sort(compareDefaultOrder);
+  for (const { key, size } of unplaced) {
+    const clamped = clampWidgetSize(size, layoutOf(key), capacity, 0);
+    items[key] = findFirstFreePosition(clamped, occupied(), canvasWidthPx);
   }
   // Final normalization: the returned layout guarantees explicit w/h on
   // every placement (auto-placed entries already carry theirs).

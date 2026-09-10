@@ -1059,12 +1059,13 @@ function AssetDetailPage() {
 /**
  * Asset Summary dashboard card. compact keeps the two counters (summary
  * endpoint only); normal/expanded derive the counters from the item list's
- * faceted counts and add recent items — three rows at normal, five at
- * expanded. Never a management page: rows are name + quantity only.
+ * faceted counts and add recent items — three rows at normal, four at
+ * expanded (fits the default 26x18 card without clipping). Never a
+ * management page: rows are name + quantity only.
  */
 function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity }) {
   const compact = density === "compact";
-  const recentLimit = density === "expanded" ? 5 : 3;
+  const recentLimit = density === "expanded" ? 4 : 3;
   const summary = useAsync(
     () =>
       compact
@@ -1203,8 +1204,9 @@ const app: FrontendAppModule = {
       layout: {
         minW: 14,
         minH: 10,
-        defaultW: 20,
-        defaultH: 16,
+        defaultW: 26,
+        defaultH: 18,
+        defaultOrder: 22,
         density: {
           normal: { minW: 16, minH: 12 },
           expanded: { minW: 24, minH: 16 },

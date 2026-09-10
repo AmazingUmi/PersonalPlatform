@@ -219,9 +219,10 @@ describe("TasksTodayWidget density (Phase 10)", () => {
     expect(widget.layout).toEqual({
       minW: 16,
       minH: 10,
-      defaultW: 20,
-      defaultH: 16,
-      density: { normal: { minW: 18, minH: 12 }, expanded: { minW: 26, minH: 16 } },
+      defaultW: 26,
+      defaultH: 18,
+      defaultOrder: 20,
+      density: { normal: { minW: 18, minH: 12 }, expanded: { minW: 20, minH: 16 } },
     });
   });
 });

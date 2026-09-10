@@ -34,6 +34,13 @@ export interface WidgetLayoutSpec {
   maxH?: number;
   defaultW?: number;
   defaultH?: number;
+  /**
+   * Reading order inside the DEFAULT dashboard composition (Reset Layout and
+   * fresh-install auto-placement): lower values place earlier. Widgets
+   * without a defaultOrder keep the footprint-descending fallback. Purely a
+   * default-composition hint — persisted user layouts are never reordered.
+   */
+  defaultOrder?: number;
   density?: {
     normal?: WidgetDensityThreshold;
     expanded?: WidgetDensityThreshold;

@@ -74,11 +74,11 @@ async function ensureDashboardWidget(request: APIRequestContext) {
 const widgetState = (page: Page): Locator => page.locator(`${FOCUS_CARD} .focus-widget__state`);
 const widgetTime = (page: Page): Locator => page.locator(`${FOCUS_CARD} .focus-widget__time`);
 
-/** Today's completed-round count as rendered by the dashboard widget meta. */
+/** Today's completed-round count as rendered by the widget rounds label. */
 async function widgetRounds(page: Page): Promise<number> {
-  const text = await page.locator(`${FOCUS_CARD} .focus-widget__meta`).innerText();
-  const match = /(\d+)\s+rounds/.exec(text);
-  expect(match, `widget meta carries a rounds count (got: ${text})`).not.toBeNull();
+  const text = await page.locator(`${FOCUS_CARD} .focus-widget__rounds-label`).innerText();
+  const match = /(\d+)\s+ROUNDS/.exec(text);
+  expect(match, `widget rounds label carries a count (got: ${text})`).not.toBeNull();
   return Number(match![1]);
 }
 

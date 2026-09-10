@@ -43,6 +43,7 @@ import {
   GRID_SIZE,
   canvasHeightFor,
   clampPlacement,
+  compareDefaultOrder,
   findFirstFreePosition,
   generateDefaultLayout,
   gridKeyboardCoordinateGetter,
@@ -576,17 +577,22 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
   };
 
   /**
-   * Deterministic default layout: every available widget at its default size.
-   * Composition rule (Dashboard redesign): the widget with the largest default
-   * footprint anchors the top-left as the hero (stable sort — equal areas keep
-   * registration order), the rest pack after it. Only the DEFAULT composition
-   * changes; persisted user layouts are untouched.
+   * Deterministic default layout (capacity-relative composition): widgets
+   * pack in the declared defaultOrder (reading order: hero, data row, wide
+   * row), each at its default size scaled to the canvas so rows fill the
+   * width. Only the DEFAULT composition changes; persisted user layouts are
+   * untouched.
    */
   const defaultLayout = (): DraftLayout => ({
     items: generateDefaultLayout(
       [...availableKeys]
-        .map((key) => ({ key, size: defaultsOf(key) }))
-        .sort((a, b) => b.size.w * b.size.h - a.size.w * a.size.h),
+        .map((key) => ({
+          key,
+          size: defaultsOf(key),
+          order: specs[key]?.defaultOrder,
+          minW: layoutOf(key).minW,
+        }))
+        .sort(compareDefaultOrder),
       canvasWidth,
     ),
     hidden: [],
@@ -660,28 +666,32 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
   return (
     <div className="page">
       <header className="page-header page-header--dashboard">
-        <h1 className="page-header__title">
-          Dashboard
-          {/* Modular-apps glyph: three pixel squares standing for the app
-           * modules this dashboard composes (purely decorative). */}
-          <span className="page-header__glyph" aria-hidden="true" />
-        </h1>
-        <p className="page-header__subtitle">System overview</p>
+        <div className="page-header__heading">
+          <h1 className="page-header__title">
+            Dashboard
+            {/* Modular-apps glyph: three pixel squares standing for the app
+             * modules this dashboard composes (purely decorative). */}
+            <span className="page-header__glyph" aria-hidden="true" />
+          </h1>
+          <p className="page-header__subtitle">{editMode ? "Edit mode · drag, resize, hide" : "System overview"}</p>
+        </div>
         <div className="page-header__actions">
-          {/* Reset Layout is available in BOTH modes (Phase 11): one explicit
-           * action back to the deterministic collision-free defaults. */}
-          <PixelButton
-            size="sm"
-            variant="secondary"
-            onClick={() => setResetConfirmOpen(true)}
-            disabled={available.length === 0}
-          >
-            <PixelIcon name="refresh" /> Reset Layout
-          </PixelButton>
           {editMode ? (
-            <PixelButton size="sm" onClick={() => void finishEditing()}>
-              Done
-            </PixelButton>
+            <>
+              {/* Reset is a low-frequency destructive action: it lives only in
+               * edit mode, next to Done — never in the browsing header. */}
+              <PixelButton
+                size="sm"
+                variant="secondary"
+                onClick={() => setResetConfirmOpen(true)}
+                disabled={available.length === 0}
+              >
+                <PixelIcon name="refresh" /> Reset Layout
+              </PixelButton>
+              <PixelButton size="sm" onClick={() => void finishEditing()}>
+                Done
+              </PixelButton>
+            </>
           ) : (
             <PixelButton size="sm" onClick={startEditing} disabled={available.length === 0}>
               <PixelIcon name="grip" /> Edit Layout

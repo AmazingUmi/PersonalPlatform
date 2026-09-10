@@ -244,37 +244,73 @@ export function Game2048() {
   );
 }
 
+/**
+ * High-score dashboard widget. The HISTORICAL high score stays the lead
+ * metric (FP-2A.3); the saved run (same GET /saves the game loads) adds the
+ * current score, the best tile and a miniature of the live board — existing
+ * data only, no new statistics surface. No save yet: the hollow board keeps
+ * the card composed.
+ */
 function HighScoreWidget() {
   const summary = useAsync(() => api<{ highScore: number }>("/api/apps/mini_game/summary"));
+  const run = useAsync(() => api<{ save: SaveState | null }>("/api/apps/mini_game/saves"));
   const scorePulse = usePulseOnChange<number, HTMLSpanElement>(summary.data?.highScore ?? 0);
-  if (summary.loading) return <LoadingState label="Loading…" />;
-  if (summary.error) {
+  if (summary.loading || run.loading) return <LoadingState label="Loading…" />;
+  const error = summary.error ?? run.error;
+  if (error) {
     return (
       <div className="widget-fallback">
         <StatusMessage tone="error">
-          <p>{summary.error}</p>
+          <p>{error}</p>
         </StatusMessage>
+        {summary.error ? (
+          <PixelButton size="sm" variant="secondary" onClick={summary.reload}>
+            Retry
+          </PixelButton>
+        ) : null}
       </div>
     );
   }
+
+  const board = run.data?.save?.board ?? null;
+  const currentScore = run.data?.save?.score ?? 0;
+  const bestTile = board ? Math.max(0, ...board.flat()) : 0;
+  const hasRun = currentScore > 0 || bestTile > 0;
+
   return (
     <div className="game-widget">
-      <div className="px-stats">
-        <div className="px-stat">
-          <span className="px-stat__label">High Score</span>
-          <span className="px-stat__value px-stat__value--lg" ref={scorePulse}>
-            {summary.data?.highScore ?? 0}
-          </span>
+      <div className="game-widget__best">
+        <span className="game-widget__label">HIGH SCORE</span>
+        <span className="game-widget__best-value" ref={scorePulse}>
+          {summary.data?.highScore ?? 0}
+        </span>
+      </div>
+      <div className="game-widget__run">
+        <div className="game-widget__run-stat">
+          <span className="game-widget__label">CURRENT</span>
+          <span className="game-widget__run-value">{hasRun ? currentScore : "—"}</span>
+        </div>
+        <div className="game-widget__run-stat">
+          <span className="game-widget__label">BEST TILE</span>
+          <span className="game-widget__run-value">{hasRun ? bestTile : "—"}</span>
         </div>
       </div>
-      {/* Board silhouette (dashboard empty-state rule): a static 4×4 tile
-       * motif so the card reads as the 2048 board even at score 0. */}
+      {/* Miniature of the saved board (dashboard empty-state rule): the real
+       * tiles when a run exists, hollow cells otherwise. */}
       <div className="game-widget__tiles" aria-hidden="true">
-        {Array.from({ length: 16 }, (_, index) => (
-          <span key={index} className={index === 5 || index === 6 || index === 9 ? "game-widget__tile game-widget__tile--on" : "game-widget__tile"} />
-        ))}
+        {Array.from({ length: SIZE * SIZE }, (_, index) => {
+          const value = board?.[Math.floor(index / SIZE)]?.[index % SIZE] ?? 0;
+          return (
+            <span
+              key={index}
+              className={value > 0 ? "game-widget__tile game-widget__tile--on" : "game-widget__tile"}
+            >
+              {value > 0 ? value : ""}
+            </span>
+          );
+        })}
       </div>
-      <p className="game-widget__hint">Beat it on the board.</p>
+      <p className="game-widget__hint">{hasRun ? "Run in progress — beat it on the board." : "Beat it on the board."}</p>
     </div>
   );
 }
@@ -287,9 +323,9 @@ const app: FrontendAppModule = {
       id: "highscore",
       title: "2048 High Score",
       render: () => <HighScoreWidget />,
-      /* Deliberately the smallest default card — score + board silhouette —
-       * so the dashboard's satellite row isn't five identical boxes. */
-      layout: { minW: 12, minH: 14, defaultW: 16, defaultH: 16 },
+      /* Wide companion of the notes band (composition pass): hosts the high
+       * score hero plus the current-run stats from the saved board. */
+      layout: { minW: 12, minH: 12, defaultW: 31, defaultH: 18, defaultOrder: 31 },
     },
   ],
 };
