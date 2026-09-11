@@ -142,8 +142,15 @@ function PresentationEditor({
   );
 }
 
+/** Resolve an accent name to its CSS variable value (mirrors AppDock). */
+function accentVar(accent: string | undefined): string {
+  return `var(--px-${accent ?? "primary"})`;
+}
+
 /** App library (guide §20): responsive card grid generated from the app list.
- * Names/accents follow the resolved presentation (FP-6). */
+ * Names/accents follow the resolved presentation (FP-6). Living-Desktop pass:
+ * the grid reads as a software shelf — each card is a "box" (see apps.css),
+ * with a real shelf summary under the page header. */
 export function AppCenter({
   apps,
   presentation,
@@ -202,6 +209,7 @@ export function AppCenter({
   }
 
   const overrides = presentation ?? {};
+  const enabledCount = apps.filter((app) => app.status === "enabled").length;
 
   return (
     <div className="page">
@@ -209,6 +217,9 @@ export function AppCenter({
         <h1 className="page-header__title">App Center</h1>
         <p className="page-header__subtitle">Install, enable and disable platform apps</p>
       </header>
+      <p className="app-shelf-summary">
+        {enabledCount} of {apps.length} apps active on the shelf
+      </p>
       {error && (
         <StatusMessage tone="error">
           <p>{error}</p>
@@ -218,14 +229,20 @@ export function AppCenter({
         {apps.map((app) => {
           const resolved = resolvePresentation(app, overrides);
           return (
-            <li key={app.id} className="app-card" data-app={app.id}>
+            <li
+              key={app.id}
+              className="app-card"
+              data-app={app.id}
+              data-status={app.status}
+              style={{ "--app-accent": accentVar(resolved.accent) } as React.CSSProperties}
+            >
               <div className="app-card__head">
                 <span
                   className="app-card__icon"
                   aria-hidden="true"
                   data-accent={resolved.accent ?? ""}
                 >
-                  <PixelIcon name={appIconName(app.id)} size={24} />
+                  <PixelIcon name={appIconName(app.id)} size={20} />
                 </span>
                 <div className="app-card__meta">
                   <h2 className="app-card__name">{resolved.displayName}</h2>

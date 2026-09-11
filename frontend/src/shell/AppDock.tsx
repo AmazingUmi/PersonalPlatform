@@ -34,7 +34,9 @@ export function AppDock({ apps, presentation }: { apps: AppInfo[]; presentation?
           {CORE_ITEMS.map((item) => (
             <li key={item.to}>
               <NavLink to={item.to} end={item.end} className="dock__item" aria-label={item.label}>
-                <PixelIcon name={item.icon} />
+                <span className="dock__item-icon" aria-hidden="true">
+                  <PixelIcon name={item.icon} size={16} />
+                </span>
                 <span className="dock__item-label">{item.label}</span>
               </NavLink>
             </li>
@@ -56,7 +58,9 @@ export function AppDock({ apps, presentation }: { apps: AppInfo[]; presentation?
                   title={resolved.displayName}
                   style={{ "--app-accent": accentVar(resolved.accent) } as CSSProperties}
                 >
-                  <PixelIcon name={appIconName(app.id)} />
+                  <span className="dock__item-icon" aria-hidden="true">
+                    <PixelIcon name={appIconName(app.id)} size={16} />
+                  </span>
                   <span className="dock__item-label">{resolved.displayName}</span>
                   {chips.length > 0 ? (
                     <span className="dock__item-status" aria-hidden="true">

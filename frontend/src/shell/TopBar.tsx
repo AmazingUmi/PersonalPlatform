@@ -65,7 +65,11 @@ export function TopBar({ apps }: { apps: AppInfo[] }) {
             <TopBarChip key={`${app.id}:${chip.id}`} app={app} chip={chip} />
           )),
         )}
-        <PixelBadge tone={enabled.length > 0 ? "success" : "neutral"}>
+        <PixelBadge
+          tone={enabled.length > 0 ? "success" : "neutral"}
+          className="topbar__apps-count"
+          title="Enabled apps"
+        >
           {enabled.length} apps active
         </PixelBadge>
         <span className="topbar__clock" title="Local time">

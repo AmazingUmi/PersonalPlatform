@@ -63,7 +63,7 @@
   --dashboard-grid: 16px;
   /* Slightly stronger than the ambient --px-bg-grid so the guide reads over
    * the body's own background pattern while staying restrained. */
-  --dashboard-guide-dot: rgb(38 50 71 / 0.1);
+  --dashboard-guide-dot: rgb(38 50 71 / 0.18);
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
   gap: var(--space-4);
@@ -131,7 +131,8 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-3);
-  color: var(--px-ink-muted);
+  /* On-world ink: this strip renders over the sky, below the canvas. */
+  color: var(--px-ink-world);
 }
 
 .dashboard-widget-error {
@@ -140,12 +141,13 @@
 
 /* ---------- Dashboard visual system (static redesign) ----------
  * Per-app widget identity scoped to the dashboard canvas only — app detail
- * pages keep the full PixelWindow chrome. Every satellite differs in more
- * than two dimensions: accent top strip + header treatment + primary-metric
- * treatment + decorative pixel motif.
+ * pages keep the full PixelWindow chrome. Living-Desktop pass (STYLE_AUDIT
+ * §7): identity comes from a CONTENT METAPHOR, not accent color alone —
+ * each satellite differs structurally (spine / drawer plate / base stand /
+ * pin / cartridge band), in addition to header + metric treatments.
  */
 
-/* Per-app accent on the widget's window frame (4px top strip). */
+/* Per-app accent still exposed for the treatments below. */
 .dashboard-canvas .dashboard-card[data-app-id="clock"] .px-window { --widget-accent: var(--px-warning); }
 .dashboard-canvas .dashboard-card[data-app-id="tasks"] .px-window { --widget-accent: var(--px-mint); }
 .dashboard-canvas .dashboard-card[data-app-id="assets"] .px-window { --widget-accent: var(--px-yellow); }
@@ -153,20 +155,38 @@
 .dashboard-canvas .dashboard-card[data-app-id="notes"] .px-window { --widget-accent: var(--px-info); }
 .dashboard-canvas .dashboard-card[data-app-id="mini_game"] .px-window { --widget-accent: var(--px-violet); }
 
-/* Dashboard header (composition pass): title block left, actions right on
- * one baseline row — the browsing header carries a single Edit Layout
- * action; Reset Layout lives in edit mode next to Done. */
+/* Depth ladder on the desk (PXOS 2.1 §11): the hero instrument casts the
+ * deepest shadow, satellites sit one step lighter than full app windows,
+ * the pinned memo barely lifts off the desk. Same border language, three
+ * shadow weights — the field reads as objects at different heights. */
+.dashboard-canvas .dashboard-card .px-window {
+  box-shadow: 3px 3px 0 var(--px-shadow);
+}
+
+/* Dashboard header (PXOS 2.1 §13): a compact workspace title strip rather
+ * than a page hero — smaller title, metadata-weight subtitle, the canvas
+ * starts one step closer. */
 .page-header--dashboard {
   flex-direction: row;
   flex-wrap: wrap;
   align-items: flex-end;
   justify-content: space-between;
   column-gap: var(--space-4);
+  padding-bottom: var(--space-2);
+}
+
+.page-header--dashboard .page-header__title {
+  font-size: var(--text-lg);
+}
+
+.page-header--dashboard .page-header__subtitle {
+  font-size: var(--text-xs);
+  letter-spacing: 0.02em;
 }
 
 .page-header--dashboard .page-header__heading {
   display: grid;
-  gap: var(--space-1);
+  gap: 2px;
   min-width: 0;
 }
 
@@ -175,11 +195,9 @@
   flex: none;
 }
 
-.dashboard-canvas .dashboard-card .px-window {
-  border-top: var(--border-4) solid var(--widget-accent, var(--px-border));
-}
-
-/* Weakened window header: a label row instead of desktop-window chrome. */
+/* Weakened window header (default satellite grammar): a label row instead
+ * of desktop-window chrome. Apps without a bespoke metaphor below get icon
+ * accent only — no uniform top strip. */
 .dashboard-canvas .dashboard-card .px-window__header {
   min-height: 34px;
   padding-top: var(--space-2);
@@ -192,7 +210,13 @@
   color: var(--px-ink);
 }
 
-/* ---- Hero (clock): dark system strips + LCD time block ---- */
+/* ---- Hero (clock): the desk's main instrument ----
+ * Dark system header + LCD readout + amber crown strip + the deepest shadow
+ * on the canvas: the one widget that reads as a physical device. */
+.dashboard-canvas .dashboard-card[data-app-id="clock"] .px-window {
+  border-top: 6px solid var(--px-warning);
+  box-shadow: var(--shadow-pixel-lg);
+}
 
 .dashboard-canvas .dashboard-card[data-app-id="clock"] .px-window__header {
   min-height: 40px;
@@ -493,16 +517,202 @@
   border-left: 6px solid var(--px-warning);
 }
 
-/* ---- Tasks: mint lead metric + always-on completion meter ---- */
-
-.dashboard-canvas .tasks-widget .px-stat--lead {
-  border-color: var(--px-mint);
-  background: var(--px-mint-light);
+/* ---- Tasks: the clipboard — mint spine + ruled rows ----
+ * A planner clipped to a board: the accent is a 4px spine on the binding
+ * edge, the rows below read as ruled list lines. */
+.dashboard-canvas .dashboard-card[data-app-id="tasks"] .px-window {
+  border-left: var(--border-4) solid var(--px-mint);
 }
 
-.dashboard-canvas .tasks-widget .px-stat--lead .px-stat__value {
-  color: var(--px-mint-text);
+/* ---- Assets: the drawer front — filled label plate ----
+ * An inventory drawer: the header is a solid yellow label band (light fill,
+ * ledger ink), so the whole widget reads as a labeled drawer, not a card.
+ * Band height matches the default satellite header (34px) so drawer and
+ * cartridge labels baseline-align across a row. */
+.dashboard-canvas .dashboard-card[data-app-id="assets"] .px-window__header {
+  min-height: 34px;
+  background: var(--px-yellow-light);
+  border-bottom: var(--border-2) solid var(--px-border);
+}
+
+.dashboard-canvas .dashboard-card[data-app-id="assets"] .px-window__title {
+  color: var(--px-yellow-text);
+}
+
+.dashboard-canvas .dashboard-card[data-app-id="assets"] .px-window__header > .px-icon {
+  color: var(--px-yellow-text);
+}
+
+/* ---- Notes: the pinned memo — flat paper, one pixel pin, one dog-ear ----
+ * No frame theatrics: a lighter shadow (a sheet pinned to the desk), a small
+ * info-blue pin square overlapping the top edge, and a folded top-right
+ * corner — the memo is the one widget allowed an explicit paper gesture. */
+.dashboard-canvas .dashboard-card[data-app-id="notes"] .px-window {
+  position: relative;
+  box-shadow: var(--shadow-pixel-sm);
+}
+
+.dashboard-canvas .dashboard-card[data-app-id="notes"] .px-window::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: var(--space-4);
+  width: 10px;
+  height: 10px;
+  border: var(--border-2) solid var(--px-border);
+  background: var(--px-info);
+  box-shadow: 2px 2px 0 var(--px-shadow);
+}
+
+/* Dog-ear: a fold flap over the top-right corner — darker paper turned
+ * across the corner (covering the frame corner), the diagonal crease drawn
+ * by the gradient inside the flap. Sits below the header text row. */
+.dashboard-canvas .dashboard-card[data-app-id="notes"] .px-window::after {
+  content: "";
+  position: absolute;
+  top: calc(-1 * var(--border-2));
+  right: calc(-1 * var(--border-2));
+  width: 14px;
+  height: 14px;
+  background:
+    linear-gradient(to bottom left, transparent 0 6px, rgb(38 50 71 / 0.35) 6px 8px, transparent 8px),
+    var(--px-surface-3);
+  clip-path: polygon(0 0, 100% 0, 100% 100%);
+}
+
+/* ---- 2048: the cartridge — saturated label band ----
+ * A game cartridge standing on the desk: solid violet label (inverse type),
+ * clearly "entertainment" next to the work-a-day clipboard and drawer.
+ * Band height matches the satellite default so labels align in a row. */
+.dashboard-canvas .dashboard-card[data-app-id="mini_game"] .px-window__header {
+  min-height: 34px;
+  background: var(--px-violet);
+  border-bottom: var(--border-2) solid var(--px-border);
+}
+
+.dashboard-canvas .dashboard-card[data-app-id="mini_game"] .px-window__title {
+  color: var(--px-inverse);
+}
+
+.dashboard-canvas .dashboard-card[data-app-id="mini_game"] .px-window__header > .px-icon {
+  color: var(--px-inverse);
+}
+
+/* ---- Focus: the instrument base — coral stand bar ----
+ * A physical timer needs something to stand on: the accent is a 4px base
+ * under the frame; the coral dial panel above it does the rest. */
+.dashboard-canvas .dashboard-card[data-app-id="focus"] .px-window {
+  border-bottom: var(--border-4) solid var(--px-coral);
+}
+
+/* ---- Tasks: the planner — ruled head, checkbox rhythm, mint spine ----
+ * PXOS 2.1 §6: identity comes from planner structure. The head is ONE ruled
+ * index line (lead count + margin notes) instead of boxed stat cards; the
+ * expanded zone reads as a checklist with checkbox squares. */
+
+.tasks-widget__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-bottom: var(--space-2);
+  border-bottom: var(--border-2) solid var(--px-border);
+}
+
+.tasks-widget__lead-label {
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--px-ink-muted);
+}
+
+.tasks-widget__lead-value {
+  font-family: var(--font-pixel);
   font-size: 28px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--px-mint-text);
+}
+
+.tasks-widget__note {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  margin-left: auto;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--px-ink-muted);
+}
+
+.tasks-widget__note b {
+  font-weight: 400;
+  font-size: var(--text-md);
+  font-variant-numeric: tabular-nums;
+}
+
+.tasks-widget__note--overdue b {
+  color: var(--px-danger-text);
+}
+
+.tasks-widget__note--done b {
+  color: var(--px-success-text);
+}
+
+/* Checklist zone (expanded): ruled rows, checkbox-square rhythm. */
+.tasks-widget__checklist {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.tasks-widget__check {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-bottom: var(--space-1);
+  border-bottom: var(--border-1) dashed var(--px-border-soft);
+}
+
+.tasks-widget__check:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.tasks-widget__check-box {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  align-self: center;
+  border: var(--border-2) solid var(--px-mint);
+  background: var(--px-surface);
+}
+
+.tasks-widget__check-label {
+  flex: none;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
+}
+
+.tasks-widget__check-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks-widget__count {
+  margin: 0;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  color: var(--px-ink-muted);
 }
 
 .tasks-widget__progress-value--empty {
@@ -510,7 +720,41 @@
   letter-spacing: 0.04em;
 }
 
-/* ---- Assets: ledger rows with dotted leaders ---- */
+/* ---- Assets: ledger rows with dotted leaders ----
+ * PXOS 2.1 §7: the drawer-front label plate above + a catalog index strip
+ * carry the ledger identity; data density does the rest. */
+
+.assets-widget__index {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-5);
+  padding-bottom: var(--space-2);
+  border-bottom: var(--border-2) solid var(--px-border);
+}
+
+.assets-widget__index-entry {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.assets-widget__index-value {
+  font-family: var(--font-pixel);
+  font-size: 28px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  color: var(--px-yellow-text);
+}
+
+.assets-widget__index-label {
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--px-ink-muted);
+}
 
 .assets-widget__recent-row {
   align-items: baseline;
@@ -634,6 +878,37 @@
 
 /* ---- Mini Game: high score hero + live board miniature ---- */
 
+/* Handheld screen (PXOS 2.1 §10): the board miniature renders as a dark
+ * slate LCD inset — violet-lit cells on unlit glass — the one place the
+ * widget says "toy console" without any added chrome. */
+.game-widget__tiles {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  width: min(200px, 100%);
+  gap: 2px;
+  padding: 4px;
+  border: var(--border-2) solid var(--px-ink);
+  background: var(--px-ink);
+  box-shadow: var(--shadow-pixel-sm);
+}
+
+.game-widget__tile {
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  border: var(--border-1) solid rgb(255 249 232 / 0.14);
+  background: transparent;
+  font-family: var(--font-pixel);
+  font-size: var(--text-xs);
+  color: var(--px-inverse-muted);
+}
+
+.game-widget__tile--on {
+  border-color: var(--px-violet);
+  background: var(--px-violet);
+  color: var(--px-inverse);
+}
+
 .game-widget__label {
   font-family: var(--font-pixel);
   font-size: var(--text-xs);
@@ -664,70 +939,92 @@
   color: var(--px-ink);
 }
 
-.game-widget__tiles {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  width: min(200px, 100%);
-  gap: 2px;
-  padding: 3px;
-  border: var(--border-1) solid var(--px-border-soft);
-  background: var(--px-surface-2);
-}
+/* ---------- App Center — the software shelf ---------- */
 
-.game-widget__tile {
-  aspect-ratio: 1;
-  display: grid;
-  place-items: center;
-  border: var(--border-1) solid var(--px-border-soft);
-  background: var(--px-surface);
+/* Shelf summary: one real sentence over the world (on-world ink). */
+.app-shelf-summary {
+  margin: 0;
   font-family: var(--font-pixel);
   font-size: var(--text-xs);
-  color: var(--px-violet-text);
+  letter-spacing: 0.04em;
+  color: var(--px-ink-world);
 }
-
-.game-widget__tile--on {
-  border-color: var(--px-violet);
-  background: var(--px-violet-light);
-}
-
-/* ---------- App Center ---------- */
 
 .app-grid {
   list-style: none;
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
-  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 236px), 1fr));
+  gap: var(--space-3);
   align-items: stretch;
 }
 
+/* A software box standing on a shelf (PXOS 2.1 §14 compact pass): the box is
+ * shorter and denser — icon-led head, one-line desc, a thin printed base —
+ * so the grid scans as a catalog row instead of tall SaaS cards. A heavier
+ * ink base edge carries the box, the hard shadow stands it upright, and an
+ * accent spine runs down the left like the visible edge of a boxed
+ * cartridge (per-app --app-accent from the [data-app] list item). */
 .app-card {
+  position: relative;
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-4);
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3) var(--space-2);
   border: var(--border-2) solid var(--px-border);
+  border-bottom: var(--border-4) solid var(--px-border);
   border-radius: var(--radius-pixel);
-  background: var(--px-surface);
+  background-color: var(--px-surface);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' opacity='0.05'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
   box-shadow: var(--shadow-pixel);
+}
+
+.app-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 4px;
+  left: 0;
+  width: 6px;
+  background: var(--app-accent, var(--px-primary));
+}
+
+/* Boxed-up (disabled / installed): flat-packed carton — dashed edges, no
+ * shadow (not standing), muted spine. State stays readable via badge text
+ * and button labels, never color alone. */
+.app-card[data-status="disabled"],
+.app-card[data-status="installed"] {
+  border-style: dashed;
+  border-bottom-style: dashed;
+  background-color: var(--px-surface-2);
+  box-shadow: none;
+}
+
+.app-card[data-status="disabled"]::before,
+.app-card[data-status="installed"]::before {
+  background: var(--px-border-soft);
 }
 
 .app-card__head {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  gap: var(--space-2);
+  padding-left: var(--space-1);
 }
 
+/* Icon plate: a boxed software label — parchment tile, ink frame, accent
+ * top notch and accent glyph (the one place the accent saturates). */
 .app-card__icon {
   display: grid;
   place-items: center;
-  width: 44px;
-  height: 44px;
-  flex: 0 0 44px;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
   border: var(--border-2) solid var(--px-border);
-  background: var(--app-accent, var(--px-primary));
-  color: var(--px-inverse);
+  border-top: var(--border-4) solid var(--app-accent, var(--px-primary));
+  background: var(--px-surface);
+  color: var(--app-accent, var(--px-primary));
   box-shadow: var(--shadow-pixel-sm);
 }
 
@@ -739,7 +1036,8 @@
 
 .app-card__name {
   margin: 0;
-  font-size: var(--text-md);
+  font-size: var(--text-sm);
+  font-weight: 600;
   line-height: 1.2;
   color: var(--px-ink);
   overflow-wrap: anywhere;
@@ -747,16 +1045,25 @@
 
 .app-card__version {
   font-family: var(--font-pixel);
-  font-size: var(--text-xs);
+  font-size: 10px;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--px-ink-soft);
 }
 
+/* Catalog scan aid: the manifest description clamps to two lines — identity
+ * comes from icon + name + accent, not from prose. */
 .app-card__desc {
   flex: 1;
-  font-size: var(--text-sm);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: var(--text-xs);
+  line-height: 1.45;
   color: var(--px-ink-muted);
   overflow-wrap: anywhere;
+  min-height: calc(2 * 1.45 * var(--text-xs));
 }
 
 .app-card__error {
@@ -773,19 +1080,41 @@
   color: var(--px-ink-muted);
 }
 
+/* Shelf edge: the card's bottom rail carries status + actions like the
+ * printed base of a software box (bleeds to the card edges). */
 .app-card__foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
-  padding-top: var(--space-3);
+  margin: 0 calc(-1 * var(--space-3));
+  padding: var(--space-1) var(--space-2);
   border-top: var(--border-1) solid var(--px-border-soft);
+  background: var(--px-surface-2);
 }
 
 .app-card__foot-group {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+}
+
+/* ---------- Page identity (Living Desktop) ----------
+ * Detail pages keep full window chrome inside; the header gains a short
+ * accent tick under the title block — the app's identity color, one device
+ * per page, driven by the [data-app] scope already on every .page. */
+.page[data-app] .page-header {
+  position: relative;
+}
+
+.page[data-app] .page-header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -3px;
+  width: 56px;
+  height: 4px;
+  background: var(--app-accent, var(--px-primary));
 }
 
 /* ---------- Tasks ---------- */
@@ -899,9 +1228,7 @@
 }
 
 .tasks-widget__label,
-.tasks-widget__more,
-.tasks-widget__row-label,
-.tasks-widget__count {
+.tasks-widget__more {
   font-family: var(--font-pixel);
   font-size: var(--text-xs);
   color: var(--px-ink-muted);
@@ -914,33 +1241,6 @@
   white-space: nowrap;
 }
 
-.tasks-widget__status {
-  display: grid;
-  gap: var(--space-1);
-  padding: var(--space-2) var(--space-3);
-  border: var(--border-1) dashed var(--px-border);
-}
-
-.tasks-widget__row {
-  display: flex;
-  gap: var(--space-2);
-  align-items: baseline;
-  margin: 0;
-  min-width: 0;
-}
-
-.tasks-widget__row-label {
-  flex: none;
-}
-
-.tasks-widget__row-title {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tasks-widget__count,
 .tasks-widget__more {
   margin: 0;
 }
@@ -1309,7 +1609,9 @@
   gap: 2px;
   padding: var(--space-1) var(--space-3);
   border: var(--border-2) solid var(--px-border);
-  background: var(--px-surface-2);
+  /* Arcade LCD: the 2048 page carries the strongest game identity — score
+   * readouts lit amber on the slate instrument panel. */
+  background: var(--px-ink);
   box-shadow: var(--shadow-pixel-sm);
 }
 
@@ -1318,14 +1620,14 @@
   font-size: var(--text-xs);
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--px-ink-muted);
+  color: var(--px-inverse-muted);
 }
 
 .game__score-value {
   font-family: var(--font-pixel);
   font-size: var(--text-xl);
   line-height: 1;
-  color: var(--px-ink);
+  color: var(--px-yellow);
 }
 
 .game__logo {
@@ -2129,10 +2431,13 @@
 .notes-note {
   display: flex;
   gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3) var(--space-2) var(--space-4);
   border: var(--border-2) solid var(--px-border);
   border-radius: var(--radius-pixel);
-  background: var(--px-surface);
+  /* Notebook margin rule: a faint vertical line inside the left edge — the
+   * memo metaphor, drawn by the paper itself. */
+  background-image: linear-gradient(to right, transparent 0 10px, rgb(95 136 183 / 0.35) 10px 11px, transparent 11px);
+  background-color: var(--px-surface);
   box-shadow: 3px 3px 0 var(--px-shadow);
   color: var(--px-ink);
   text-decoration: none;
@@ -2497,6 +2802,12 @@
 
 .clock-digital--card .clock-digital__time {
   font-size: clamp(34px, 9vw, 46px);
+}
+
+.clock-digital--page {
+  /* Device bezel: the page-level clock face is the instrument itself. */
+  border-width: var(--border-4);
+  box-shadow: var(--shadow-pixel-strong);
 }
 
 .clock-digital--page .clock-digital__time {

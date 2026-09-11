@@ -3,6 +3,8 @@ import { useAppDisplayName } from "../../shared/PresentationContext";
 import { useAsync } from "../../shared/useAsync";
 import { LoadingState } from "../../shared/ui/LoadingState";
 import { PixelWindow } from "../../shared/ui/PixelWindow";
+import { PixelIcon } from "../../shared/ui/PixelIcon";
+import { appIconName } from "../../shared/ui/appIcons";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { AlarmSection } from "./AlarmSection";
 import { ClockFace } from "./ClockWidget";
@@ -47,7 +49,9 @@ export function ClockPage() {
     <div className="page" data-app="clock">
       <header className="page-header">
         <div>
-          <h1 className="page-header__title">{displayName}</h1>
+          <h1 className="page-header__title">
+            <PixelIcon name={appIconName("clock")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
+          </h1>
           <p className="page-header__subtitle">Clock faces, alarms, world clocks and task status</p>
         </div>
       </header>

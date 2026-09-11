@@ -10,7 +10,7 @@ const APP_ICONS: Record<string, IconName> = {
   assets: "box",
   mini_game: "game",
   focus: "focus",
-  notes: "file",
+  notes: "note",
   clock: "clock",
 };
 

@@ -1,7 +1,7 @@
 /* Pixel OS shell: frame, top bar, app dock, mobile navigation, page layout.
  * Breakpoints (guide §30):
- *   >= 1200px  dock 208px
- *   960–1199px dock 192px
+ *   >= 1200px  dock 184px (PXOS 2.1 launcher rail)
+ *   960–1199px dock 176px
  *   600–959px  dock 64px icon mode
  *   < 600px    no dock, bottom navigation
  */
@@ -12,7 +12,7 @@
   flex-direction: column;
 }
 
-/* ---------- Top bar ---------- */
+/* ---------- Top bar: OS status strip ---------- */
 
 .topbar {
   position: sticky;
@@ -23,17 +23,31 @@
   gap: var(--space-3);
   min-height: var(--topbar-h);
   padding: var(--space-1) var(--space-4);
-  background: var(--px-ink);
+  background: var(--px-chrome);
   color: var(--px-inverse);
-  border-bottom: var(--border-2) solid var(--px-border);
+  border-bottom: var(--border-2) solid var(--px-chrome-edge);
   box-shadow: 0 3px 0 var(--px-shadow);
+}
+
+/* Pixel dither strip: a 3px checkerboard where the chrome frame meets the
+ * world — the classic "dithered edge" that ties dark chrome to a light
+ * scene without a hard hairline. */
+.topbar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -5px;
+  height: 3px;
+  background: repeating-conic-gradient(var(--px-chrome) 0 25%, transparent 0 50%) 0 0 / 4px 4px;
+  pointer-events: none;
 }
 
 .topbar__brand {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  min-height: 40px;
+  min-height: 36px;
   color: var(--px-inverse);
   text-decoration: none;
 }
@@ -44,7 +58,7 @@
 
 .topbar__brand-text {
   font-family: var(--font-pixel);
-  font-size: var(--text-sm);
+  font-size: 13px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   white-space: nowrap;
@@ -54,7 +68,16 @@
   color: var(--px-yellow);
 }
 
+/* Current workspace: a window-title chip lifted off the chrome — reads as
+ * "which program is running", not a website breadcrumb. The `▸ Title` text
+ * contract (TopBar tests) is untouched; only the framing changes. */
 .topbar__title {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px var(--space-2);
+  border: var(--border-1) solid rgb(255 249 232 / 0.22);
+  background: var(--px-chrome-2);
   font-family: var(--font-pixel);
   font-size: var(--text-xs);
   letter-spacing: 0.05em;
@@ -73,12 +96,24 @@
   min-width: 0;
 }
 
-/* OS status-bar clock: minute precision, pixel font, lit like an LCD readout. */
+/* Apps-active counter: system metadata, not an alert — a quiet unframed
+ * readout instead of a badge box (PXOS 2.1 §3 information grouping). */
+.topbar__apps-count {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--px-inverse-muted);
+  font-size: var(--text-xs);
+}
+
+/* OS status-bar clock: minute precision, pixel font, lit like an LCD readout
+ * (amber on slate chrome, 6.9:1). */
 .topbar__clock {
   font-family: var(--font-pixel);
   font-size: var(--text-sm);
   letter-spacing: 0.06em;
-  color: var(--px-inverse);
+  color: var(--px-yellow);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
@@ -92,10 +127,15 @@
   min-height: 0;
 }
 
+/* Content pane (PXOS 2.1 §3): 24px breathing room instead of 32 — the
+ * desktop world keeps more of the frame, windows start closer to the rail.
+ * With the 184px dock this also keeps the default dashboard composition
+ * (hero + three satellites + notes/2048 pair) intact at 1280px: the canvas
+ * quantizes to 65 grid units instead of landing on a wrapping cliff. */
 .shell__content {
   flex: 1;
   min-width: 0;
-  padding: var(--space-8);
+  padding: var(--space-6);
 }
 
 .shell__content:focus-visible {
@@ -103,9 +143,22 @@
   outline-offset: -4px;
 }
 
-/* ---------- App dock ---------- */
+/* ---------- App dock: the launcher rail ---------- */
 
+/* PXOS 2.1 §2: the dock reads as a launcher shelf mounted beside the world,
+ * not an admin sidebar. Three moves make that happen:
+ *   - surface: one luminance step above the topbar strip (--px-chrome-dock)
+ *     with its own dithered right edge, so the "room frame" is two mounted
+ *     surfaces instead of one carved L;
+ *   - items: each app owns a fixed icon SLOT first (app tile), the name is
+ *     secondary UI type — pixel uppercase menu rows were the admin tell;
+ *   - active: the app reads as RUNNING (accent-backed slot + inset rail),
+ *     not "selected menu row".
+ * The dither uses the dock's own fill so it dissolves into the rail rather
+ * than drawing a hard seam against the world. */
 .dock {
+  --dock-item-h: 38px;
+  --dock-slot: 24px;
   flex: 0 0 auto;
   width: var(--dock-w);
   position: sticky;
@@ -113,25 +166,40 @@
   align-self: flex-start;
   height: calc(100vh - var(--topbar-h));
   overflow-y: auto;
-  padding: var(--space-4) var(--space-3);
-  border-right: var(--border-2) solid var(--px-border);
-  background: var(--px-surface-2);
+  padding: var(--space-3) var(--space-2);
+  border-right: var(--border-1) solid rgb(22 29 51 / 0.6);
+  background: var(--px-chrome-dock);
+  scrollbar-color: var(--px-chrome-2) transparent;
+}
+
+.dock::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: -4px;
+  width: 3px;
+  background: repeating-conic-gradient(var(--px-chrome-dock) 0 25%, transparent 0 50%) 0 0 / 4px 4px;
+  pointer-events: none;
 }
 
 .dock__section + .dock__section {
-  margin-top: var(--space-6);
-  padding-top: var(--space-4);
-  border-top: var(--border-1) solid var(--px-border-soft);
+  margin-top: var(--space-5);
+  padding-top: var(--space-3);
+  border-top: var(--border-1) solid rgb(255 249 232 / 0.12);
 }
 
+/* Section marks: etched system partition labels — smaller and quieter than
+   menu headers, the one place the rail says "system" (uppercase licensed).
+   Opacity keeps >= 4.5:1 on --px-chrome-dock. */
 .dock__label {
   display: block;
   padding: 0 var(--space-2) var(--space-1);
   font-family: var(--font-pixel);
-  font-size: var(--text-xs);
-  letter-spacing: 0.08em;
+  font-size: 10px;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--px-ink-soft);
+  color: rgb(198 206 222 / 0.78);
 }
 
 .dock__list {
@@ -139,84 +207,77 @@
   margin: 0;
   padding: 0;
   display: grid;
-  gap: var(--space-1);
+  gap: 2px;
 }
 
 .dock__item {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  min-height: 40px;
+  min-height: var(--dock-item-h);
   padding: 0 var(--space-2) 0 var(--space-1);
-  border: var(--border-2) solid transparent;
-  color: var(--px-ink);
-  font-family: var(--font-pixel);
-  font-size: var(--text-sm);
+  border: var(--border-1) solid transparent;
+  color: var(--px-inverse-muted);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
   text-decoration: none;
   white-space: nowrap;
   transition:
     background-color var(--motion-fast) linear,
     border-color var(--motion-fast) linear,
     box-shadow var(--motion-fast) steps(2),
-    color var(--motion-fast) linear,
-    transform var(--motion-fast) steps(4);
+    color var(--motion-fast) linear;
 }
 
-.dock__item::before {
-  /* Active marker: a solid 4px accent bar (▌) instead of a glyph — crisper
-   * at pixel scale and colorable per app via --app-accent. */
-  content: "";
-  flex: 0 0 4px;
-  align-self: center;
-  height: 18px;
-  margin-right: var(--space-1);
-  background: transparent;
-  visibility: hidden;
-  transform: translateX(calc(-1 * var(--motion-distance-xs)));
-  transition: transform var(--motion-fast) steps(4);
-}
-
-.dock__item .px-icon {
-  color: var(--px-ink-muted);
-  transition: color var(--motion-fast) linear;
+/* The app icon slot: a fixed square tile every icon sits in. Idle it is a
+ * quiet inset; active it becomes the accent-backed "app running" plate. */
+.dock__item-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 var(--dock-slot);
+  width: var(--dock-slot);
+  height: var(--dock-slot);
+  border: var(--border-1) solid rgb(255 249 232 / 0.16);
+  background: rgb(255 249 232 / 0.04);
+  color: var(--px-inverse-muted);
+  transition:
+    background-color var(--motion-fast) linear,
+    border-color var(--motion-fast) linear,
+    color var(--motion-fast) linear;
 }
 
 .dock__item:hover {
-  background: var(--px-surface);
-  color: var(--px-ink);
+  background: rgb(255 249 232 / 0.05);
+  color: var(--px-inverse);
 }
 
-.dock__item:hover .px-icon {
-  color: var(--px-ink);
+.dock__item:hover .dock__item-icon {
+  border-color: rgb(255 249 232 / 0.4);
+  color: var(--px-inverse);
 }
 
+/* Amber ring reads on the dark rail (5.3:1), unlike on the sky. */
 .dock__item:focus-visible {
   outline: 2px solid var(--px-warning);
   outline-offset: -2px;
 }
 
+/* Active = the workspace is running: accent-tinted fill, full-height inset
+ * accent rail, and the icon slot flips to an accent plate with a dark glyph
+ * (reads on every accent in the palette). */
 .dock__item[aria-current="page"] {
-  /* Selection block (dashboard redesign): accent-tinted fill + a full-height
-   * 4px accent bar, so the active destination reads from across the room. */
-  background: color-mix(in srgb, var(--app-accent, var(--px-primary)) 14%, var(--px-surface));
-  border-color: var(--px-border);
-  box-shadow:
-    inset 4px 0 0 var(--app-accent, var(--px-primary)),
-    var(--shadow-pixel-sm);
-  /* Active pointer nudge (motion system): a 2px step reads as the cursor
-   * landing on the item. */
-  transform: translateX(var(--motion-distance-xs));
+  background: color-mix(in srgb, var(--app-accent, var(--px-primary)) 24%, var(--px-chrome-dock));
+  border-color: rgb(22 29 51 / 0.55);
+  box-shadow: inset 4px 0 0 var(--app-accent, var(--px-primary));
+  color: var(--px-inverse);
 }
 
-/* The old 18px marker bar is superseded by the full-height inset bar; the
- * pseudo-element stays as a hidden spacer so active/inactive icons align. */
-.dock__item[aria-current="page"]::before {
-  visibility: hidden;
-  transform: translateX(0);
-}
-
-.dock__item[aria-current="page"] .px-icon {
-  color: var(--app-accent, var(--px-primary));
+.dock__item[aria-current="page"] .dock__item-icon {
+  background: var(--app-accent, var(--px-primary));
+  border-color: color-mix(in srgb, var(--px-chrome-edge) 45%, var(--app-accent, var(--px-primary)));
+  color: var(--px-chrome-edge);
 }
 
 .dock__item-label {
@@ -309,10 +370,25 @@
     20px 0 0 0 var(--px-warning);
 }
 
+/* Page headers sit directly on the dusk world, so the subtitle uses the
+ * on-world secondary ink (4.58:1 on the deepest sky band) instead of
+ * --px-ink-muted, which is only licensed for parchment surfaces. */
 .page-header__subtitle {
   font-size: var(--text-sm);
-  color: var(--px-ink-muted);
+  color: var(--px-ink-world);
   animation: px-page-header-enter var(--motion-fast) steps(4, end) calc(var(--motion-fast) + var(--motion-stagger)) backwards;
+}
+
+/* App identity icon in detail page headers (aria-hidden; the accessible
+ * name stays the plain title). Accent follows the [data-app] scope. */
+.page-header__app-icon {
+  color: var(--app-accent, var(--px-primary));
+}
+
+/* Transient shell notices (e.g. "Refreshing…") render straight on the world
+ * too — same on-world ink rule as page subtitles. */
+.shell__content > .muted {
+  color: var(--px-ink-world);
 }
 
 /* ---------- Mobile navigation (< 600px) ---------- */
@@ -357,7 +433,7 @@
 
 @media (max-width: 1199px) {
   .dock {
-    --dock-w: 192px;
+    --dock-w: 176px;
   }
 }
 
@@ -375,18 +451,29 @@
 
   .dock__label,
   .dock__item-label,
-  .dock__item::before,
   .dock__item-status {
     display: none;
   }
 
+  /* Icon mode: the whole item IS the app slot — centered, generous touch
+   * target; the active accent plate carries the running state alone. */
   .dock__item {
     justify-content: center;
-    padding: 0;
+    padding: var(--space-1);
+  }
+
+  .dock__item-icon {
+    --dock-slot: 28px;
+    border-width: var(--border-2);
+    border-color: rgb(255 249 232 / 0.14);
   }
 
   .dock__item[aria-current="page"] {
     box-shadow: inset 3px 0 0 var(--app-accent, var(--px-primary));
+  }
+
+  .dock__item[aria-current="page"] .dock__item-icon {
+    border-color: color-mix(in srgb, var(--px-chrome-edge) 45%, var(--app-accent, var(--px-primary)));
   }
 }
 
@@ -431,8 +518,8 @@
     justify-content: space-around;
     height: calc(60px + env(safe-area-inset-bottom));
     padding-bottom: env(safe-area-inset-bottom);
-    background: var(--px-ink);
-    border-top: var(--border-2) solid var(--px-border);
+    background: var(--px-chrome);
+    border-top: var(--border-2) solid var(--px-chrome-edge);
     box-shadow: 0 -3px 0 var(--px-shadow);
   }
 
@@ -447,10 +534,10 @@
     border: 0;
     background: transparent;
     color: var(--px-inverse-muted);
-    font-family: var(--font-pixel);
-    font-size: var(--text-xs);
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
+    font-family: var(--font-ui);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
     text-decoration: none;
   }
 
@@ -522,8 +609,9 @@
     padding: 0 var(--space-2);
     border: var(--border-2) solid transparent;
     color: var(--px-ink);
-    font-family: var(--font-pixel);
+    font-family: var(--font-ui);
     font-size: var(--text-sm);
+    font-weight: 500;
     text-decoration: none;
   }
 
@@ -645,8 +733,10 @@
   height: 100%;
 }
 
+/* Ink ring: reads against the dusk sky gap (4.9:1) and the parchment face
+ * alike; the focus lift on the window below does the rest. */
 .dashboard-card__hit:focus-visible {
-  outline: var(--border-2) solid var(--px-primary);
+  outline: var(--border-2) solid var(--px-ink);
   outline-offset: 2px;
 }
 

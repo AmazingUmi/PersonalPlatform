@@ -12,6 +12,7 @@ import { LoadingState } from "../../shared/ui/LoadingState";
 import { PixelBadge } from "../../shared/ui/PixelBadge";
 import { PixelButton } from "../../shared/ui/PixelButton";
 import { PixelIcon } from "../../shared/ui/PixelIcon";
+import { appIconName } from "../../shared/ui/appIcons";
 import { PixelInput } from "../../shared/ui/PixelInput";
 import { PixelMeter } from "../../shared/ui/PixelMeter";
 import type { PixelAccent } from "../../shared/ui/PixelWindow";
@@ -470,7 +471,9 @@ function AssetsPage() {
   return (
     <div className="page" data-app="assets">
       <header className="page-header">
-        <h1 className="page-header__title">{displayName}</h1>
+        <h1 className="page-header__title">
+          <PixelIcon name={appIconName("assets")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
+        </h1>
         <p className="page-header__subtitle">Personal inventory</p>
         <div className="page-header__actions">
           <PixelButton
@@ -1125,7 +1128,6 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
       </div>
     );
   }
-
   const data = list.data ?? { items: [], counts: { all: 0, categories: {} } };
   const categoryNames = new Map((categories.data?.items ?? []).map((category) => [category.id, category.name]));
   // Top-3 category distribution (guide §18 low-density viz): relative to the
@@ -1140,15 +1142,19 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
   const recent = data.items.slice(0, recentLimit);
   return (
     <div className="assets-widget">
-      <div className="px-stats">
-        <div className="px-stat">
-          <span className="px-stat__label">Items</span>
-          <span className="px-stat__value">{data.counts.all}</span>
-        </div>
-        <div className="px-stat">
-          <span className="px-stat__label">Categories</span>
-          <span className="px-stat__value">{Object.keys(data.counts.categories).length}</span>
-        </div>
+      {/* Ledger index strip (PXOS 2.1 §7): quantities as one ruled catalog
+       * header — value first, label as the small index caption — instead of
+       * boxed stat cards; the drawer label plate above already names the
+       * widget, the rows below carry the data density. */}
+      <div className="assets-widget__index">
+        <span className="assets-widget__index-entry">
+          <span className="assets-widget__index-value">{data.counts.all}</span>
+          <span className="assets-widget__index-label">Items</span>
+        </span>
+        <span className="assets-widget__index-entry">
+          <span className="assets-widget__index-value">{Object.keys(data.counts.categories).length}</span>
+          <span className="assets-widget__index-label">Categories</span>
+        </span>
       </div>
       {topCategories.length > 0 ? (
         <ul className="assets-widget__categories">

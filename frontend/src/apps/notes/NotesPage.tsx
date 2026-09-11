@@ -7,6 +7,7 @@ import { LoadingState } from "../../shared/ui/LoadingState";
 import { PixelBadge } from "../../shared/ui/PixelBadge";
 import { PixelButton } from "../../shared/ui/PixelButton";
 import { PixelIcon } from "../../shared/ui/PixelIcon";
+import { appIconName } from "../../shared/ui/appIcons";
 import { PixelInput } from "../../shared/ui/PixelInput";
 import { PixelWindow } from "../../shared/ui/PixelWindow";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
@@ -201,7 +202,9 @@ export function NotesPage() {
   return (
     <div className="page" data-app="notes">
       <header className="page-header">
-        <h1 className="page-header__title">{displayName}</h1>
+        <h1 className="page-header__title">
+          <PixelIcon name={appIconName("notes")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
+        </h1>
         <p className="page-header__subtitle">Capture first, organize later</p>
         <div className="page-header__actions">
           <PixelButton

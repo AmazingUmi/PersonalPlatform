@@ -173,6 +173,17 @@ export const pixelIcons = {
       />
     ),
   },
+  /* Memo sheet (Notes app): squared sheet with a dog-eared corner and
+   * ruled lines — the app's paper metaphor at icon scale. */
+  note: {
+    box: "0 0 16 16",
+    node: (
+      <path
+        fillRule="evenodd"
+        d="M3 1h7v2h3v12H3zM5 5h6v1H5zM5 8h6v1H5zM5 11h4v1H5z"
+      />
+    ),
+  },
   folder: {
     box: "0 0 16 16",
     node: <path d="M1 3h5l2 2h7v8H1V3z" />,

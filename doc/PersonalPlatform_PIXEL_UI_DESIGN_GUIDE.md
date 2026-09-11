@@ -545,6 +545,61 @@ body {
 data-URI，约 5% alpha，作为 body 的第一个 background 层）。纯 CSS、
 无外部资源、不参与布局；不透明 surface 之下不受影响。
 
+## 7.2 Living Desktop（PXOS2 更新）
+
+Pocket Pixel OS 2.0 将页面背景从「纸纹 + 网格」升级为完整的
+**世界层**（设计审计与对比度记录：`doc/STYLE_AUDIT.md`）：
+
+- `body::before` 固定层渲染黄昏像素世界：四级阶梯天空带
+  （`--px-sky-1..4`）、稀疏星点、两层阶梯山形剪影 + 远处灯火、
+  暖色地平线（`--px-ground`），16px 网格叠加其上；`body::after`
+  为极慢的像素云 ambient 漂移（reduced-motion 下静止）。
+- 纸纹噪点从 body 移到 `.px-window` / `.app-card` 等 parchment
+  surface 上 —— 纸属于物件，天空属于世界。
+- Shell 变为深板岩「房间框架」：`--px-chrome` 系 token 统一
+  topbar / dock / mobile nav；dock 文本使用 inverse 色系。
+- 直接落在世界上的文字（page header、dashboard 脚注、loading）
+  使用 `--px-ink` / `--px-ink-world`（最深天空带上 ≥ 4.5:1）；
+  `--px-ink-muted` 仅允许出现在 parchment surface 上。
+- Dashboard satellite widget 按**内容隐喻**分化（剪贴板左脊 /
+  抽屉标签 / 底座 / 图钉 / 卡带带标），取代统一的彩色顶条；
+  Clock hero 保持唯一主设备（琥珀冠条 + 深色 header + LCD +
+  最深阴影）。
+- 像素字体实际落地：self-host Fusion Pixel 12px latin 子集
+  （`frontend/public/fonts/`，OFL，约 8KB），`--font-pixel` 不再
+  依赖 monospace fallback；CJK 正文仍使用 UI 字体。
+- 硬阴影色从暖棕（#b9af93）换为黄昏藏青（#8a92b5），窗口在天空
+  上读作「浮起」而非「压在纸上」。
+
+### 7.3 Refinement & Identity Pass（PXOS 2.1 更新）
+
+Pocket Pixel OS 2.1 在 2.0 基础上做**精修而非重设计**，落地差异：
+
+- **Dock → Launcher rail**：宽度 208 → 184px（tablet 176px）；
+  surface 使用新的 `--px-chrome-dock`（比 topbar 亮一阶 + 自有
+  dithered 右缘），打破 topbar+dock 的整块 L 形深色框架；每个
+  app 拥有固定 **icon slot**（24px 内嵌格），active = accent
+  底板 + 深色 glyph + inset accent 轨（「应用正在运行」而非
+  「选中菜单行」）；CORE / APPS 分区标缩小至 10px 弱化；app 名
+  改用 UI 字体 13px/500（pixel font 仅保留在系统标识）。
+- **TopBar → compact status strip**：56 → 48px；apps-active 计数
+  从 badge 降为无框 muted 元数据（`topbar__apps-count`）。
+- **Wallpaper de-emphasis**：中景两层山形提亮并靠近天空色
+  （`--px-hill-far/-near`）、地平线边线弱化、远处灯火降透明度、
+  云带下移 —— 前景 surface 100% 强度，世界层读作约一半强度。
+- **Widget identity 深化**：Tasks = planner（ruled index head +
+  checkbox rhythm checklist）；Assets = ledger（catalog index
+  strip + 既有 dotted leaders）；Notes = memo（新增 `note` 像素
+  图标 + dog-ear 折角 + 既有图钉/横线输入）；2048 = 掌机
+  （board 微缩图为深色 LCD 屏幕 + violet 点亮格）；Focus / Clock
+  hero 维持不动（2.0 已成立）。
+- **Frame / spacing ladder**：dashboard satellite 阴影 4 → 3px
+  （hero 6px / satellite 3px / memo 2px 三阶）；`.shell__content`
+  padding 32 → 24px；App Center 卡片收紧为 icon-led compact
+  catalog tile（40px 图标板、两行描述 clamp、薄底栏）。
+- e2e 默认布局期望随 shell 尺寸同步（1280×720 画布 = 65 单元，
+  构图不变：hero 满行 + 三卫星 + notes/2048 对）。
+
 ---
 
 # 8. Shell 架构

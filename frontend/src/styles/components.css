@@ -100,7 +100,7 @@
 }
 
 .px-button:focus-visible {
-  outline: 2px solid var(--px-warning);
+  outline: 2px solid var(--px-ink);
   outline-offset: 3px;
 }
 
@@ -288,10 +288,15 @@ a.px-button:hover {
 
 /* ---------- PixelWindow ---------- */
 
+/* Level 2 of the depth ladder (STYLE_AUDIT §4): a warm parchment sheet
+ * floating over the dusk world. The paper grain that used to live on the
+ * body canvas moved here — paper belongs to the objects, the sky to the
+ * world. */
 .px-window {
   border: var(--border-2) solid var(--px-border);
   border-radius: var(--radius-pixel);
-  background: var(--px-surface);
+  background-color: var(--px-surface);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' opacity='0.05'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
   box-shadow: var(--shadow-pixel);
 }
 
@@ -541,7 +546,7 @@ a.px-button:hover {
 }
 
 .px-chip:focus-visible {
-  outline: 2px solid var(--px-warning);
+  outline: 2px solid var(--px-ink);
   outline-offset: 2px;
 }
 
@@ -593,7 +598,8 @@ a.px-button:hover {
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-2) 0;
-  color: var(--px-ink-muted);
+  /* On-world ink: the dashboard boot/loading row renders over the sky. */
+  color: var(--px-ink-world);
 }
 
 .px-loading__blocks {
@@ -787,6 +793,7 @@ a.px-button:hover {
 .px-dialog {
   width: min(420px, 100%);
   margin: auto;
+  box-shadow: var(--shadow-pixel-strong);
   animation: px-dialog-enter var(--motion-normal) steps(7, end);
 }
 

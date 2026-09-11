@@ -1,15 +1,48 @@
 /*
  * Pocket Pixel OS — design tokens.
  * Single source of truth for color / typography / spacing / geometry.
- * See doc/PersonalPlatform_PIXEL_UI_DESIGN_GUIDE.md §4–6, §36.
+ * See doc/PersonalPlatform_PIXEL_UI_DESIGN_GUIDE.md §4–6, §36 and
+ * doc/STYLE_AUDIT.md (Pocket Pixel OS 2.0 "Living Desktop").
  */
 
 :root {
-  /* Canvas */
-  --px-bg: #ebe5d1;
-  /* Ambient grid — kept at the guide's 5% ceiling so it registers as paper
-   * texture without competing with content. */
+  /* Canvas — the desk plain behind everything; the world layer paints the
+   * dusk sky above it (base.css). Kept parchment-side so a failed/missing
+   * world layer still yields a readable warm page. */
+  --px-bg: #e6dcc6;
+  /* Ambient grid — kept at the guide's 5% ceiling so it registers as texture
+   * without competing with content. */
   --px-bg-grid: rgb(38 50 71 / 0.05);
+
+  /* ---- World backdrop (Level 0) ----
+   * "A pocket desk by the window at dusk": stepped dusk sky bands, two hill
+   * silhouettes and a warm ground plain. Text directly on the world uses
+   * --px-ink / --px-ink-world (both >= 4.5:1 on the deepest band, see
+   * doc/STYLE_AUDIT.md §10). PXOS 2.1 §4: the mid-ground steps toward the sky
+   * tones so the horizon never competes with the widget row — foreground
+   * surfaces stay at full strength, the world reads at ~half. */
+  --px-sky-1: #8ea0cc;
+  --px-sky-2: #a3b1d7;
+  --px-sky-3: #bcc7e2;
+  --px-sky-4: #d9d7e3;
+  --px-hill-far: #a8b2ce;
+  --px-hill-near: #99a4c4;
+  --px-ground: #e6dcc6;
+  --px-ground-edge: #d3cab4;
+  /* Secondary ink for text rendered directly over the world (page headers,
+   * dashboard footnotes): darker than --px-ink-muted, which is only licensed
+   * for parchment surfaces. */
+  --px-ink-world: #2c3652;
+
+  /* ---- OS chrome (Level 1) ----
+   * The "room frame": topbar + dock + mobile nav share the slate family, but
+   * the launcher rail (dock) sits one luminance step above the topbar strip
+   * so the two read as mounted surfaces rather than one carved L-shaped
+   * block (PXOS 2.1 §2.2E). */
+  --px-chrome: #262f47;
+  --px-chrome-2: #303b5c;
+  --px-chrome-dock: #2c3654;
+  --px-chrome-edge: #161d33;
 
   /* Surfaces */
   --px-surface: #fff9e8;
@@ -26,7 +59,9 @@
   /* Structural */
   --px-border: #263247;
   --px-border-soft: #9a947f;
-  --px-shadow: #b9af93;
+  /* Hard-shadow ink: dusk navy, so windows raised over the sky/world read as
+   * floating in the scene rather than sitting on paper. */
+  --px-shadow: #8a92b5;
 
   /* Brand */
   --px-primary: #5279a8;
@@ -105,10 +140,12 @@
   --radius-pixel: 0;
   --radius-soft: 2px;
 
-  /* Hard pixel shadows */
+  /* Hard pixel shadows — the depth ladder (STYLE_AUDIT §4):
+   *   flat (on-window furniture) < window (Level 2) < floating/hero (top). */
   --shadow-pixel: 4px 4px 0 var(--px-shadow);
   --shadow-pixel-sm: 2px 2px 0 var(--px-shadow);
   --shadow-pixel-strong: 2px 2px 0 var(--px-border), 4px 4px 0 var(--px-shadow);
+  --shadow-pixel-lg: 6px 6px 0 var(--px-shadow);
   /* Hover lift for interactive windows/cards (guide §14): translate
    * -2px,-2px pairs with this +6px shadow so the frame keeps "contact". */
   --shadow-pixel-hover: 6px 6px 0 var(--px-shadow);
@@ -124,9 +161,11 @@
   --motion-distance-sm: 4px;
   --motion-distance-md: 8px;
 
-  /* Shell layout */
-  --topbar-h: 56px;
-  --dock-w: 208px;
+  /* Shell layout — PXOS 2.1: compact status strip (48px) and a narrower
+   * launcher rail (184px); text stays readable, the rail stops reading as a
+   * wide admin sidebar. */
+  --topbar-h: 48px;
+  --dock-w: 184px;
   --content-max: 1280px;
   --detail-max: 880px;
 }

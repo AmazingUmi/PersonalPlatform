@@ -2,6 +2,7 @@ import { useAppDisplayName } from "../../shared/PresentationContext";
 import { LoadingState } from "../../shared/ui/LoadingState";
 import { PixelButton } from "../../shared/ui/PixelButton";
 import { PixelIcon } from "../../shared/ui/PixelIcon";
+import { appIconName } from "../../shared/ui/appIcons";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { FocusHistory } from "./FocusHistory";
 import { FocusSettings } from "./FocusSettings";
@@ -21,7 +22,9 @@ export function FocusPage() {
   return (
     <div className="page" data-app="focus">
       <header className="page-header">
-        <h1 className="page-header__title">{displayName}</h1>
+        <h1 className="page-header__title">
+          <PixelIcon name={appIconName("focus")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
+        </h1>
         <p className="page-header__subtitle">Pomodoro timer with daily summary and history</p>
         <div className="page-header__actions">
           <PixelButton size="sm" variant="secondary" onClick={reload}>

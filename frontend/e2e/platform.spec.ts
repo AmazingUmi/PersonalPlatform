@@ -584,16 +584,17 @@ test("dashboard: Reset Layout restores deterministic defaults from edit mode", a
   await dialog.getByRole("button", { name: /reset layout/i }).click();
 
   // Every available widget returns at its default size, hidden cleared.
-  // Defaults (composition pass, 1280x720 viewport = 63-unit canvas): the
-  // 80-unit clock hero scales to the full row; the three satellites and the
-  // notes/2048 pair fill their rows exactly (justified).
+  // Defaults (composition pass; 1280x720 viewport with the 184px launcher
+  // rail + 24px content padding = 65-unit canvas): the 80-unit clock hero
+  // scales to the full row; the three satellites and the notes/2048 pair
+  // fill their rows exactly (justified).
   const defaultSizes: Record<string, { width: string; height: string; w: number; h: number }> = {
-    "clock:clock": { width: "1008px", height: "352px", w: 63, h: 22 },
+    "clock:clock": { width: "1040px", height: "352px", w: 65, h: 22 },
     "tasks:today": { width: "336px", height: "288px", w: 21, h: 18 },
-    "focus:timer": { width: "320px", height: "288px", w: 20, h: 18 },
-    "assets:summary": { width: "320px", height: "288px", w: 20, h: 18 },
-    "notes:quick_note": { width: "608px", height: "288px", w: 38, h: 18 },
-    "mini_game:highscore": { width: "384px", height: "288px", w: 24, h: 18 },
+    "focus:timer": { width: "336px", height: "288px", w: 21, h: 18 },
+    "assets:summary": { width: "336px", height: "288px", w: 21, h: 18 },
+    "notes:quick_note": { width: "624px", height: "288px", w: 39, h: 18 },
+    "mini_game:highscore": { width: "400px", height: "288px", w: 25, h: 18 },
   };
   const cards = page.locator(".dashboard-canvas[data-desktop='true'] .dashboard-card");
   await expect(cards).toHaveCount(6);

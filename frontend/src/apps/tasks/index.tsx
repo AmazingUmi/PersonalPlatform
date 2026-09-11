@@ -11,6 +11,7 @@ import { LoadingState } from "../../shared/ui/LoadingState";
 import { PixelBadge, type BadgeTone } from "../../shared/ui/PixelBadge";
 import { PixelButton } from "../../shared/ui/PixelButton";
 import { PixelIcon } from "../../shared/ui/PixelIcon";
+import { appIconName } from "../../shared/ui/appIcons";
 import { PixelInput } from "../../shared/ui/PixelInput";
 import { PixelMeter } from "../../shared/ui/PixelMeter";
 import { PixelWindow } from "../../shared/ui/PixelWindow";
@@ -341,7 +342,9 @@ function TasksPage() {
   return (
     <div className="page" data-app="tasks">
       <header className="page-header">
-        <h1 className="page-header__title">{displayName}</h1>
+        <h1 className="page-header__title">
+          <PixelIcon name={appIconName("tasks")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
+        </h1>
         <p className="page-header__subtitle">Personal task manager</p>
         <div className="page-header__actions">
           <PixelButton
@@ -799,19 +802,19 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
   const meterPercent = meterTotal > 0 ? Math.round((doneToday / meterTotal) * 100) : 0;
   return (
     <div className="tasks-widget">
-      <div className="px-stats">
-        <div className="px-stat px-stat--lead">
-          <span className="px-stat__label">Today</span>
-          <span className="px-stat__value" ref={todayPulse}>{pad(data.today)}</span>
-        </div>
-        <div className="px-stat px-stat--danger">
-          <span className="px-stat__label">Overdue</span>
-          <span className="px-stat__value" ref={overduePulse}>{pad(data.overdue)}</span>
-        </div>
-        <div className="px-stat px-stat--success">
-          <span className="px-stat__label">Done</span>
-          <span className="px-stat__value" ref={donePulse}>{data.done}</span>
-        </div>
+      {/* Planner head (PXOS 2.1 §6): one ruled index line instead of boxed
+       * stat cards — the lead count first, overdue/done as margin notes. */}
+      <div className="tasks-widget__head">
+        <span className="tasks-widget__lead-label">Today</span>
+        <span className="tasks-widget__lead-value" ref={todayPulse}>{pad(data.today)}</span>
+        <span className="tasks-widget__note tasks-widget__note--overdue">
+          <span className="tasks-widget__note-label">Overdue</span>
+          <b ref={overduePulse}>{pad(data.overdue)}</b>
+        </span>
+        <span className="tasks-widget__note tasks-widget__note--done">
+          <span className="tasks-widget__note-label">Done</span>
+          <b ref={donePulse}>{data.done}</b>
+        </span>
       </div>
       {meterTotal > 0 ? (
         <div className="tasks-widget__progress">
@@ -842,19 +845,23 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
             ? `${data.today + data.overdue} TASK${data.today + data.overdue === 1 ? "" : "S"} REMAINING`
             : "ALL DONE FOR TODAY"}
         </p>
-      ) : null}
+      ) : (
+        /* Checklist zone: current/next as ruled rows with checkbox rhythm. */
+        <ul className="tasks-widget__checklist">
+          <li className="tasks-widget__check">
+            <span className="tasks-widget__check-box" aria-hidden="true" />
+            <span className="tasks-widget__check-label">CURRENT</span>
+            <span className="tasks-widget__check-title">{status.data?.current ? status.data.current.title : "None"}</span>
+          </li>
+          <li className="tasks-widget__check">
+            <span className="tasks-widget__check-box" aria-hidden="true" />
+            <span className="tasks-widget__check-label">NEXT</span>
+            <span className="tasks-widget__check-title">{status.data?.next ? status.data.next.title : "None"}</span>
+          </li>
+        </ul>
+      )}
       {density === "expanded" ? (
-        <div className="tasks-widget__status">
-          <p className="tasks-widget__row">
-            <span className="tasks-widget__row-label">CURRENT</span>
-            <span className="tasks-widget__row-title">{status.data?.current ? status.data.current.title : "None"}</span>
-          </p>
-          <p className="tasks-widget__row">
-            <span className="tasks-widget__row-label">NEXT</span>
-            <span className="tasks-widget__row-title">{status.data?.next ? status.data.next.title : "None"}</span>
-          </p>
-          <p className="tasks-widget__count">{moreTodayCount(status.data)} MORE TODAY</p>
-        </div>
+        <p className="tasks-widget__count">{moreTodayCount(status.data)} MORE TODAY</p>
       ) : null}
     </div>
   );
