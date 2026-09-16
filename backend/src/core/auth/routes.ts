@@ -23,8 +23,12 @@ import { SESSION_COOKIE_NAME } from "./sessions.js";
 
 export interface AuthRouteDeps {
   database: Database | null;
-  /** Secure cookie flag — production only, so plain-HTTP dev works. */
-  isProduction: boolean;
+  /**
+   * Secure cookie flag (AUTH-H1-02) — resolved from SESSION_COOKIE_SECURE /
+   * PLATFORM_ENVIRONMENT / yaml, never from request headers, so plain-HTTP
+   * development works and production HTTPS cannot silently downgrade.
+   */
+  sessionCookieSecure: boolean;
   now?: () => Date;
 }
 
@@ -70,25 +74,27 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
         path: "/",
         httpOnly: true,
         sameSite: "lax",
-        secure: deps.isProduction,
+        secure: deps.sessionCookieSecure,
         expires: result.expiresAt,
       });
       return { user: result.user };
     },
   );
 
-  app.post(
-    "/api/core/auth/logout",
-    { onRequest: [requireAuth] },
-    async (request, reply) => {
-      if (deps.database) {
-        const token = request.cookies?.[SESSION_COOKIE_NAME];
-        if (token) await logout(deps.database.context(), token);
-      }
-      reply.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
-      return reply.code(204).send();
-    },
-  );
+  // Idempotent logout (AUTH-H1-04): NO auth guard. An expired or bogus
+  // session must still end with a cleared cookie and 204 — otherwise a client
+  // whose session already lapsed can never log out of it. The session delete
+  // is best-effort; the response never reveals whether the token was valid.
+  app.post("/api/core/auth/logout", async (request, reply) => {
+    const token = request.cookies?.[SESSION_COOKIE_NAME];
+    if (token && deps.database) {
+      await logout(deps.database.context(), token).catch((error: unknown) => {
+        request.log.error({ err: error }, "logout session delete failed (cookie still cleared)");
+      });
+    }
+    reply.clearCookie(SESSION_COOKIE_NAME, { path: "/" });
+    return reply.code(204).send();
+  });
 
   app.get("/api/core/auth/me", { onRequest: [requireAuth] }, async (request) => request.user!);
 

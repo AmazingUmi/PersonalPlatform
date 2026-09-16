@@ -83,6 +83,14 @@ async function main(): Promise<void> {
       case "noop":
         if (outcome.reason === "already-active") {
           console.log(`bootstrap: admin "${outcome.username}" is already active — password left unchanged`);
+        } else if (outcome.reason === "no-pending-and-exists") {
+          // AUTH-H1-05: bootstrap establishes the FIRST admin only. Creating
+          // another one is a deliberate act this tool intentionally refuses.
+          console.error(
+            `bootstrap: refused — an activated admin already exists and no placeholder is pending.\n` +
+              `  bootstrap only creates the FIRST admin; add regular users via the admin API.`,
+          );
+          process.exitCode = 1;
         } else {
           console.error(`bootstrap: no changes (reason: ${outcome.reason})`);
           process.exitCode = 1;

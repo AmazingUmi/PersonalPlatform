@@ -252,7 +252,7 @@ export type BootstrapOutcome =
   | { action: "noop"; username: string; reason: "already-active" | "no-password" | "no-pending-and-exists" };
 
 /**
- * Activate (or create) the first admin account. Idempotent and NON-DESTRUCTIVE:
+ * Activate (or create) the FIRST admin account. Idempotent and NON-DESTRUCTIVE:
  *
  * - the seeded placeholder row is repurposed (renamed in place when the
  *   requested username differs) so its id — and therefore the legacy data
@@ -260,8 +260,12 @@ export type BootstrapOutcome =
  * - an account that already has a real Argon2 hash is NEVER rewritten, no
  *   matter what password the environment carries (a restart must not reset
  *   the operator's password);
- * - with no pending placeholder and a missing username, a new admin is
- *   created (the platform was already bootstrapped under another name).
+ * - bootstrap means "first admin" (AUTH-H1-05): when an activated admin
+ *   already exists and no placeholder is pending, startup is a hard noop —
+ *   a changed BOOTSTRAP_ADMIN_USERNAME/PASSWORD must NOT mint a second
+ *   admin. Additional accounts (regular users) go through the admin API;
+ * - the creation path only runs when the platform has NO activated admin at
+ *   all, preserving it as the recovery route for an admin-less database.
  *
  * The password is only ever written as a hash and never logged.
  */
@@ -312,6 +316,25 @@ export async function ensureBootstrapAdmin(
       [pending.id, username, passwordHash, pending.display_name],
     );
     return { action: "activated", username };
+  }
+
+  // Bootstrap establishes the FIRST admin only (AUTH-H1-05). With an
+  // activated admin already present, a changed username/password in the
+  // environment is an operator mistake, not a request for a second admin.
+  const { rows: activeAdminRows } = await db.query<{ username: string }>(
+    `SELECT username FROM core.users
+     WHERE role = 'admin' AND password_hash LIKE '$argon2%'
+     ORDER BY created_at, id
+     LIMIT 1`,
+  );
+  const activeAdmin = activeAdminRows[0];
+  if (activeAdmin) {
+    options.log?.warn(
+      { requested: username, existing: activeAdmin.username },
+      "bootstrap skipped: an activated admin already exists and no placeholder is pending; " +
+        "bootstrap only creates the FIRST admin (add regular users via the admin API)",
+    );
+    return { action: "noop", username, reason: "no-pending-and-exists" };
   }
 
   await db.query(

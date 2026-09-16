@@ -176,9 +176,39 @@ describe("logout", () => {
     assert.equal(after.statusCode, 401);
   });
 
-  it("requires authentication", async () => {
+  // AUTH-H1-04: logout is idempotent and unauthenticated — an expired session
+  // must still end with a cleared cookie, not a 401 that skips the clear.
+  it("answers 204 + clear-cookie for an expired session", async () => {
+    const cookie = await loginCookie(platform);
+    const token = cookie.split("=")[1]!;
+    await db
+      .context()
+      .query("UPDATE core.sessions SET expires_at = now() - interval '1 second' WHERE token_hash = $1", [
+        hashSessionToken(token),
+      ]);
+    const response = await inject("POST", "/api/core/auth/logout", undefined, cookie);
+    assert.equal(response.statusCode, 204);
+    assert.match(firstSetCookie(response), /pp_session=;/);
+  });
+
+  it("answers 204 + clear-cookie for a bogus token", async () => {
+    const response = await inject("POST", "/api/core/auth/logout", undefined, "pp_session=forged-token");
+    assert.equal(response.statusCode, 204);
+    assert.match(firstSetCookie(response), /pp_session=;/);
+  });
+
+  it("answers 204 + clear-cookie with no cookie at all", async () => {
     const response = await inject("POST", "/api/core/auth/logout");
-    assert.equal(response.statusCode, 401);
+    assert.equal(response.statusCode, 204);
+    assert.match(firstSetCookie(response), /pp_session=;/);
+  });
+
+  it("is repeatable: a second logout behaves identically", async () => {
+    const cookie = await loginCookie(platform);
+    assert.equal((await inject("POST", "/api/core/auth/logout", undefined, cookie)).statusCode, 204);
+    const again = await inject("POST", "/api/core/auth/logout", undefined, cookie);
+    assert.equal(again.statusCode, 204);
+    assert.match(firstSetCookie(again), /pp_session=;/);
   });
 });
 
@@ -348,14 +378,56 @@ describe("bootstrap idempotence", () => {
     });
     assert.equal(operatorLogin.statusCode, 200);
   });
+
+  // AUTH-H1-05: bootstrap establishes the FIRST admin only. After activation,
+  // a changed BOOTSTRAP_ADMIN_USERNAME/PASSWORD in the environment must be a
+  // noop — never a second admin account.
+  it("refuses to create a second admin when the env username changes after activation", async () => {
+    const adminCount = async (): Promise<string> => {
+      const { rows } = await db
+        .context()
+        .query<{ count: string }>("SELECT count(*)::text AS count FROM core.users WHERE role = 'admin'");
+      return rows[0]!.count;
+    };
+    const before = await adminCount();
+
+    const outcome = await ensureBootstrapAdmin(db.context(), {
+      username: "accidental-second-admin",
+      password: "second-admin-password-1",
+    });
+    assert.equal(outcome.action, "noop");
+    assert.equal(outcome.reason, "no-pending-and-exists");
+
+    assert.equal(await adminCount(), before); // no second admin was created
+    // And the "new" account cannot log in — it does not exist.
+    const login = await inject("POST", "/api/core/auth/login", {
+      username: "accidental-second-admin",
+      password: "second-admin-password-1",
+    });
+    assert.equal(login.statusCode, 401);
+  });
+
+  it("repeating the same bootstrap env after activation is a noop that never resets the password", async () => {
+    const outcome = await ensureBootstrapAdmin(db.context(), {
+      username: "operator",
+      password: "totally-different-9",
+    });
+    assert.equal(outcome.action, "noop");
+    assert.equal(outcome.reason, "already-active");
+    const stillValid = await inject("POST", "/api/core/auth/login", {
+      username: "operator",
+      password: "operator-password-1",
+    });
+    assert.equal(stillValid.statusCode, 200);
+  });
 });
 
 describe("login rate limiting", () => {
   it("blocks after repeated failures from the same source", async () => {
-    const username = "rate-admin";
-    const password = "rate-admin-pass-1";
-    const outcome = await ensureBootstrapAdmin(db.context(), { username, password });
-    assert.equal(outcome.action, "created"); // platform already bootstrapped
+    // A regular account (AUTH-H1-05: bootstrap no longer mints extra admins).
+    const username = "rate-user";
+    const password = "rate-user-pass-1";
+    await createTestUser(db, username, password);
 
     const attempt = (passwordAttempt: string) =>
       inject("POST", "/api/core/auth/login", { username, password: passwordAttempt });

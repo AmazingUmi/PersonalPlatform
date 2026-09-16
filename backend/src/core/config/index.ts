@@ -4,9 +4,67 @@ import { parse } from "yaml";
 
 export interface PlatformConfig {
   /** `timezone` is an IANA name (Asia/Shanghai); never a UTC+8 style offset. */
-  platform: { name: string; environment: string; timezone?: string };
+  platform: { name: string; environment: string; timezone?: string; trustProxy?: string };
   apps: { manifests_directory: string; enabled?: Record<string, boolean> };
   storage: { driver: string; root: string };
+}
+
+type Env = Record<string, string | undefined>;
+
+function envFlag(env: Env, name: string): boolean | undefined {
+  const raw = env[name]?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return undefined;
+  if (raw === "true" || raw === "1" || raw === "yes" || raw === "on") return true;
+  if (raw === "false" || raw === "0" || raw === "no" || raw === "off") return false;
+  throw new Error(`${name} must be a boolean (true/false), got "${env[name]}"`);
+}
+
+/**
+ * Effective environment (AUTH-H1-02): the `PLATFORM_ENVIRONMENT` env var
+ * overrides the `platform.environment` yaml default (env > yaml), so Docker
+ * deployments can reliably declare production without editing the checked-in
+ * config.
+ */
+export function resolveEnvironment(configured: string, env: Env = process.env): string {
+  return env.PLATFORM_ENVIRONMENT?.trim() || configured;
+}
+
+/**
+ * Session cookie Secure flag (AUTH-H1-02). Precedence:
+ *   SESSION_COOKIE_SECURE=true|false (explicit operator intent)
+ *   > PLATFORM_ENVIRONMENT env
+ *   > platform.environment yaml
+ * The flag is NEVER guessed from request headers, and a misconfigured reverse
+ * proxy cannot downgrade it: `false` is only honored when written explicitly.
+ */
+export function resolveSessionCookieSecure(
+  configuredEnvironment: string,
+  env: Env = process.env,
+): boolean {
+  const explicit = envFlag(env, "SESSION_COOKIE_SECURE");
+  if (explicit !== undefined) return explicit;
+  return resolveEnvironment(configuredEnvironment, env) === "production";
+}
+
+/**
+ * Fastify `trustProxy` resolution (AUTH-H1-03). Precedence: `TRUST_PROXY` env
+ * > `platform.trust_proxy` yaml. Unset/false/0 → `false` (default: forwarded
+ * headers are ignored — safe with no configuration). true/1 → `true` (trust
+ * every peer; ONLY safe when the backend is reachable solely through the
+ * proxy). Any other string is forwarded verbatim to Fastify/proxy-addr
+ * (`loopback`, `uniquelocal`, or an IP/CIDR list) — only requests from those
+ * addresses get their X-Forwarded-For honored, so direct clients cannot spoof.
+ */
+export function resolveTrustProxy(
+  configured: string | undefined,
+  env: Env = process.env,
+): boolean | string {
+  const raw = env.TRUST_PROXY?.trim() || configured?.trim();
+  if (raw === undefined || raw === "") return false;
+  const lowered = raw.toLowerCase();
+  if (lowered === "false" || lowered === "0") return false;
+  if (lowered === "true" || lowered === "1") return true;
+  return raw;
 }
 
 /**
@@ -48,6 +106,8 @@ export function loadConfig(): PlatformConfig {
       name: String(platform["name"] ?? "Personal Platform"),
       environment: String(platform["environment"] ?? "development"),
       timezone: platform["timezone"] === undefined ? undefined : String(platform["timezone"]),
+      trustProxy:
+        platform["trust_proxy"] === undefined ? undefined : String(platform["trust_proxy"]),
     },
     apps: {
       manifests_directory: String(apps["manifests_directory"] ?? "apps"),

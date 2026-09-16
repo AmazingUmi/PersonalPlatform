@@ -17,14 +17,17 @@ import {
 } from "../shared/api";
 
 /**
- * Session bootstrap + 401 handling (AUTH-5).
+ * Session bootstrap + 401 handling (AUTH-5, AUTH-H1-07).
  *
  * Startup: GET /api/core/auth/me → 200 renders the shell, 401 routes to
- * /login. Any later 401 from an app/core endpoint (session expired, admin
- * revoked) dispatches UNAUTHORIZED_EVENT and flips the app back to the login
- * page — the session secret itself lives only in the HttpOnly cookie.
+ * /login. A network failure or 5xx (backend/database unavailable) becomes the
+ * "error" status instead of "anonymous" — an infrastructure outage must not
+ * be presented as "you are not logged in". Any later 401 from an app/core
+ * endpoint (session expired, admin revoked) dispatches UNAUTHORIZED_EVENT and
+ * flips the app back to the login page — the session secret itself lives only
+ * in the HttpOnly cookie.
  */
-export type AuthStatus = "loading" | "authenticated" | "anonymous";
+export type AuthStatus = "loading" | "authenticated" | "anonymous" | "error";
 
 export interface AuthContextValue {
   status: AuthStatus;
@@ -58,9 +61,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       })
       .catch(() => {
-        // Backend unreachable at boot: treat as logged out — the login form
-        // will surface the real connectivity error on submit.
-        if (mounted.current) setStatus("anonymous");
+        // fetchMe already folded a 401 into null; a rejection here means the
+        // backend is unreachable or answered 5xx — an availability failure,
+        // not an anonymous visitor (AUTH-H1-07).
+        if (mounted.current) {
+          setUser(null);
+          setStatus("error");
+        }
       });
     return () => {
       mounted.current = false;
@@ -90,7 +97,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
-    const me = await fetchMe().catch(() => null);
+    let me: AuthUser | null;
+    try {
+      me = await fetchMe();
+    } catch {
+      // Same rule as boot: 5xx/network means unavailable, not logged out.
+      if (mounted.current) {
+        setUser(null);
+        setStatus("error");
+      }
+      return;
+    }
     if (!mounted.current) return;
     if (me) {
       setUser(me);

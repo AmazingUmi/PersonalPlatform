@@ -33,11 +33,13 @@ export function App() {
 /**
  * Identity boundary at the shell root (AUTH-5): boot checks the session via
  * GET /api/core/auth/me — 200 renders the platform, 401 (or a later 401 from
- * any API) renders only the login flow. The return path is preserved so a
+ * any API) renders only the login flow. A network/5xx failure renders the
+ * backend-unavailable screen instead (AUTH-H1-07): infrastructure trouble is
+ * never presented as "not logged in". The return path is preserved so a
  * successful login lands where the user was heading.
  */
 function SessionGate() {
-  const { status } = useAuth();
+  const { status, refresh } = useAuth();
   const location = useLocation();
 
   if (status === "loading") {
@@ -53,6 +55,36 @@ function SessionGate() {
           <div className="page page--boot">
             <PixelWindow title="Booting" icon="logo">
               <LoadingState label="Checking session…" />
+            </PixelWindow>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <div className="shell shell--boot">
+        <header className="topbar">
+          <span className="topbar__brand">
+            <PixelIcon name="logo" size={24} className="topbar__logo" />
+            <span className="topbar__brand-text">Personal Platform</span>
+          </span>
+        </header>
+        <main className="shell__content">
+          <div className="page page--boot">
+            <PixelWindow title="Backend Unavailable" icon="warning" accent="danger">
+              <StatusMessage tone="error">
+                <p>
+                  The platform backend cannot be reached right now. Your session was not
+                  rejected — this is a connectivity or service outage.
+                </p>
+              </StatusMessage>
+              <div className="login-actions">
+                <PixelButton variant="primary" onClick={() => void refresh()}>
+                  Retry ▸
+                </PixelButton>
+              </div>
             </PixelWindow>
           </div>
         </main>

@@ -55,8 +55,14 @@ make dev-expose   # database/backend 发布到宿主机回环，frontend 开放�
   - 启动时设置环境变量 `BOOTSTRAP_ADMIN_USERNAME` / `BOOTSTRAP_ADMIN_PASSWORD`（见 `.env.example`，后端启动时自动激活）；
   - 或 CLI：`npm run bootstrap:admin -- --username <name>`（隐藏密码输入，也接受 `BOOTSTRAP_ADMIN_PASSWORD` 环境变量）。
 
-  激活是幂等的：**绝不重置已激活的密码**；当请求的用户名与占位管理员不同且其仍处于未激活状态时，会原地改名（id 稳定，已回填的数据继续归属该账号）。真实密码不进 git。
-- **登录**：前端提供 `/login` 登录页；`POST /api/core/auth/login` 成功后签发 HttpOnly Cookie `pp_session`（SameSite=Lax、Path=/、仅生产环境启用 Secure）。会话为服务端会话，存于 `core.sessions`：数据库只保存 sha256(token)，令牌本身为 256-bit 随机 base64url；有效期 30 天，另有每小时的过期会话清理 Job。登录接口按「用户名 + IP」限速：每 5 分钟 10 次失败。登出（`POST /api/core/auth/logout`）与会话自省（`GET /api/core/auth/me`）配套提供；用户管理 API（`GET/POST /api/core/auth/users`）仅管理员可用。
+  激活是幂等的：**绝不重置已激活的密码**；当请求的用户名与占位管理员不同且其仍处于未激活状态时，会原地改名（id 稳定，已回填的数据继续归属该账号）。真实密码不进 git。bootstrap 只负责建立**第一个**管理员：一旦已存在激活的管理员且没有待激活占位符，即使之后误改环境变量里的用户名/密码，启动时也只会记一条警告日志并跳过（不会创建第二个管理员，也不会重置现有密码）。
+- **登录**：前端提供 `/login` 登录页；`POST /api/core/auth/login` 成功后签发 HttpOnly Cookie `pp_session`（SameSite=Lax、Path=/、生产环境启用 Secure）。会话为服务端会话，存于 `core.sessions`：数据库只保存 sha256(token)，令牌本身为 256-bit 随机 base64url；有效期 30 天，另有每小时的过期会话清理 Job。登录接口按「用户名 + 客户端 IP」限速：每 5 分钟 10 次失败。登出（`POST /api/core/auth/logout`，幂等：无论会话是否有效都清除 Cookie 并返回 204）与会话自省（`GET /api/core/auth/me`）配套提供；用户管理 API（`GET/POST /api/core/auth/users`）仅管理员可用。
+
+  认证后端故障（如数据库瞬断）返回 **503** 而非 401——前端据此显示"后端不可用"而非"未登录"（401 才跳转登录页）。
+- **生产部署相关环境变量**（Docker Compose 已透传，见 `.env.example`）：
+  - `PLATFORM_ENVIRONMENT=production`：运行环境声明，**环境变量优先于** `config/platform.yaml`。生产环境下 `pp_session` Cookie 自动带 `Secure`（须部署在 HTTPS 之后）；
+  - `SESSION_COOKIE_SECURE=true|false`：显式覆盖 Secure 标志，优先级最高（仅在明确的 HTTP-only 生产部署时才需要 `false`）。绝不根据请求头猜测，也不会因反代配置错误而自动降级；
+  - `TRUST_PROXY=loopback|uniquelocal|<IP/CIDR 列表>`：声明可信反向代理后，登录限速才会采用 `X-Forwarded-For` 解析出的客户端 IP。默认不信任任何代理（伪造 `X-Forwarded-For` 无法绕过限速）；`true` 表示完全信任，仅在后端只能经由代理访问时使用。预期拓扑：`Browser → (Nginx/TLS) → frontend/backend`，Compose 网络可用 `uniquelocal`（172.16.0.0/12）。
 - **多用户数据隔离**：所有 App 的业务数据行都以 `user_id` 归属（NOT NULL 外键 → `core.users`，级联删除）；查询始终按当前用户过滤，访问他人资源返回 404。用户文件（如附件）根目录为 `storage/users/<userId>/apps/<appId>/`。
 - **创建更多用户**：管理员登录后在 Settings → Users 面板创建普通账号；管理员账号只能通过 bootstrap 产生。
 

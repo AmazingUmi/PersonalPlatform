@@ -1,4 +1,4 @@
-import { mkdir, readFile, realpath, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { sanitizeKey, StorageError, type AppStorage, type Storage } from "./index.js";
 
@@ -26,7 +26,13 @@ export class LocalStorageDriver implements Storage {
     return full;
   }
 
-  /** Reject symlink escapes by resolving the nearest existing ancestor. */
+  /**
+   * Reject symlink escapes by resolving the nearest existing ancestor
+   * (AUTH-H1-06), then require that the final path component itself is not a
+   * symlink — readFile/writeFile/rm/stat would otherwise follow a symlink
+   * planted as the object. The storage root as configured is exempt: it is
+   * operator-provided and realpath'd here once.
+   */
   private async assertWithinRoot(fullPath: string): Promise<void> {
     let rootReal: string;
     try {
@@ -43,7 +49,7 @@ export class LocalStorageDriver implements Storage {
         if (rel.startsWith("..") || isAbsolute(rel)) {
           throw new StorageError("path escapes the storage root", "invalid_path");
         }
-        return;
+        break;
       } catch (error) {
         if (error instanceof StorageError) throw error;
         if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -53,6 +59,13 @@ export class LocalStorageDriver implements Storage {
           continue;
         }
         return;
+      }
+    }
+
+    if (fullPath !== this.rootDir) {
+      const info = await lstat(fullPath).catch(() => undefined);
+      if (info?.isSymbolicLink()) {
+        throw new StorageError("symlink at storage path is not allowed", "invalid_path");
       }
     }
   }
@@ -83,6 +96,9 @@ export class LocalStorageDriver implements Storage {
   async list(prefix = ""): Promise<string[]> {
     const normalizedPrefix = prefix === "" ? prefix : sanitizeKey(prefix);
     const base = resolve(this.rootDir, normalizedPrefix);
+    // The prefix path gets the same symlink validation as object keys; the
+    // bare root is the trusted boundary itself (AUTH-H1-06).
+    if (base !== this.rootDir) await this.assertWithinRoot(base);
     const results: string[] = [];
     await this.walk(base, results);
     return results.sort();
@@ -114,14 +130,11 @@ export class LocalStorageDriver implements Storage {
         await this.walk(full, results);
       } else if (entry.isFile()) {
         results.push(relative(this.rootDir, full).split(sep).join("/"));
-      } else if (entry.isSymbolicLink()) {
-        const targetStat = await stat(full).catch(() => undefined);
-        if (targetStat?.isDirectory()) {
-          await this.walk(full, results);
-        } else if (targetStat?.isFile()) {
-          results.push(relative(this.rootDir, full).split(sep).join("/"));
-        }
       }
+      // Symlinked entries are neither traversed nor listed (AUTH-H1-06): a
+      // linked directory could lead outside the root, and a linked file is
+      // not an object this driver owns. readdir's Dirent does not follow
+      // symlinks, so isDirectory()/isFile() already exclude them.
     }
   }
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -167,6 +167,112 @@ describe("LocalStorageDriver", () => {
     await withStorage(async (_root, storage) => {
       await assert.rejects(
         storage.save("a/../b", "x"),
+        (error: unknown) => isStorageErrorWithCode(error, "invalid_path"),
+      );
+    });
+  });
+});
+
+/**
+ * AUTH-H1-06: the final path component being a symlink must be rejected for
+ * every operation (read/write/delete), list must not traverse or return
+ * symlinks, and legitimate nested directories must keep working.
+ */
+describe("LocalStorageDriver final-component symlinks (AUTH-H1-06)", () => {
+  /** temp dir OUTSIDE the storage root, as an attacker-planted target */
+  function outsideDir(): string {
+    return mkdtempSync(join(tmpdir(), "pp-storage-outside-"));
+  }
+
+  it("rejects read/write/delete/exists when the object itself is a symlink", async () => {
+    await withStorage(async (root, storage) => {
+      const outside = outsideDir();
+      try {
+        writeFileSync(join(outside, "secret.txt"), "secret");
+        symlinkSync(join(outside, "secret.txt"), join(root, "file"));
+        await assert.rejects(
+          storage.read("file"),
+          (error: unknown) => isStorageErrorWithCode(error, "invalid_path"),
+        );
+        await assert.rejects(
+          storage.save("file", "overwritten?"),
+          (error: unknown) => isStorageErrorWithCode(error, "invalid_path"),
+        );
+        await assert.rejects(
+          storage.delete("file"),
+          (error: unknown) => isStorageErrorWithCode(error, "invalid_path"),
+        );
+        // exists() keeps its catch-all contract: no throw, reports false.
+        assert.equal(await storage.exists("file"), false);
+        // The outside target was never touched through the storage surface.
+        assert.equal(readFileSync(join(outside, "secret.txt"), "utf8"), "secret");
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("rejects a symlinked final component even when the link stays inside the root", async () => {
+    await withStorage(async (root, storage) => {
+      await storage.save("real.txt", "real");
+      symlinkSync(join(root, "real.txt"), join(root, "alias.txt"));
+      await assert.rejects(
+        storage.read("alias.txt"),
+        (error: unknown) => isStorageErrorWithCode(error, "invalid_path"),
+      );
+      assert.equal(await storage.exists("alias.txt"), false);
+    });
+  });
+
+  it("list does not traverse symlinked directories or return symlinked files", async () => {
+    await withStorage(async (root, storage) => {
+      const outside = outsideDir();
+      try {
+        writeFileSync(join(outside, "leaked.txt"), "leaked");
+        mkdirSync(join(root, "keep"), { recursive: true });
+        await storage.save("keep/kept.txt", "kept");
+        await storage.save("top.txt", "top");
+        symlinkSync(outside, join(root, "linkdir"));
+        symlinkSync(join(outside, "leaked.txt"), join(root, "linkfile.txt"));
+
+        assert.deepEqual(await storage.list(), ["keep/kept.txt", "top.txt"]);
+        // A prefix that IS a symlink is rejected outright.
+        await assert.rejects(
+          storage.list("linkdir"),
+          (error: unknown) => isStorageErrorWithCode(error, "invalid_path"),
+        );
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("nested prefix listing with a symlinked directory sibling stays clean", async () => {
+    await withStorage(async (root, storage) => {
+      const outside = outsideDir();
+      try {
+        mkdirSync(join(root, "a", "b"), { recursive: true });
+        await storage.save("a/b/deep.txt", "deep");
+        symlinkSync(outside, join(root, "a", "baddir"));
+        assert.deepEqual(await storage.list("a/b"), ["a/b/deep.txt"]);
+        assert.deepEqual(await storage.list("a"), ["a/b/deep.txt"]);
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("an ancestor symlink within the root stays usable; only escapes are rejected", async () => {
+    await withStorage(async (root, storage) => {
+      await storage.save("real/file.txt", "via-real");
+      symlinkSync(join(root, "real"), join(root, "alias"));
+      // The ancestor resolves inside the root, and the final component is a
+      // regular file — allowed (escape-only rejection for ancestors).
+      assert.equal((await storage.read("alias/file.txt")).toString(), "via-real");
+      // A symlink as the LAST segment (here: the list prefix itself) is
+      // rejected outright — the driver never follows a symlinked endpoint.
+      await assert.rejects(
+        storage.list("alias"),
         (error: unknown) => isStorageErrorWithCode(error, "invalid_path"),
       );
     });

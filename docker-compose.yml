@@ -29,9 +29,19 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       PLATFORM_ROOT: /workspace
       DATABASE_URL: postgresql://${POSTGRES_USER:-personal_platform}:${POSTGRES_PASSWORD:-change-me-for-local-development}@database:5432/${POSTGRES_DB:-personal_platform}
+      # Runtime environment / cookie hardening (AUTH-H1-02): production sets
+      # the Secure attribute on the pp_session cookie (behind HTTPS).
+      PLATFORM_ENVIRONMENT: ${PLATFORM_ENVIRONMENT:-development}
+      # Explicit Secure override (wins over PLATFORM_ENVIRONMENT). Empty = off.
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-}
+      # Trusted reverse proxy (AUTH-H1-03): only under this configuration is
+      # X-Forwarded-For honored for the login limiter. Empty = do not trust.
+      # `uniquelocal` matches the compose network (172.16.0.0/12).
+      TRUST_PROXY: ${TRUST_PROXY:-}
       # First-admin bootstrap (empty = skip; see README "身份认证" / .env.example).
       # Passed through so `docker compose` can activate the placeholder admin
-      # on first boot. Never resets an already-activated password.
+      # on first boot. Never resets an already-activated password; once an
+      # active admin exists this is a noop (AUTH-H1-05).
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
     # Not published to the host by default: the frontend proxy is the only

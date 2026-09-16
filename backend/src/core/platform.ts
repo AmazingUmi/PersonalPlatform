@@ -4,6 +4,7 @@ import Fastify, { type FastifyBaseLogger, type FastifyInstance, type FastifyRepl
 import { AppError, notFoundHandler, errorHandler } from "./api/errors.js";
 import { registerCoreRoutes } from "./api/routes.js";
 import type { PlatformConfig } from "./config/index.js";
+import { resolveEnvironment, resolveSessionCookieSecure, resolveTrustProxy } from "./config/index.js";
 import type { Database } from "./database/index.js";
 import { EventBus } from "./events/index.js";
 import type { Logger } from "./logging/index.js";
@@ -86,6 +87,10 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
   const app: FastifyInstance = Fastify({
     loggerInstance: log as FastifyBaseLogger,
     requestIdHeader: "x-request-id",
+    // AUTH-H1-03: forwarded client IPs (X-Forwarded-For) are honored only when
+    // an explicit trusted-proxy configuration exists (TRUST_PROXY env >
+    // platform.trust_proxy yaml). Default false: direct clients cannot spoof.
+    trustProxy: resolveTrustProxy(config.platform.trustProxy),
   });
   app.setErrorHandler(errorHandler);
   app.setNotFoundHandler(notFoundHandler);
@@ -144,13 +149,15 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
   const authDeps = { database, now: deps.clock };
   registerAuthRoutes(app, {
     database,
-    isProduction: config.platform.environment === "production",
+    sessionCookieSecure: resolveSessionCookieSecure(config.platform.environment),
     now: deps.clock,
   });
   registerCoreRoutes(app, {
     database,
     handlers: { getApps, setAppEnabled, getAppHealth, getSetting, putSetting },
-    platform: { name: config.platform.name, environment: config.platform.environment },
+    // Report the EFFECTIVE environment (env override applied) so the
+    // informational endpoint never disagrees with the resolved cookie flags.
+    platform: { name: config.platform.name, environment: resolveEnvironment(config.platform.environment) },
     time: { timezone: () => time.timezone() },
     requireAuth: createRequireAuth(authDeps),
     requireAdmin: createRequireAdmin(authDeps),
