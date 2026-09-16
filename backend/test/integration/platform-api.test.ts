@@ -3,7 +3,7 @@ import { after, before, describe, it } from "node:test";
 import { Database } from "../../src/core/database/index.js";
 import { createLogger } from "../../src/core/logging/index.js";
 import type { BackendAppModule } from "../../src/core/app-registry/types.js";
-import { withFixturePlatform } from "../helpers/platform.js";
+import { ensureTestAdmin, loginCookie, withFixturePlatform } from "../helpers/platform.js";
 import { resetDatabase } from "../helpers/db.js";
 
 const log = createLogger("fatal");
@@ -23,6 +23,7 @@ let db: Database;
 
 before(async () => {
   db = await resetDatabase();
+  await ensureTestAdmin(db);
 });
 
 after(async () => {
@@ -44,7 +45,12 @@ describe("core api", () => {
     await withFixturePlatform(
       { database: db, manifests: [{ id: "listed" }], backendModules: { listed: testAppModule("listed") } },
       async (platform) => {
-        const response = await platform.app.inject({ method: "GET", url: "/api/core/apps" });
+        const cookie = await loginCookie(platform);
+        const response = await platform.app.inject({
+          method: "GET",
+          url: "/api/core/apps",
+          headers: { cookie },
+        });
         assert.equal(response.statusCode, 200);
         const body = response.json() as { items: Array<{ id: string; status: string }> };
         const listed = body.items.find((item) => item.id === "listed");
@@ -66,10 +72,14 @@ describe("core api", () => {
 
   it("validates PUT /api/core/apps/:id/enabled body", async () => {
     await withFixturePlatform({ database: db, manifests: [{ id: "validated" }] }, async (platform) => {
+      // Authenticated so the request reaches schema validation (401 would
+      // otherwise short-circuit before the 400 under validation).
+      const cookie = await loginCookie(platform);
       const response = await platform.app.inject({
         method: "PUT",
         url: "/api/core/apps/validated/enabled",
         payload: { enabled: "yes" },
+        headers: { cookie },
       });
       assert.equal(response.statusCode, 400);
       const body = response.json() as { error: { code: string } };
@@ -119,6 +129,7 @@ describe("app isolation", () => {
     };
     await withFixturePlatform(
       {
+        database: db,
         manifests: [{ id: "exploding" }, { id: "healthy" }],
         backendModules: {
           exploding: brokenModule,
@@ -126,7 +137,12 @@ describe("app isolation", () => {
         },
       },
       async (platform) => {
-        const apps = await platform.app.inject({ method: "GET", url: "/api/core/apps" });
+        const cookie = await loginCookie(platform);
+        const apps = await platform.app.inject({
+          method: "GET",
+          url: "/api/core/apps",
+          headers: { cookie },
+        });
         assert.equal(apps.statusCode, 200, "core API still serves");
 
         const exploding = (apps.json() as { items: Array<{ id: string; status: string; errorMessage?: string }> })
@@ -134,7 +150,11 @@ describe("app isolation", () => {
         assert.equal(exploding?.status, "error");
         assert.match(exploding?.errorMessage ?? "", /registerApi/);
 
-        const healthy = await platform.app.inject({ method: "GET", url: "/api/apps/healthy/ping" });
+        const healthy = await platform.app.inject({
+          method: "GET",
+          url: "/api/apps/healthy/ping",
+          headers: { cookie },
+        });
         assert.equal(healthy.statusCode, 200);
         assert.equal(healthy.json().app, "healthy");
       },

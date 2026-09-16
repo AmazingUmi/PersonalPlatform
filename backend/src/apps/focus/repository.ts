@@ -11,7 +11,8 @@
  * Every statement is schema-qualified `focus.` and parameterized ($n); the
  * only values interpolated into SQL text are validated integers that are
  * passed as parameters anyway. `Db` is derived from AppContext (never from
- * core/database) so the isolation rules hold.
+ * core/database) so the isolation rules hold. Every read/write is scoped to
+ * one user's rows via an explicit `user_id` predicate (AUTH-3 ownership).
  */
 
 import type { AppContext } from "../../core/app-registry/types.js";
@@ -103,29 +104,31 @@ function assertIntIn(name: string, value: number, min: number, max: number): voi
 // ---------------------------------------------------------------------------
 
 /**
- * Effective settings: the stored row if present AND valid, otherwise the
- * defaults. A poisoned/stale row never reaches the caller (defensive read).
+ * Effective settings for one user: the stored row if present AND valid,
+ * otherwise the defaults. A poisoned/stale row never reaches the caller
+ * (defensive read).
  */
-export async function getSettings(db: Db): Promise<SettingsView> {
+export async function getSettings(db: Db, userId: string): Promise<SettingsView> {
   const { rows } = await db.query<{ value: unknown }>(
-    "SELECT value FROM focus.settings WHERE id = $1",
-    [SETTINGS_ID],
+    "SELECT value FROM focus.settings WHERE id = $1 AND user_id = $2",
+    [SETTINGS_ID, userId],
   );
   return sanitizeSettings(rows[0]?.value) ?? DEFAULT_SETTINGS;
 }
 
 /**
- * Overwrite the stored settings. `next` must already be validated by the
+ * Overwrite the stored settings for one user (per-user slot keyed by
+ * (user_id, id) since AUTH-3). `next` must already be validated by the
  * caller (index.ts sanitizes input); this is a dumb upsert on purpose.
  */
-export async function saveSettings(db: Db, next: SettingsView): Promise<void> {
+export async function saveSettings(db: Db, userId: string, next: SettingsView): Promise<void> {
   await db.query(
-    `INSERT INTO focus.settings (id, value, updated_at)
-     VALUES ($1, $2::jsonb, now())
-     ON CONFLICT (id) DO UPDATE
+    `INSERT INTO focus.settings (id, user_id, value, updated_at)
+     VALUES ($1, $2, $3::jsonb, now())
+     ON CONFLICT (user_id, id) DO UPDATE
        SET value = EXCLUDED.value,
            updated_at = now()`,
-    [SETTINGS_ID, JSON.stringify(next)],
+    [SETTINGS_ID, userId, JSON.stringify(next)],
   );
 }
 
@@ -134,45 +137,52 @@ export async function saveSettings(db: Db, next: SettingsView): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * The single active session, locked FOR UPDATE until the transaction ends.
- * The partial unique index guarantees at most one row exists; ORDER BY +
- * LIMIT 1 are defensive against constraint drift.
+ * The single active session of one user, locked FOR UPDATE until the
+ * transaction ends. The per-user partial unique index guarantees at most one
+ * row exists per user; ORDER BY + LIMIT 1 are defensive against constraint
+ * drift.
  */
-export async function findActiveSession(tx: Db): Promise<SessionRow | null> {
+export async function findActiveSession(tx: Db, userId: string): Promise<SessionRow | null> {
   const { rows } = await tx.query<SessionPgRow>(
     `SELECT ${SESSION_COLUMNS}
      FROM focus.sessions
-     WHERE status IN ('running', 'paused')
+     WHERE user_id = $1 AND status IN ('running', 'paused')
      ORDER BY started_at DESC
      LIMIT 1
      FOR UPDATE`,
+    [userId],
   );
   return rows[0] ? toRow(rows[0]) : null;
 }
 
 /**
- * Persist a brand-new session. `row.revision` must be 1 (a fresh row from the
- * timer). Inserting while another active session exists fails with 23505 on
- * sessions_one_active_idx — the caller decides how to surface that.
+ * Persist a brand-new session owned by `userId`. `row.revision` must be 1 (a
+ * fresh row from the timer). Inserting while the same user already has an
+ * active session fails with 23505 on sessions_one_active_idx — the caller
+ * decides how to surface that. `userId` is a separate parameter so SessionRow
+ * stays the pure domain row type (timer.ts is user-agnostic).
  */
-export async function insertSession(tx: Db, row: SessionRow): Promise<void> {
+export async function insertSession(tx: Db, userId: string, row: SessionRow): Promise<void> {
   await tx.query(
     `INSERT INTO focus.sessions (
-       id, kind, status, planned_duration_seconds, elapsed_before_pause_seconds,
+       user_id, id, kind, status, planned_duration_seconds, elapsed_before_pause_seconds,
        started_at, last_resumed_at, paused_at, ended_at, end_reason,
        actual_duration_seconds, revision
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-    toParams(row),
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+    [userId, ...toParams(row)],
   );
 }
 
 /**
  * Optimistic-concurrency write of a TRANSITIONED row (timer output, revision
  * already bumped): the statement only matches when the DB still holds
- * `row.revision - 1`. Returns the affected-row count — 0 means the row moved
- * on (stale write) and the caller must re-read and re-decide.
+ * `row.revision - 1`. The `user_id` predicate is defense in depth — the row
+ * being transitioned belongs to the calling user by construction (it was
+ * found via the user-scoped active query). Returns the affected-row count —
+ * 0 means the row moved on (stale write) and the caller must re-read and
+ * re-decide.
  */
-export async function updateSessionRow(tx: Db, row: SessionRow): Promise<number> {
+export async function updateSessionRow(tx: Db, userId: string, row: SessionRow): Promise<number> {
   const result = await tx.query(
     `UPDATE focus.sessions SET
        kind = $2,
@@ -187,8 +197,8 @@ export async function updateSessionRow(tx: Db, row: SessionRow): Promise<number>
        actual_duration_seconds = $11,
        revision = $12,
        updated_at = now()
-     WHERE id = $1 AND revision = $13`,
-    [...toParams(row), row.revision - 1],
+     WHERE id = $1 AND revision = $13 AND user_id = $14`,
+    [...toParams(row), row.revision - 1, userId],
   );
   return result.rowCount ?? 0;
 }
@@ -206,19 +216,23 @@ export interface ReconcileResult {
 }
 
 /**
- * Row-atomic "close an expired session" primitive. Inside one transaction
- * (the caller's): lock the active row, and if its planned end has passed,
- * apply the timer's natural completion and persist it. `row` is the still-live
- * active row, or null when there is none (never had one, or just expired —
- * in which case `completed` carries the closed row).
+ * Row-atomic "close an expired session" primitive for one user. Inside one
+ * transaction (the caller's): lock the user's active row, and if its planned
+ * end has passed, apply the timer's natural completion and persist it. `row`
+ * is the still-live active row, or null when there is none (never had one, or
+ * just expired — in which case `completed` carries the closed row).
  */
-export async function reconcileActive(tx: Db, now: Date): Promise<ReconcileResult> {
-  const active = await findActiveSession(tx);
+export async function reconcileActive(
+  tx: Db,
+  userId: string,
+  now: Date,
+): Promise<ReconcileResult> {
+  const active = await findActiveSession(tx, userId);
   if (active === null) return { row: null, completed: null };
   if (!isExpired(active, now)) return { row: active, completed: null };
 
   const completed = applyNaturalComplete(active, now);
-  const updated = await updateSessionRow(tx, completed);
+  const updated = await updateSessionRow(tx, userId, completed);
   if (updated !== 1) {
     // Impossible while holding the FOR UPDATE lock — the row changed out of
     // band. Fail loudly rather than fabricate a completed session.
@@ -259,11 +273,13 @@ type HistoryPgRow = {
 };
 
 /**
- * Terminal sessions (completed/cancelled), newest first, with the un-paginated
- * total for the UI page count. limit/offset are validated then parameterized.
+ * One user's terminal sessions (completed/cancelled), newest first, with the
+ * un-paginated total for the UI page count. limit/offset are validated then
+ * parameterized.
  */
 export async function listSessions(
   db: Db,
+  userId: string,
   page: { limit: number; offset: number },
 ): Promise<{ items: HistoryItemRow[]; total: number }> {
   assertIntIn("limit", page.limit, 1, 500);
@@ -272,10 +288,10 @@ export async function listSessions(
     `SELECT id, kind, status, planned_duration_seconds, actual_duration_seconds,
             started_at, ended_at, end_reason, COUNT(*) OVER () AS total
      FROM focus.sessions
-     WHERE status IN ('completed', 'cancelled')
+     WHERE user_id = $1 AND status IN ('completed', 'cancelled')
      ORDER BY started_at DESC
-     LIMIT $1 OFFSET $2`,
-    [page.limit, page.offset],
+     LIMIT $2 OFFSET $3`,
+    [userId, page.limit, page.offset],
   );
   const items = rows.map((r) => ({
     id: r.id,
@@ -291,12 +307,13 @@ export async function listSessions(
 }
 
 /**
- * Aggregates for terminal sessions whose ended_at falls in [start, end):
- * focused seconds and completed rounds count kind='focus' only; sessionsEnded
- * includes completed/cancelled breaks.
+ * Aggregates for one user's terminal sessions whose ended_at falls in
+ * [start, end): focused seconds and completed rounds count kind='focus' only;
+ * sessionsEnded includes completed/cancelled breaks.
  */
 export async function todayStats(
   db: Db,
+  userId: string,
   range: { start: Date; end: Date },
 ): Promise<{ focusedSeconds: number; completedRounds: number; sessionsEnded: number }> {
   const { rows } = await db.query<{
@@ -309,10 +326,10 @@ export async function todayStats(
        COUNT(*) FILTER (WHERE kind = 'focus' AND status = 'completed')::int AS completed_rounds,
        COUNT(*) FILTER (WHERE status IN ('completed', 'cancelled'))::int AS sessions_ended
      FROM focus.sessions
-     WHERE status IN ('completed', 'cancelled')
+     WHERE user_id = $3 AND status IN ('completed', 'cancelled')
        AND ended_at >= $1
        AND ended_at < $2`,
-    [range.start, range.end],
+    [range.start, range.end, userId],
   );
   return {
     focusedSeconds: rows[0]?.focused_seconds ?? 0,
@@ -324,12 +341,13 @@ export async function todayStats(
 /**
  * Per-local-day focus series over the last `days` days ending on
  * `todayLocal` ("YYYY-MM-DD", precomputed by the caller via timer.ts
- * localDateString — no calendar logic runs inside SQL beyond bucketing).
- * Days without sessions are zero-filled; only kind='focus' terminal sessions
- * count, and rounds only when completed.
+ * localDateString — no calendar logic runs inside SQL beyond bucketing), for
+ * one user. Days without sessions are zero-filled; only kind='focus' terminal
+ * sessions count, and rounds only when completed.
  */
 export async function statsSeries(
   db: Db,
+  userId: string,
   window: { timeZone: string; todayLocal: string; days: number },
 ): Promise<Array<{ date: string; focusedSeconds: number; completedRounds: number }>> {
   assertIntIn("days", window.days, 1, 366);
@@ -349,9 +367,10 @@ export async function statsSeries(
        ON (s.ended_at AT TIME ZONE $1)::date = d.day::date
       AND s.kind = 'focus'
       AND s.status IN ('completed', 'cancelled')
+      AND s.user_id = $4
      GROUP BY d.day
      ORDER BY d.day`,
-    [window.timeZone, window.todayLocal, window.days],
+    [window.timeZone, window.todayLocal, window.days, userId],
   );
   return rows.map((r) => ({
     date: r.date,
@@ -361,21 +380,22 @@ export async function statsSeries(
 }
 
 /**
- * Completed focus rounds since the last completed long break — the pomodoro
- * cycle position that picks the next session kind (timer.ts nextKind). With
- * no completed long break yet, the anchor is -infinity (count from the
- * beginning of history).
+ * One user's completed focus rounds since their last completed long break —
+ * the pomodoro cycle position that picks the next session kind (timer.ts
+ * nextKind). With no completed long break yet, the anchor is -infinity
+ * (count from the beginning of the user's history).
  */
-export async function completedFocusSinceLongBreak(db: Db): Promise<number> {
+export async function completedFocusSinceLongBreak(db: Db, userId: string): Promise<number> {
   const { rows } = await db.query<{ completed_focus: number }>(
     `WITH anchor AS (
        SELECT COALESCE(MAX(ended_at), '-infinity'::timestamptz) AS a
        FROM focus.sessions
-       WHERE kind = 'long_break' AND status = 'completed'
+       WHERE kind = 'long_break' AND status = 'completed' AND user_id = $1
      )
      SELECT COUNT(*)::int AS completed_focus
      FROM focus.sessions, anchor
-     WHERE kind = 'focus' AND status = 'completed' AND ended_at > anchor.a`,
+     WHERE kind = 'focus' AND status = 'completed' AND ended_at > anchor.a AND user_id = $1`,
+    [userId],
   );
   return rows[0]?.completed_focus ?? 0;
 }

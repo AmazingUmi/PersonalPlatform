@@ -5,7 +5,7 @@ import { after, before, describe, it } from "node:test";
 import { Database } from "../../src/core/database/index.js";
 import tasksApp from "../../src/apps/tasks/index.js";
 import type { Platform } from "../../src/core/platform.js";
-import { buildFixturePlatform } from "../helpers/platform.js";
+import { buildFixturePlatform, ensureTestAdmin, loginCookie } from "../helpers/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 import { runMigrations } from "../../src/core/database/migrate.js";
 import { localDayRangeUtc } from "../../src/core/time/index.js";
@@ -20,12 +20,20 @@ const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
 const tasksMigrations = [
   readFileSync(join(repoRoot, "apps/tasks/migrations/20260101000001-init.sql"), "utf8"),
   readFileSync(join(repoRoot, "apps/tasks/migrations/20260829000002-start-priority.sql"), "utf8"),
+  readFileSync(join(repoRoot, "apps/tasks/migrations/20260916100000-user-ownership.sql"), "utf8"),
 ];
 
 let db: Database;
+/**
+ * Session cookie of the most recently built platform (AUTH-1: every
+ * /api/apps/* and protected core route needs one). Tests run sequentially and
+ * each one logs in inside buildTasksPlatform before issuing requests.
+ */
+let cookie: string | undefined;
 
 before(async () => {
   db = await resetDatabase();
+  await ensureTestAdmin(db);
 });
 
 after(async () => {
@@ -38,7 +46,12 @@ async function json<T>(
   url: string,
   payload?: object,
 ): Promise<{ status: number; body: T }> {
-  const response = await platform.app.inject({ method, url, payload });
+  const response = await platform.app.inject({
+    method,
+    url,
+    payload,
+    headers: cookie ? { cookie } : undefined,
+  });
   const raw = response.body;
   return { status: response.statusCode, body: (raw ? JSON.parse(raw) : null) as T };
 }
@@ -50,6 +63,7 @@ async function buildTasksPlatform(clock?: () => Date): Promise<{ platform: Platf
     backendModules: { tasks: tasksApp },
     clock,
   });
+  cookie = await loginCookie(fixture.platform);
   await runMigrations({
     databaseUrl: TEST_DATABASE_URL,
     targets: [{ scope: "tasks", schema: "tasks", dir: join(fixture.root, "apps", "tasks", "migrations") }],

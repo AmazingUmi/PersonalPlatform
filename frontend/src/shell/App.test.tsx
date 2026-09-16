@@ -1,19 +1,26 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import { fetchApps, getSetting, type AppInfo } from "../shared/api";
+import { fetchApps, getSetting, type AppInfo, type AuthUser } from "../shared/api";
 
 vi.mock("../shared/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../shared/api")>();
   return {
     ...actual,
     fetchApps: vi.fn(),
+    // AUTH-5: the shell boots through the session gate — mock an
+    // authenticated admin so PlatformShell renders as before.
+    fetchMe: vi.fn(),
     getSetting: vi.fn().mockResolvedValue(null),
     setAppEnabled: vi.fn(),
   };
 });
 
-import { fetchApps as fetchAppsMock, setAppEnabled as setAppEnabledMock } from "../shared/api";
+import {
+  fetchApps as fetchAppsMock,
+  fetchMe as fetchMeMock,
+  setAppEnabled as setAppEnabledMock,
+} from "../shared/api";
 
 const enabledApp: AppInfo = {
   id: "alpha",
@@ -30,8 +37,11 @@ const enabledApp: AppInfo = {
   hasFrontend: true,
 };
 
+const adminUser: AuthUser = { id: "u-admin", username: "admin", displayName: "Admin", role: "admin" };
+
 beforeEach(() => {
   vi.mocked(getSetting).mockResolvedValue(null);
+  vi.mocked(fetchMeMock).mockResolvedValue(adminUser);
 });
 
 afterEach(() => {

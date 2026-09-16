@@ -13,7 +13,9 @@
  *
  * All timestamps come from ctx.time.now() (injectable clock, FP-10); responses
  * are camelCase with ISO strings. Events fire strictly AFTER the transaction
- * commits (a rolled-back session never happened).
+ * commits (a rolled-back session never happened). Every handler resolves the
+ * request user via ctx.auth.requireUser and scopes all reads/writes to that
+ * user (AUTH-3 ownership).
  */
 
 import { randomUUID } from "node:crypto";
@@ -93,17 +95,19 @@ interface HistoryItem {
 /**
  * Build the FocusState around a KNOWN active row (read inside the just-
  * committed transaction): settings, today stats and cycle position are fetched
- * in parallel outside any transaction — they are plain reads.
+ * in parallel outside any transaction — they are plain reads. Every read is
+ * scoped to the requesting user (AUTH-3).
  */
 async function assembleState(
   ctx: AppContext,
+  userId: string,
   now: Date,
   active: SessionRow | null,
 ): Promise<FocusState> {
   const [settings, today, completedFocus] = await Promise.all([
-    getSettings(ctx.database),
-    todayStats(ctx.database, ctx.time.todayRangeUtc(now)),
-    completedFocusSinceLongBreak(ctx.database),
+    getSettings(ctx.database, userId),
+    todayStats(ctx.database, userId, ctx.time.todayRangeUtc(now)),
+    completedFocusSinceLongBreak(ctx.database, userId),
   ]);
   return {
     now: now.toISOString(),
@@ -116,17 +120,17 @@ async function assembleState(
 }
 
 /**
- * Close any expired running session in its own transaction, publish the
- * completion event, then assemble the state. Every read path funnels through
- * here so a naturally completed session is committed, published and visible
- * in a single request.
+ * Close any expired running session of one user in its own transaction,
+ * publish the completion event, then assemble the state. Every read path
+ * funnels through here so a naturally completed session is committed,
+ * published and visible in a single request.
  */
-async function syncState(ctx: AppContext, now: Date): Promise<FocusState> {
+async function syncState(ctx: AppContext, userId: string, now: Date): Promise<FocusState> {
   const { row: active, completed } = await ctx.database.withTransaction((tx) =>
-    reconcileActive(tx, now),
+    reconcileActive(tx, userId, now),
   );
-  if (completed !== null) publishCompleted(ctx, completed);
-  return assembleState(ctx, now, active);
+  if (completed !== null) publishCompleted(ctx, userId, completed);
+  return assembleState(ctx, userId, now, active);
 }
 
 /**
@@ -136,11 +140,12 @@ async function syncState(ctx: AppContext, now: Date): Promise<FocusState> {
  */
 async function stateConflict(
   ctx: AppContext,
+  userId: string,
   now: Date,
   code: ConflictCode,
   message: string,
 ): Promise<never> {
-  const state = await syncState(ctx, now);
+  const state = await syncState(ctx, userId, now);
   throw new AppError(409, code, message, { state });
 }
 
@@ -148,18 +153,31 @@ async function stateConflict(
 // events (published only after the owning transaction committed)
 // ---------------------------------------------------------------------------
 
-function publishCompleted(ctx: AppContext, row: SessionRow): void {
+// `userId` is an additive field on the .v1 payloads (AUTH-3 payload evolution
+// rule: additions allowed, renames/removals require a new .vN).
+
+function publishCompleted(ctx: AppContext, userId: string, row: SessionRow): void {
   ctx.events.publish(
     "focus.session.completed.v1",
-    { id: row.id, kind: row.kind, actualDurationSeconds: row.actualDurationSeconds },
+    {
+      userId,
+      id: row.id,
+      kind: row.kind,
+      actualDurationSeconds: row.actualDurationSeconds,
+    },
     id,
   );
 }
 
-function publishCancelled(ctx: AppContext, row: SessionRow): void {
+function publishCancelled(ctx: AppContext, userId: string, row: SessionRow): void {
   ctx.events.publish(
     "focus.session.cancelled.v1",
-    { id: row.id, kind: row.kind, actualDurationSeconds: row.actualDurationSeconds },
+    {
+      userId,
+      id: row.id,
+      kind: row.kind,
+      actualDurationSeconds: row.actualDurationSeconds,
+    },
     id,
   );
 }
@@ -181,16 +199,17 @@ interface TransitionOutcome {
 
 async function finishTransition(
   ctx: AppContext,
+  userId: string,
   now: Date,
   outcome: TransitionOutcome,
 ): Promise<{ state: FocusState }> {
   // The transaction has committed — now the side effects are real.
-  if (outcome.completed !== null) publishCompleted(ctx, outcome.completed);
-  if (outcome.cancelled !== null) publishCancelled(ctx, outcome.cancelled);
+  if (outcome.completed !== null) publishCompleted(ctx, userId, outcome.completed);
+  if (outcome.cancelled !== null) publishCancelled(ctx, userId, outcome.cancelled);
   if (outcome.conflict !== null) {
-    await stateConflict(ctx, now, outcome.conflict.code, outcome.conflict.message);
+    await stateConflict(ctx, userId, now, outcome.conflict.code, outcome.conflict.message);
   }
-  return { state: await assembleState(ctx, now, outcome.activeAfter) };
+  return { state: await assembleState(ctx, userId, now, outcome.activeAfter) };
 }
 
 /**
@@ -255,7 +274,10 @@ function toHistoryItem(row: HistoryItemRow): HistoryItem {
 async function registerApi(ctx: AppContext): Promise<void> {
   const db = ctx.database;
 
-  ctx.api.get("/state", async () => syncState(ctx, ctx.time.now()));
+  ctx.api.get("/state", async (request) => {
+    const user = await ctx.auth.requireUser(request);
+    return syncState(ctx, user.id, ctx.time.now());
+  });
 
   ctx.api.post<{
     Body: { kind: SessionKind; plannedDurationSeconds?: number; baseRevision?: number };
@@ -276,13 +298,14 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request, reply) => {
+      const user = await ctx.auth.requireUser(request);
       const body = request.body;
       const now = ctx.time.now();
 
       let outcome: TransitionOutcome;
       try {
         outcome = await db.withTransaction(async (tx) => {
-          const { row: active, completed } = await reconcileActive(tx, now);
+          const { row: active, completed } = await reconcileActive(tx, user.id, now);
           if (active !== null) {
             return {
               activeAfter: active,
@@ -295,7 +318,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
           // with the row we are about to insert.
           const planned =
             body.plannedDurationSeconds ??
-            defaultPlannedSeconds(body.kind, await getSettings(tx));
+            defaultPlannedSeconds(body.kind, await getSettings(tx, user.id));
           const row: SessionRow = {
             id: randomUUID(),
             kind: body.kind,
@@ -310,29 +333,31 @@ async function registerApi(ctx: AppContext): Promise<void> {
             actualDurationSeconds: null,
             revision: 1,
           };
-          await insertSession(tx, row);
+          await insertSession(tx, user.id, row);
           return { activeAfter: row, completed, cancelled: null, conflict: null };
         });
       } catch (error) {
         // Lost the one-active-session race: a concurrent start committed first
-        // (sessions_one_active_idx). This transaction — including its
-        // reconcile — rolled back; stateConflict's fresh syncState re-reconciles
-        // and publishes any natural completion before answering.
+        // (sessions_one_active_idx, per user since AUTH-3). This transaction —
+        // including its reconcile — rolled back; stateConflict's fresh
+        // syncState re-reconciles and publishes any natural completion before
+        // answering.
         if (isUniqueViolation(error)) {
-          await stateConflict(ctx, now, "session_already_active", ALREADY_ACTIVE_MESSAGE);
+          await stateConflict(ctx, user.id, now, "session_already_active", ALREADY_ACTIVE_MESSAGE);
         }
         throw error;
       }
-      const result = await finishTransition(ctx, now, outcome);
+      const result = await finishTransition(ctx, user.id, now, outcome);
       return reply.code(201).send(result);
     },
   );
 
   ctx.api.post("/pause", async (request) => {
+    const user = await ctx.auth.requireUser(request);
     const baseRevision = readBaseRevision(request.body);
     const now = ctx.time.now();
     const outcome = await db.withTransaction(async (tx) => {
-      const { row: active, completed } = await reconcileActive(tx, now);
+      const { row: active, completed } = await reconcileActive(tx, user.id, now);
       if (active === null) {
         return {
           activeAfter: null,
@@ -350,7 +375,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
         return { activeAfter: active, completed, cancelled: null, conflict: null };
       }
       const paused = applyPause(active, now);
-      const updated = await updateSessionRow(tx, paused);
+      const updated = await updateSessionRow(tx, user.id, paused);
       if (updated !== 1) {
         return {
           activeAfter: active,
@@ -361,14 +386,15 @@ async function registerApi(ctx: AppContext): Promise<void> {
       }
       return { activeAfter: paused, completed, cancelled: null, conflict: null };
     });
-    return finishTransition(ctx, now, outcome);
+    return finishTransition(ctx, user.id, now, outcome);
   });
 
   ctx.api.post("/resume", async (request) => {
+    const user = await ctx.auth.requireUser(request);
     const baseRevision = readBaseRevision(request.body);
     const now = ctx.time.now();
     const outcome = await db.withTransaction(async (tx) => {
-      const { row: active, completed } = await reconcileActive(tx, now);
+      const { row: active, completed } = await reconcileActive(tx, user.id, now);
       if (active === null) {
         return {
           activeAfter: null,
@@ -386,7 +412,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
         return { activeAfter: active, completed, cancelled: null, conflict: null };
       }
       const resumed = applyResume(active, now);
-      const updated = await updateSessionRow(tx, resumed);
+      const updated = await updateSessionRow(tx, user.id, resumed);
       if (updated !== 1) {
         return {
           activeAfter: active,
@@ -397,14 +423,15 @@ async function registerApi(ctx: AppContext): Promise<void> {
       }
       return { activeAfter: resumed, completed, cancelled: null, conflict: null };
     });
-    return finishTransition(ctx, now, outcome);
+    return finishTransition(ctx, user.id, now, outcome);
   });
 
   ctx.api.post("/stop", async (request) => {
+    const user = await ctx.auth.requireUser(request);
     const baseRevision = readBaseRevision(request.body);
     const now = ctx.time.now();
     const outcome = await db.withTransaction(async (tx) => {
-      const { row: active, completed } = await reconcileActive(tx, now);
+      const { row: active, completed } = await reconcileActive(tx, user.id, now);
       // reconcile may have JUST completed the session naturally — that
       // completion commits with this transaction, and the 409's details.state
       // (assembled from a fresh read) carries the new terminal reality.
@@ -421,7 +448,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
         return { activeAfter: active, completed, cancelled: null, conflict: stale };
       }
       const stopped = applyStop(active, now);
-      const updated = await updateSessionRow(tx, stopped);
+      const updated = await updateSessionRow(tx, user.id, stopped);
       if (updated !== 1) {
         return {
           activeAfter: active,
@@ -432,7 +459,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       }
       return { activeAfter: null, completed, cancelled: stopped, conflict: null };
     });
-    return finishTransition(ctx, now, outcome);
+    return finishTransition(ctx, user.id, now, outcome);
   });
 
   ctx.api.get<{ Querystring: { limit?: number; offset?: number } }>(
@@ -450,7 +477,8 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request) => {
-      const { items, total } = await listSessions(ctx.database, {
+      const user = await ctx.auth.requireUser(request);
+      const { items, total } = await listSessions(ctx.database, user.id, {
         limit: request.query.limit ?? 20,
         offset: request.query.offset ?? 0,
       });
@@ -470,9 +498,10 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request) => {
+      const user = await ctx.auth.requireUser(request);
       const timezone = ctx.time.timezone();
       const now = ctx.time.now();
-      const series = await statsSeries(ctx.database, {
+      const series = await statsSeries(ctx.database, user.id, {
         timeZone: timezone,
         // Calendar bucketing uses the platform timezone (FP-10), never SQL's.
         todayLocal: localDateString(now, timezone),
@@ -489,7 +518,10 @@ async function registerApi(ctx: AppContext): Promise<void> {
     },
   );
 
-  ctx.api.get("/settings", async () => getSettings(ctx.database));
+  ctx.api.get("/settings", async (request) => {
+    const user = await ctx.auth.requireUser(request);
+    return getSettings(ctx.database, user.id);
+  });
 
   ctx.api.put<{ Body: SettingsView }>(
     "/settings",
@@ -530,6 +562,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request) => {
+      const user = await ctx.auth.requireUser(request);
       // Defense in depth: the schema already guarantees shape and range, but
       // every later read runs through sanitizeSettings — never persist
       // anything it would reject (a poisoned row would silently fall back to
@@ -542,7 +575,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
           "settings fields must be integers within their allowed ranges",
         );
       }
-      await saveSettings(ctx.database, settings);
+      await saveSettings(ctx.database, user.id, settings);
       return settings;
     },
   );

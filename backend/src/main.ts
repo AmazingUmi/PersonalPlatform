@@ -5,6 +5,8 @@ import { loadConfig, findRepoRoot } from "./core/config/index.js";
 import { Database } from "./core/database/index.js";
 import { runCoreMigrations, runAppMigrations, singleAppMigrationTarget } from "./core/database/startup-migrations.js";
 import { runMigrations } from "./core/database/migrate.js";
+import { ensureBootstrapAdmin } from "./core/auth/service.js";
+import { migrateLegacyAppStorage } from "./core/storage/legacy-move.js";
 import { backendAppModules, frontendAppIds } from "./generated/apps.js";
 
 const root = findRepoRoot();
@@ -35,6 +37,40 @@ async function main(): Promise<void> {
     await runCoreMigrations({ databaseUrl, root, log });
   } catch (error) {
     log.fatal(error, "core migration failed; backend will not start");
+    await database.close().catch(() => undefined);
+    process.exit(1);
+  }
+
+  // Bootstrap the admin account (AUTH-1): activates the seeded placeholder
+  // when BOOTSTRAP_ADMIN_USERNAME/PASSWORD are provided; idempotent and never
+  // resets an already-activated password. Must run BEFORE app migrations so
+  // legacy data backfills to the operator's (stable-id) account.
+  try {
+    const outcome = await ensureBootstrapAdmin(database.context(), {
+      username: process.env.BOOTSTRAP_ADMIN_USERNAME?.trim() || undefined,
+      password: process.env.BOOTSTRAP_ADMIN_PASSWORD,
+      log,
+    });
+    if (outcome.action !== "noop") log.info({ username: outcome.username, action: outcome.action }, "bootstrap admin account ready");
+  } catch (error) {
+    log.fatal(error, "bootstrap admin failed; backend will not start");
+    await database.close().catch(() => undefined);
+    process.exit(1);
+  }
+
+  // One-time legacy storage relocation (AUTH-4): move pre-multi-user files
+  // from storage/apps/<appId> into the bootstrap owner's user-scoped root
+  // BEFORE the platform activates — the assets boot reconcile must never see
+  // legacy-path files as missing. Failure is fatal (worklist amendment 1);
+  // the routine is idempotent, so a crash midway safely re-runs.
+  try {
+    await migrateLegacyAppStorage({
+      database,
+      storageRoot: join(root, config.storage.root),
+      log,
+    });
+  } catch (error) {
+    log.fatal(error, "legacy storage migration failed; backend will not start");
     await database.close().catch(() => undefined);
     process.exit(1);
   }

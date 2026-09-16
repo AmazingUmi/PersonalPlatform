@@ -1,4 +1,5 @@
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { adminFetch } from "./helpers";
 
 /**
  * Notes app e2e (Phase 7A-1 T11), worklist §4: the two mandated flows —
@@ -32,11 +33,8 @@ const noteCard = (page: Page, text: string) =>
   page.getByRole("link", { name: "Open note" }).filter({ hasText: text });
 
 async function putCore(path: string, body: unknown): Promise<void> {
-  const response = await fetch(`${CORE}${path}`, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  // AUTH-5: raw API writes carry the admin session cookie via helpers.adminFetch.
+  const response = await adminFetch("PUT", path, body);
   if (!response.ok) throw new Error(`PUT ${path} failed: HTTP ${response.status}`);
 }
 

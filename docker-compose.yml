@@ -29,6 +29,11 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       PLATFORM_ROOT: /workspace
       DATABASE_URL: postgresql://${POSTGRES_USER:-personal_platform}:${POSTGRES_PASSWORD:-change-me-for-local-development}@database:5432/${POSTGRES_DB:-personal_platform}
+      # First-admin bootstrap (empty = skip; see README "身份认证" / .env.example).
+      # Passed through so `docker compose` can activate the placeholder admin
+      # on first boot. Never resets an already-activated password.
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
     # Not published to the host by default: the frontend proxy is the only
     # intended entry point. Use docker/compose.expose.yml for API debugging.
     volumes:

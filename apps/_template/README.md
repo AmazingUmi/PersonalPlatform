@@ -24,19 +24,31 @@ automatically, so write bare table names without a schema prefix:
 -- apps/new_app/migrations/20260101000001-init.sql
 CREATE TABLE items (
   id uuid PRIMARY KEY,
-  title text NOT NULL UNIQUE,
-  created_at timestamptz NOT NULL DEFAULT now()
+  user_id uuid NOT NULL REFERENCES core.users(id) ON DELETE CASCADE,
+  title text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (user_id, title)
 );
 ```
+
+**Every business table is user-owned**: `user_id uuid NOT NULL REFERENCES
+core.users(id) ON DELETE CASCADE`, per-user natural keys `UNIQUE(user_id, …)`,
+and queries that lead with `user_id` (another user's row answers 404). The
+full recipe — including upgrading an existing table with the
+backfill-to-bootstrap pattern — is in `doc/APP_DEVELOPMENT.md`, section
+"Users and ownership".
 
 Apply with `npm run migration:up`; in backend code, qualify tables as `new_app.items`.
 
 ## Backend module
 
 `backend/src/apps/new_app/index.ts` default-exports a `BackendAppModule`.
-Routes on `ctx.api` are relative to `/api/apps/new_app`. Validate input with
-Fastify JSON Schema, throw `AppError` for domain failures; optional hooks:
-`registerEvents` / `registerJobs` / `healthcheck` (see `backend/src/apps/tasks/`):
+Routes on `ctx.api` are relative to `/api/apps/new_app`, behind the platform's
+lifecycle guard (404 while disabled) and auth guard (401 unauthenticated) —
+resolve the requesting user in every handler with `ctx.auth.requireUser`.
+Validate input with Fastify JSON Schema, throw `AppError` for domain failures;
+optional hooks: `registerEvents` / `registerJobs` / `healthcheck` (see
+`backend/src/apps/tasks/`):
 
 ```ts
 import { randomUUID } from "node:crypto";
@@ -61,16 +73,21 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request, reply) => {
+      const user = await ctx.auth.requireUser(request);
       const { rows } = await db.query<ItemRow>(
-        "INSERT INTO new_app.items (id, title) VALUES ($1, $2) RETURNING id, title, created_at",
-        [randomUUID(), request.body.title],
+        "INSERT INTO new_app.items (id, user_id, title) VALUES ($1, $2, $3) RETURNING id, title, created_at",
+        [randomUUID(), user.id, request.body.title],
       );
       return reply.code(201).send(rows[0]);
     },
   );
 
   ctx.api.delete<{ Params: { id: string } }>("/items/:id", async (request, reply) => {
-    const result = await db.query("DELETE FROM new_app.items WHERE id = $1", [request.params.id]);
+    const user = await ctx.auth.requireUser(request);
+    const result = await db.query(
+      "DELETE FROM new_app.items WHERE id = $1 AND user_id = $2",
+      [request.params.id, user.id],
+    );
     if (result.rowCount === 0) throw new AppError(404, "not_found", "item not found");
     return reply.code(204).send();
   });
@@ -110,16 +127,20 @@ export default app;
 ## App-private settings
 
 App-private settings should live in the app's own schema (precedent: the focus
-app): store them in a table created by your migration and expose them through
-`ctx.api` routes. `/api/core/settings` is reserved for platform-level settings
+app): store them in a table created by your migration — keyed `(user_id, id)`,
+one row per user — and expose them through `ctx.api` routes scoped to the
+requesting user. `/api/core/settings` is reserved for platform-level settings
 such as the dashboard layout.
 
 ## Checklist
 
 1. `npm run create:app -- <id> "Name"` — scaffolds and refreshes the generated
    module tables (`backend/src/generated/apps.ts`, `frontend/src/generated/apps.ts`).
-2. Edit `app.yaml`; write the first forward-only migration; run `npm run migration:up`.
-3. Implement the backend module (`registerApi`) and the frontend module (routes, widgets).
+2. Edit `app.yaml`; write the first forward-only migration (every business
+   table gets `user_id` — see "Users and ownership" in `doc/APP_DEVELOPMENT.md`);
+   run `npm run migration:up`.
+3. Implement the backend module (`registerApi`, resolving the requesting user
+   via `ctx.auth.requireUser`) and the frontend module (routes, widgets).
 4. OPTIONAL visual identity: icon + accent entries in
    `frontend/src/shared/ui/appIcons.ts` and a `[data-app="<id>"]` accent scope
    in `frontend/src/styles/tokens.css`. Skipping this is fine — the app falls

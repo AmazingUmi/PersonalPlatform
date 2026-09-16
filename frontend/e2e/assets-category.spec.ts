@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { adminFetch } from "./helpers";
 
 /**
  * Assets Category V2 e2e (Phase 7A-2 T08, worklist §6.4): the three mandated
@@ -12,7 +13,7 @@ import { expect, test, type Page } from "@playwright/test";
  * categories use English + timestamp names: the seed migration already owns
  * six Chinese names and categories.name is UNIQUE.
  *
- * API assists (CORE fetch, notes.spec/platform.spec precedent): categories and
+ * API assists (adminFetch, notes.spec/platform.spec precedent): categories and
  * flow-② setup items are created through the API for stable ids and colors —
  * the flows under test keep their UI reality where it matters (item creation
  * and the category multi-select in ①, Manage/Rename/color edit in ③).
@@ -28,8 +29,6 @@ import { expect, test, type Page } from "@playwright/test";
  * timestamp-unique residue like every other run's items).
  */
 
-const CORE = "http://127.0.0.1:8902";
-
 interface CategoryInfo {
   id: string;
   name: string;
@@ -37,11 +36,8 @@ interface CategoryInfo {
 }
 
 async function putCore(path: string, body: unknown): Promise<void> {
-  const response = await fetch(`${CORE}${path}`, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  // AUTH-5: raw API writes carry the admin session cookie via helpers.adminFetch.
+  const response = await adminFetch("PUT", path, body);
   if (!response.ok) throw new Error(`PUT ${path} failed: HTTP ${response.status}`);
 }
 
@@ -50,12 +46,12 @@ const CATEGORY_PREFIX = "e2e-cat-";
 
 /** Delete all categories this spec ever created (idempotent, 404 tolerated). */
 async function purgeE2eCategories(): Promise<void> {
-  const response = await fetch(`${CORE}/api/apps/assets/categories`);
+  const response = await adminFetch("GET", "/api/apps/assets/categories");
   if (!response.ok) throw new Error(`list categories failed: HTTP ${response.status}`);
   const { items } = (await response.json()) as { items: CategoryInfo[] };
   for (const category of items) {
     if (!category.name.startsWith(CATEGORY_PREFIX)) continue;
-    const deleted = await fetch(`${CORE}/api/apps/assets/categories/${category.id}`, { method: "DELETE" });
+    const deleted = await adminFetch("DELETE", `/api/apps/assets/categories/${category.id}`);
     if (!deleted.ok && deleted.status !== 404) {
       throw new Error(`delete category "${category.name}" failed: HTTP ${deleted.status}`);
     }
@@ -64,11 +60,11 @@ async function purgeE2eCategories(): Promise<void> {
 
 /** Create a category through the API (stable id, optional color). */
 async function apiCreateCategory(name: string, color?: string): Promise<CategoryInfo> {
-  const response = await fetch(`${CORE}/api/apps/assets/categories`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(color ? { name, color } : { name }),
-  });
+  const response = await adminFetch(
+    "POST",
+    "/api/apps/assets/categories",
+    color ? { name, color } : { name },
+  );
   if (response.status !== 201) {
     throw new Error(`create category "${name}" failed: HTTP ${response.status} ${await response.text()}`);
   }
@@ -77,11 +73,7 @@ async function apiCreateCategory(name: string, color?: string): Promise<Category
 
 /** Create an item through the API (flow-② setup for deterministic AND sets). */
 async function apiCreateItem(name: string, categoryIds: string[]): Promise<void> {
-  const response = await fetch(`${CORE}/api/apps/assets/items`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name, categoryIds }),
-  });
+  const response = await adminFetch("POST", "/api/apps/assets/items", { name, categoryIds });
   if (response.status !== 201) {
     throw new Error(`create item "${name}" failed: HTTP ${response.status} ${await response.text()}`);
   }

@@ -4,6 +4,14 @@ import { defineConfig } from "@playwright/test";
  * E2E runs the real stack: backend (tsx) against the E2E database plus the
  * Vite dev server proxying /api. Uses the locally installed Google Chrome
  * (channel: "chrome") so no browser download is required.
+ *
+ * AUTH-5: the shell is unreachable without a session. The `setup` project
+ * (e2e/auth.setup.ts) logs in as the backend's bootstrap admin and saves the
+ * pp_session cookie to playwright/.auth/user.json; every `e2e` project test
+ * starts from that storage state. The backend env below bootstraps the admin
+ * account with fixed credentials — bootstrap is idempotent and NEVER resets
+ * an already-activated password, so the e2e database must be fresh or already
+ * bootstrapped with these exact credentials (CI recreates it each run).
  */
 export default defineConfig({
   testDir: "./e2e",
@@ -15,6 +23,20 @@ export default defineConfig({
     channel: "chrome",
     headless: true,
   },
+  projects: [
+    {
+      name: "setup",
+      testMatch: /.*\.setup\.ts/,
+    },
+    {
+      name: "e2e",
+      testIgnore: /.*\.setup\.ts/,
+      dependencies: ["setup"],
+      use: {
+        storageState: "playwright/.auth/user.json",
+      },
+    },
+  ],
   webServer: [
     {
       command: "npx tsx backend/src/main.ts",
@@ -29,6 +51,8 @@ export default defineConfig({
         PORT: "8902",
         HOST: "127.0.0.1",
         LOG_LEVEL: "warn",
+        BOOTSTRAP_ADMIN_USERNAME: "e2e-admin",
+        BOOTSTRAP_ADMIN_PASSWORD: "e2e-admin-password-1",
       },
     },
     {

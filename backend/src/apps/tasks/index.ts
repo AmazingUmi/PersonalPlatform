@@ -64,9 +64,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request) => {
+      const user = await ctx.auth.requireUser(request);
       const query = request.query;
-      const conditions: string[] = [];
-      const params: unknown[] = [];
+      // Ownership is the leading, always-present predicate (AUTH-3).
+      const conditions: string[] = ["user_id = $1"];
+      const params: unknown[] = [user.id];
       if (query.q) {
         params.push(`%${query.q}%`);
         conditions.push(`(title ILIKE $${params.length} OR description ILIKE $${params.length})`);
@@ -95,7 +97,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
         params.push(query.dueBefore);
         conditions.push(`due_at < $${params.length}`);
       }
-      const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+      const where = `WHERE ${conditions.join(" AND ")}`;
 
       const sortColumn = TASK_SORT_COLUMNS[query.sortBy ?? "createdAt"] ?? "created_at";
       const direction = query.order === "asc" ? "ASC" : "DESC";
@@ -129,14 +131,16 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request, reply) => {
+      const user = await ctx.auth.requireUser(request);
       const b = request.body;
       assertValidInterval(b.startAt ?? null, b.dueAt ?? null);
       const { rows } = await db.query<TaskRow>(
-        `INSERT INTO tasks.tasks (id, title, description, status, start_at, due_at, priority, completed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, CASE WHEN $4 = 'done' THEN now() ELSE NULL END)
+        `INSERT INTO tasks.tasks (id, user_id, title, description, status, start_at, due_at, priority, completed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CASE WHEN $5 = 'done' THEN now() ELSE NULL END)
          RETURNING ${TASK_COLUMNS}`,
         [
           randomUUID(),
+          user.id,
           b.title,
           b.description ?? null,
           b.status ?? "todo",
@@ -150,9 +154,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
   );
 
   ctx.api.get<{ Params: { id: string } }>("/tasks/:id", async (request) => {
-    const { rows } = await db.query<TaskRow>(`SELECT ${TASK_COLUMNS} FROM tasks.tasks WHERE id = $1`, [
-      request.params.id,
-    ]);
+    const user = await ctx.auth.requireUser(request);
+    const { rows } = await db.query<TaskRow>(
+      `SELECT ${TASK_COLUMNS} FROM tasks.tasks WHERE id = $1 AND user_id = $2`,
+      [request.params.id, user.id],
+    );
     if (!rows[0]) throw new AppError(404, "not_found", "task not found");
     return rows[0];
   });
@@ -178,10 +184,12 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request) => {
+      const user = await ctx.auth.requireUser(request);
       const body = request.body as Record<string, unknown>;
-      const prev = await db.query<TaskRow>(`SELECT ${TASK_COLUMNS} FROM tasks.tasks WHERE id = $1`, [
-        request.params.id,
-      ]);
+      const prev = await db.query<TaskRow>(
+        `SELECT ${TASK_COLUMNS} FROM tasks.tasks WHERE id = $1 AND user_id = $2`,
+        [request.params.id, user.id],
+      );
       if (!prev.rows[0]) throw new AppError(404, "not_found", "task not found");
       const previous = prev.rows[0];
 
@@ -211,7 +219,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
         ["priority", "priority"],
       ];
       const sets: string[] = [];
-      const params: unknown[] = [request.params.id];
+      const params: unknown[] = [request.params.id, user.id];
       for (const [key, column] of columns) {
         if (!(key in body)) continue;
         params.push(body[key]);
@@ -222,26 +230,35 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
       const { rows } = await db.query<TaskRow>(
         `UPDATE tasks.tasks SET ${sets.join(", ")}
-         WHERE id = $1
+         WHERE id = $1 AND user_id = $2
          RETURNING ${TASK_COLUMNS}`,
         params,
       );
 
       const updated = rows[0]!;
       if (nextStatus === "done" && previous.status !== "done") {
-        ctx.events.publish("tasks.task.completed.v1", { id: updated.id, title: updated.title }, "tasks");
+        ctx.events.publish(
+          "tasks.task.completed.v1",
+          { userId: user.id, id: updated.id, title: updated.title },
+          "tasks",
+        );
       }
       return updated;
     },
   );
 
   ctx.api.delete<{ Params: { id: string } }>("/tasks/:id", async (request, reply) => {
-    const result = await db.query("DELETE FROM tasks.tasks WHERE id = $1", [request.params.id]);
+    const user = await ctx.auth.requireUser(request);
+    const result = await db.query("DELETE FROM tasks.tasks WHERE id = $1 AND user_id = $2", [
+      request.params.id,
+      user.id,
+    ]);
     if (result.rowCount === 0) throw new AppError(404, "not_found", "task not found");
     return reply.code(204).send();
   });
 
-  ctx.api.get("/summary", async () => {
+  ctx.api.get("/summary", async (request) => {
+    const user = await ctx.auth.requireUser(request);
     // "Today" is the user's local calendar day from the platform TimeService
     // (FP-10.3), expressed as a UTC [start, end) window — never
     // due_at::date = CURRENT_DATE, which would use the server timezone.
@@ -255,22 +272,24 @@ async function registerApi(ctx: AppContext): Promise<void> {
     // today/overdue pair kept for the counters above.
     const { start, end } = ctx.time.todayRangeUtc();
     const today = await db.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM tasks.tasks WHERE status <> 'done' AND due_at IS NOT NULL AND due_at >= $1 AND due_at < $2",
-      [start.toISOString(), end.toISOString()],
+      "SELECT count(*)::text AS count FROM tasks.tasks WHERE user_id = $1 AND status <> 'done' AND due_at IS NOT NULL AND due_at >= $2 AND due_at < $3",
+      [user.id, start.toISOString(), end.toISOString()],
     );
     const overdue = await db.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM tasks.tasks WHERE status <> 'done' AND due_at IS NOT NULL AND due_at < now()",
+      "SELECT count(*)::text AS count FROM tasks.tasks WHERE user_id = $1 AND status <> 'done' AND due_at IS NOT NULL AND due_at < now()",
+      [user.id],
     );
     const done = await db.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM tasks.tasks WHERE status = 'done'",
+      "SELECT count(*)::text AS count FROM tasks.tasks WHERE user_id = $1 AND status = 'done'",
+      [user.id],
     );
     const doneToday = await db.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM tasks.tasks WHERE status = 'done' AND completed_at >= $1 AND completed_at < $2",
-      [start.toISOString(), end.toISOString()],
+      "SELECT count(*)::text AS count FROM tasks.tasks WHERE user_id = $1 AND status = 'done' AND completed_at >= $2 AND completed_at < $3",
+      [user.id, start.toISOString(), end.toISOString()],
     );
     const overdueBeforeToday = await db.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM tasks.tasks WHERE status <> 'done' AND due_at IS NOT NULL AND due_at < $1",
-      [start.toISOString()],
+      "SELECT count(*)::text AS count FROM tasks.tasks WHERE user_id = $1 AND status <> 'done' AND due_at IS NOT NULL AND due_at < $2",
+      [user.id, start.toISOString()],
     );
     return {
       today: Number(today.rows[0]?.count ?? 0),
@@ -285,7 +304,10 @@ async function registerApi(ctx: AppContext): Promise<void> {
   //
   // The only sanctioned way for another app (Clock today; Calendar /
   // Statistics later) to consume task timing: a read-only HTTP contract
-  // instead of table access. Frozen semantics (apps/tasks/README.md):
+  // instead of table access. Authenticated and USER-SCOPED since AUTH-3:
+  // "public" means a stable cross-app read contract, never cross-user —
+  // the response always reflects the calling user's tasks only.
+  // Frozen semantics (apps/tasks/README.md):
   //   current = most recently started todo task with start_at <= now
   //             (now == start_at is current; due_at NEVER ends it — an
   //             overdue todo task stays current until it is done)
@@ -294,18 +316,19 @@ async function registerApi(ctx: AppContext): Promise<void> {
   //   today.remainingCount = additional todo tasks starting later in the
   //             platform-local day, excluding next (current is excluded by
   //             start_at > now; tasks without start_at never count)
-  ctx.api.get("/public/status", async () => {
+  ctx.api.get("/public/status", async (request) => {
+    const user = await ctx.auth.requireUser(request);
     const now = ctx.time.now();
-    const current = await getCurrentTask(db, now);
-    const next = await getNextTask(db, now);
+    const current = await getCurrentTask(db, now, user.id);
+    const next = await getNextTask(db, now, user.id);
     const exclude = next ? [next.id] : [];
     const { start, end } = ctx.time.todayRangeUtc(now);
     const remaining = await db.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM tasks.tasks
-       WHERE status = 'todo' AND start_at IS NOT NULL
-         AND start_at > $3 AND start_at >= $1 AND start_at < $2
-         AND id <> ALL($4::uuid[])`,
-      [start.toISOString(), end.toISOString(), now.toISOString(), exclude],
+       WHERE user_id = $1 AND status = 'todo' AND start_at IS NOT NULL
+         AND start_at > $4 AND start_at >= $2 AND start_at < $3
+         AND id <> ALL($5::uuid[])`,
+      [user.id, start.toISOString(), end.toISOString(), now.toISOString(), exclude],
     );
     return {
       current,
@@ -323,26 +346,34 @@ export interface PublicTaskView {
 }
 
 /** Most recently started todo task (start_at <= now); due_at never ends it. */
-async function getCurrentTask(db: AppContext["database"], now: Date): Promise<PublicTaskView | null> {
+async function getCurrentTask(
+  db: AppContext["database"],
+  now: Date,
+  userId: string,
+): Promise<PublicTaskView | null> {
   const { rows } = await db.query<{ id: string; title: string; start_at: string }>(
     `SELECT id, title, start_at FROM tasks.tasks
-     WHERE status = 'todo' AND start_at IS NOT NULL AND start_at <= $1
+     WHERE user_id = $2 AND status = 'todo' AND start_at IS NOT NULL AND start_at <= $1
      ORDER BY start_at DESC, id
      LIMIT 1`,
-    [now.toISOString()],
+    [now.toISOString(), userId],
   );
   if (!rows[0]) return null;
   return { id: rows[0].id, title: rows[0].title, startAt: rows[0].start_at };
 }
 
 /** Earliest strictly-future start. */
-async function getNextTask(db: AppContext["database"], now: Date): Promise<PublicTaskView | null> {
+async function getNextTask(
+  db: AppContext["database"],
+  now: Date,
+  userId: string,
+): Promise<PublicTaskView | null> {
   const { rows } = await db.query<{ id: string; title: string; start_at: string }>(
     `SELECT id, title, start_at FROM tasks.tasks
-     WHERE status = 'todo' AND start_at IS NOT NULL AND start_at > $1
+     WHERE user_id = $2 AND status = 'todo' AND start_at IS NOT NULL AND start_at > $1
      ORDER BY start_at ASC, id
      LIMIT 1`,
-    [now.toISOString()],
+    [now.toISOString(), userId],
   );
   if (!rows[0]) return null;
   return { id: rows[0].id, title: rows[0].title, startAt: rows[0].start_at };
@@ -350,20 +381,23 @@ async function getNextTask(db: AppContext["database"], now: Date): Promise<Publi
 
 async function registerJobs(ctx: AppContext): Promise<JobHandle[]> {
   // The daily boundary follows the platform timezone (FP-10.4); the app never
-  // reads a system timezone itself.
+  // reads a system timezone itself. The sweep is platform-level but iterates
+  // per-user rows explicitly: every overdue event carries its owner's userId
+  // (AUTH-GATE-06) — there is no implicit "current user" in jobs.
   return [
     ctx.scheduler.register({
       id: "tasks.overdue_check",
       schedule: { cron: "0 0 * * *", timezone: ctx.time.timezone() },
       run: async () => {
-        // Known limitation: this fires daily and re-notifies every still-
-        // overdue task; dedupe is deferred until notification persistence
-        // exists (FP-4.5 documents the current behavior).
-        const { rows } = await ctx.database.query<TaskRow>(
-          "SELECT id, title FROM tasks.tasks WHERE status <> 'done' AND due_at IS NOT NULL AND due_at < now()",
+        const { rows } = await ctx.database.query<{ id: string; title: string; user_id: string }>(
+          "SELECT id, title, user_id FROM tasks.tasks WHERE status <> 'done' AND due_at IS NOT NULL AND due_at < now()",
         );
         for (const task of rows) {
-          ctx.events.publish("tasks.task.overdue.v1", { id: task.id, title: task.title }, "tasks");
+          ctx.events.publish(
+            "tasks.task.overdue.v1",
+            { userId: task.user_id, id: task.id, title: task.title },
+            "tasks",
+          );
         }
       },
     }),

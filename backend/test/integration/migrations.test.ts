@@ -26,24 +26,30 @@ after(async () => {
 });
 
 describe("core migration", () => {
-  it("creates core.apps and core.settings in the core schema", async () => {
+  it("creates the core tables in the core schema", async () => {
     await runMigrations({ databaseUrl: TEST_DATABASE_URL, targets: [coreMigrationTarget(repoRoot)], log });
 
     const tables = await db.context().query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = 'core' ORDER BY table_name`,
     );
+    // Auth (AUTH-1) added core.users and core.sessions on top of the original
+    // apps/migrations/settings tables.
     assert.deepEqual(
       tables.rows.map((row) => row.table_name),
-      ["apps", "migrations", "settings"],
+      ["apps", "migrations", "sessions", "settings", "users"],
     );
   });
 
   it("is idempotent when run twice", async () => {
-    await runMigrations({ databaseUrl: TEST_DATABASE_URL, targets: [coreMigrationTarget(repoRoot)], log });
-    const count = await db.context().query<{ count: string }>(
+    const before = await db.context().query<{ count: string }>(
       "SELECT count(*)::text AS count FROM core.migrations",
     );
-    assert.equal(Number(count.rows[0]?.count), 1);
+    await runMigrations({ databaseUrl: TEST_DATABASE_URL, targets: [coreMigrationTarget(repoRoot)], log });
+    const after = await db.context().query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM core.migrations",
+    );
+    // Re-running must not re-apply or add rows, whatever the current total is.
+    assert.equal(Number(after.rows[0]?.count), Number(before.rows[0]?.count));
   });
 });
 

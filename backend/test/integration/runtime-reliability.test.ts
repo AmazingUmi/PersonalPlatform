@@ -3,7 +3,7 @@ import { after, before, describe, it } from "node:test";
 import { Database } from "../../src/core/database/index.js";
 import type { BackendAppModule } from "../../src/core/app-registry/types.js";
 import type { Platform } from "../../src/core/platform.js";
-import { withFixturePlatform } from "../helpers/platform.js";
+import { ensureTestAdmin, loginCookie, withFixturePlatform } from "../helpers/platform.js";
 import { resetDatabase } from "../helpers/db.js";
 
 /**
@@ -16,6 +16,7 @@ let db: Database;
 
 before(async () => {
   db = await resetDatabase();
+  await ensureTestAdmin(db);
 });
 
 after(async () => {
@@ -73,7 +74,12 @@ describe("half-failed activation reclaims resources (FP-9.1)", () => {
         backendModules: { publisher, flaky_events: flaky },
       },
       async (platform) => {
-        const list = await platform.app.inject({ method: "GET", url: "/api/core/apps" });
+        const cookie = await loginCookie(platform);
+        const list = await platform.app.inject({
+          method: "GET",
+          url: "/api/core/apps",
+          headers: { cookie },
+        });
         const record = list.json().items.find((item: { id: string }) => item.id === "flaky_events");
         assert.equal(record.status, "error");
         assert.match(record.errorMessage, /registerEvents failed/);
@@ -81,16 +87,25 @@ describe("half-failed activation reclaims resources (FP-9.1)", () => {
 
         // The subscription was reclaimed: a real publish reaches nobody, and
         // re-enabling (which retries and fails again) must not blow up either.
-        const emit = await platform.app.inject({ method: "POST", url: "/api/apps/publisher/emit" });
+        const emit = await platform.app.inject({
+          method: "POST",
+          url: "/api/apps/publisher/emit",
+          headers: { cookie },
+        });
         assert.equal(emit.statusCode, 204);
         const retry = await platform.app.inject({
           method: "PUT",
           url: "/api/core/apps/flaky_events/enabled",
           payload: { enabled: true },
+          headers: { cookie },
         });
         assert.equal(retry.statusCode, 200);
         assert.equal(retry.json().status, "error");
-        const emitAgain = await platform.app.inject({ method: "POST", url: "/api/apps/publisher/emit" });
+        const emitAgain = await platform.app.inject({
+          method: "POST",
+          url: "/api/apps/publisher/emit",
+          headers: { cookie },
+        });
         assert.equal(emitAgain.statusCode, 204);
 
         await new Promise((resolve) => setTimeout(resolve, 30));
@@ -117,7 +132,12 @@ describe("half-failed activation reclaims resources (FP-9.1)", () => {
         backendModules: { flaky_events: healed },
       },
       async (platform) => {
-        const list = await platform.app.inject({ method: "GET", url: "/api/core/apps" });
+        const cookie = await loginCookie(platform);
+        const list = await platform.app.inject({
+          method: "GET",
+          url: "/api/core/apps",
+          headers: { cookie },
+        });
         const record = list.json().items.find((item: { id: string }) => item.id === "flaky_events");
         assert.equal(record.status, "enabled", "clean retry after owner reclaim");
       },
@@ -148,7 +168,12 @@ describe("half-failed activation reclaims resources (FP-9.1)", () => {
         backendModules: { flaky_jobs: flaky },
       },
       async (platform) => {
-        const list = await platform.app.inject({ method: "GET", url: "/api/core/apps" });
+        const cookie = await loginCookie(platform);
+        const list = await platform.app.inject({
+          method: "GET",
+          url: "/api/core/apps",
+          headers: { cookie },
+        });
         const record = list.json().items.find((item: { id: string }) => item.id === "flaky_jobs");
         assert.equal(record.status, "error");
         assert.match(record.errorMessage, /registerJobs failed/);
@@ -183,17 +208,20 @@ describe("half-failed activation reclaims resources (FP-9.1)", () => {
         backendModules: { flaky_cycle: flaky },
       },
       async (platform) => {
+        const cookie = await loginCookie(platform);
         for (let i = 0; i < 3; i += 1) {
           const off = await platform.app.inject({
             method: "PUT",
             url: "/api/core/apps/flaky_cycle/enabled",
             payload: { enabled: false },
+            headers: { cookie },
           });
           assert.equal(off.json().status, "disabled");
           const on = await platform.app.inject({
             method: "PUT",
             url: "/api/core/apps/flaky_cycle/enabled",
             payload: { enabled: true },
+            headers: { cookie },
           });
           assert.equal(on.json().status, "error", "activation keeps failing");
           assert.match(on.json().errorMessage, /registerJobs failed/);
@@ -208,8 +236,13 @@ describe("capability enforcement (FP-9.5)", () => {
   async function activationError(
     platform: Platform,
     appId: string,
+    cookie: string,
   ): Promise<{ status: string; errorMessage: string | undefined }> {
-    const list = await platform.app.inject({ method: "GET", url: "/api/core/apps" });
+    const list = await platform.app.inject({
+      method: "GET",
+      url: "/api/core/apps",
+      headers: { cookie },
+    });
     const record = list.json().items.find((item: { id: string }) => item.id === appId);
     return { status: record.status, errorMessage: record.errorMessage };
   }
@@ -231,7 +264,8 @@ describe("capability enforcement (FP-9.5)", () => {
         backendModules: { sneaky_jobs: sneaky },
       },
       async (platform) => {
-        const { status, errorMessage } = await activationError(platform, "sneaky_jobs");
+        const cookie = await loginCookie(platform);
+        const { status, errorMessage } = await activationError(platform, "sneaky_jobs", cookie);
         assert.equal(status, "error");
         assert.match(errorMessage ?? "", /capability 'scheduler' is not granted/);
       },
@@ -254,7 +288,8 @@ describe("capability enforcement (FP-9.5)", () => {
         backendModules: { sneaky_events: sneaky },
       },
       async (platform) => {
-        const { status, errorMessage } = await activationError(platform, "sneaky_events");
+        const cookie = await loginCookie(platform);
+        const { status, errorMessage } = await activationError(platform, "sneaky_events", cookie);
         assert.equal(status, "error");
         assert.match(errorMessage ?? "", /capability 'events' is not granted/);
       },
@@ -277,7 +312,8 @@ describe("capability enforcement (FP-9.5)", () => {
         backendModules: { sneaky_db: sneaky },
       },
       async (platform) => {
-        const { status, errorMessage } = await activationError(platform, "sneaky_db");
+        const cookie = await loginCookie(platform);
+        const { status, errorMessage } = await activationError(platform, "sneaky_db", cookie);
         assert.equal(status, "error");
         assert.match(errorMessage ?? "", /registerApi failed/);
         assert.match(errorMessage ?? "", /capability 'database' is not granted/);
@@ -302,13 +338,22 @@ describe("capability enforcement (FP-9.5)", () => {
         backendModules: { sneaky_storage: sneaky },
       },
       async (platform) => {
+        const cookie = await loginCookie(platform);
         // registerApi only wires routes (no storage touch), so the app is
         // enabled; the facade throws when the route actually uses storage.
-        const list = await platform.app.inject({ method: "GET", url: "/api/core/apps" });
+        const list = await platform.app.inject({
+          method: "GET",
+          url: "/api/core/apps",
+          headers: { cookie },
+        });
         const record = list.json().items.find((item: { id: string }) => item.id === "sneaky_storage");
         assert.equal(record.status, "enabled");
 
-        const response = await platform.app.inject({ method: "GET", url: "/api/apps/sneaky_storage/file" });
+        const response = await platform.app.inject({
+          method: "GET",
+          url: "/api/apps/sneaky_storage/file",
+          headers: { cookie },
+        });
         assert.equal(response.statusCode, 500);
         assert.match(response.json().error.message ?? "", /capability 'storage' is not granted/);
       },
@@ -332,9 +377,14 @@ describe("activation errors are persisted before the API reports them (FP-9.3)",
         backendModules: { persist_err: flaky },
       },
       async (platform) => {
+        const cookie = await loginCookie(platform);
         // Startup activation failed; the API record and the database row must
         // already agree without any settle/wait.
-        const list = await platform.app.inject({ method: "GET", url: "/api/core/apps" });
+        const list = await platform.app.inject({
+          method: "GET",
+          url: "/api/core/apps",
+          headers: { cookie },
+        });
         const record = list.json().items.find((item: { id: string }) => item.id === "persist_err");
         assert.equal(record.status, "error");
 

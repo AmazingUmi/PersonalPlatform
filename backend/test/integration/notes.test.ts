@@ -5,7 +5,7 @@ import { after, before, describe, it } from "node:test";
 import { Database } from "../../src/core/database/index.js";
 import notesApp from "../../src/apps/notes/index.js";
 import type { Platform } from "../../src/core/platform.js";
-import { buildFixturePlatform } from "../helpers/platform.js";
+import { buildFixturePlatform, ensureTestAdmin, loginCookie } from "../helpers/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 import { runMigrations } from "../../src/core/database/migrate.js";
 
@@ -21,6 +21,7 @@ import { runMigrations } from "../../src/core/database/migrate.js";
 const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
 const notesMigrations = [
   readFileSync(join(repoRoot, "apps/notes/migrations/20260830172735-init.sql"), "utf8"),
+  readFileSync(join(repoRoot, "apps/notes/migrations/20260916100000-user-ownership.sql"), "utf8"),
 ];
 
 /**
@@ -70,13 +71,15 @@ let db: Database;
 let platform: Platform;
 let cleanup: () => void;
 let root: string;
+/** Session cookie for the app APIs (every /api/apps/* and protected core route needs one). */
+let cookie: string;
 
 async function json<T>(
   method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE",
   url: string,
   payload?: object,
 ): Promise<{ status: number; body: T }> {
-  const response = await platform.app.inject({ method, url, payload });
+  const response = await platform.app.inject({ method, url, payload, headers: { cookie } });
   const raw = response.body;
   return { status: response.statusCode, body: (raw ? JSON.parse(raw) : null) as T };
 }
@@ -125,6 +128,7 @@ function assertNoSnakeCaseKeys(value: unknown, path = "body"): void {
 
 before(async () => {
   db = await resetDatabase();
+  await ensureTestAdmin(db);
   const fixture = await buildFixturePlatform({
     database: db,
     manifests: [{ id: "notes", migrations: notesMigrations }],
@@ -134,6 +138,7 @@ before(async () => {
   platform = fixture.platform;
   cleanup = fixture.cleanup;
   root = fixture.root;
+  cookie = await loginCookie(platform);
   await runMigrations({
     databaseUrl: TEST_DATABASE_URL,
     targets: [{ scope: "notes", schema: "notes", dir: join(root, "apps", "notes", "migrations") }],

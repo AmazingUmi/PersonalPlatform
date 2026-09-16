@@ -10,7 +10,7 @@ import type { Database } from "../../src/core/database/index.js";
 import { runMigrations } from "../../src/core/database/migrate.js";
 import type { Platform } from "../../src/core/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
-import { buildFixturePlatform, type FixtureManifest } from "../helpers/platform.js";
+import { buildFixturePlatform, ensureTestAdmin, loginCookie, type FixtureManifest } from "../helpers/platform.js";
 import { localDayRangeUtc } from "../../src/core/time/index.js";
 import { multipartBody } from "../helpers/multipart.js";
 
@@ -18,6 +18,8 @@ let db: Database;
 let platform: Platform;
 let cleanup: () => void;
 let root: string;
+/** Session cookie for the app APIs (AUTH-1: every /api/apps/* route needs one). */
+let cookie: string;
 
 function appYaml(id: string, capabilities: string[]): string {
   return `manifest_version: 1
@@ -80,6 +82,7 @@ const spyApp: BackendAppModule = {
 
 before(async () => {
   db = await resetDatabase();
+  await ensureTestAdmin(db);
   const manifests: FixtureManifest[] = [
     {
       id: "assets",
@@ -114,6 +117,7 @@ before(async () => {
   platform = fixture.platform;
   cleanup = fixture.cleanup;
   root = fixture.root;
+  cookie = await loginCookie(platform);
 
   await runMigrations({
     databaseUrl: TEST_DATABASE_URL,
@@ -139,6 +143,7 @@ describe("assets app API", () => {
       method: "POST",
       url: "/api/apps/assets/categories",
       payload: { name: "Electronics" },
+      headers: { cookie },
     });
     assert.equal(first.statusCode, 201);
     assert.equal(first.json().name, "Electronics");
@@ -148,10 +153,11 @@ describe("assets app API", () => {
       method: "POST",
       url: "/api/apps/assets/categories",
       payload: { name: "Furniture" },
+      headers: { cookie },
     });
     assert.equal(second.statusCode, 201);
 
-    const list = await platform.app.inject({ method: "GET", url: "/api/apps/assets/categories" });
+    const list = await platform.app.inject({ method: "GET", url: "/api/apps/assets/categories", headers: { cookie } });
     assert.equal(list.statusCode, 200);
     const categoryNames = list.json().items.map((c: { name: string }) => c.name) as string[];
     // Preset categories are seeded by migration; user-created ones join them.
@@ -165,7 +171,7 @@ describe("assets app API", () => {
   });
 
   it("creates an item with fields and fetches it by id", async () => {
-    const categories = await platform.app.inject({ method: "GET", url: "/api/apps/assets/categories" });
+    const categories = await platform.app.inject({ method: "GET", url: "/api/apps/assets/categories", headers: { cookie } });
     const electronicsId = categories.json().items.find((c: { name: string }) => c.name === "Electronics").id as string;
 
     const acquiredAt = "2026-01-15";
@@ -179,6 +185,7 @@ describe("assets app API", () => {
         acquiredAt,
         categoryIds: [electronicsId],
       },
+      headers: { cookie },
     });
     assert.equal(created.statusCode, 201);
     const body = created.json();
@@ -191,13 +198,14 @@ describe("assets app API", () => {
     );
     assert.ok(body.acquiredAt, "acquiredAt persisted");
 
-    const fetched = await platform.app.inject({ method: "GET", url: `/api/apps/assets/items/${body.id}` });
+    const fetched = await platform.app.inject({ method: "GET", url: `/api/apps/assets/items/${body.id}`, headers: { cookie } });
     assert.equal(fetched.statusCode, 200);
     assert.equal(fetched.json().name, "Laptop");
 
     const missing = await platform.app.inject({
       method: "GET",
       url: "/api/apps/assets/items/00000000-0000-0000-0000-000000000000",
+      headers: { cookie },
     });
     assert.equal(missing.statusCode, 404);
     assert.equal(missing.json().error.code, "not_found");
@@ -208,6 +216,7 @@ describe("assets app API", () => {
       method: "POST",
       url: "/api/apps/assets/items",
       payload: { description: "no name" },
+      headers: { cookie },
     });
     assert.equal(missingName.statusCode, 400);
     assert.equal(missingName.json().error.code, "validation_error");
@@ -216,6 +225,7 @@ describe("assets app API", () => {
       method: "POST",
       url: "/api/apps/assets/items",
       payload: { name: "Bad", quantity: -1 },
+      headers: { cookie },
     });
     assert.equal(negativeQuantity.statusCode, 400);
     assert.equal(negativeQuantity.json().error.code, "validation_error");
@@ -224,6 +234,7 @@ describe("assets app API", () => {
       method: "POST",
       url: "/api/apps/assets/items",
       payload: { name: "Bad", acquiredAt: "not-a-date" },
+      headers: { cookie },
     });
     assert.equal(badDate.statusCode, 400);
     assert.equal(badDate.json().error.code, "validation_error");
@@ -234,17 +245,20 @@ describe("assets app API", () => {
       method: "POST",
       url: "/api/apps/assets/items",
       payload: { name: "Office Chair", description: "ergonomic seat" },
+      headers: { cookie },
     });
     assert.equal(chair.statusCode, 201);
     await platform.app.inject({
       method: "POST",
       url: "/api/apps/assets/items",
       payload: { name: "Standing Desk", description: "office furniture" },
+      headers: { cookie },
     });
 
     const byDescription = await platform.app.inject({
       method: "GET",
       url: "/api/apps/assets/items?q=ergonomic",
+      headers: { cookie },
     });
     assert.deepEqual(
       byDescription.json().items.map((i: { name: string }) => i.name),
@@ -254,17 +268,19 @@ describe("assets app API", () => {
     const byNameCaseInsensitive = await platform.app.inject({
       method: "GET",
       url: "/api/apps/assets/items?q=LAP",
+      headers: { cookie },
     });
     assert.deepEqual(
       byNameCaseInsensitive.json().items.map((i: { name: string }) => i.name),
       ["Laptop"],
     );
 
-    const categories = await platform.app.inject({ method: "GET", url: "/api/apps/assets/categories" });
+    const categories = await platform.app.inject({ method: "GET", url: "/api/apps/assets/categories", headers: { cookie } });
     const electronicsId = categories.json().items.find((c: { name: string }) => c.name === "Electronics").id as string;
     const byCategory = await platform.app.inject({
       method: "GET",
       url: `/api/apps/assets/items?categories=${electronicsId}`,
+      headers: { cookie },
     });
     const names = byCategory.json().items.map((i: { name: string }) => i.name);
     assert.ok(names.includes("Laptop"), "category filter includes the categorized item");
@@ -276,6 +292,7 @@ describe("assets app API", () => {
       method: "POST",
       url: "/api/apps/assets/items",
       payload: { name: "Monitor" },
+      headers: { cookie },
     });
     const itemId = created.json().id as string;
 
@@ -283,6 +300,7 @@ describe("assets app API", () => {
       method: "PATCH",
       url: `/api/apps/assets/items/${itemId}`,
       payload: { quantity: 3 },
+      headers: { cookie },
     });
     assert.equal(quantityUpdate.statusCode, 200);
     assert.equal(quantityUpdate.json().quantity, 3);
@@ -292,6 +310,7 @@ describe("assets app API", () => {
       method: "PATCH",
       url: `/api/apps/assets/items/${itemId}`,
       payload: { name: "Ultra Monitor" },
+      headers: { cookie },
     });
     assert.equal(nameUpdate.statusCode, 200);
     assert.equal(nameUpdate.json().name, "Ultra Monitor");
@@ -301,6 +320,7 @@ describe("assets app API", () => {
       method: "PATCH",
       url: "/api/apps/assets/items/00000000-0000-0000-0000-000000000000",
       payload: { name: "Ghost" },
+      headers: { cookie },
     });
     assert.equal(missing.statusCode, 404);
     assert.equal(missing.json().error.code, "not_found");
@@ -311,16 +331,17 @@ describe("assets app API", () => {
       method: "POST",
       url: "/api/apps/assets/items",
       payload: { name: "Temp Item" },
+      headers: { cookie },
     });
     const itemId = created.json().id as string;
 
-    const removed = await platform.app.inject({ method: "DELETE", url: `/api/apps/assets/items/${itemId}` });
+    const removed = await platform.app.inject({ method: "DELETE", url: `/api/apps/assets/items/${itemId}`, headers: { cookie } });
     assert.equal(removed.statusCode, 204);
 
-    const gone = await platform.app.inject({ method: "GET", url: `/api/apps/assets/items/${itemId}` });
+    const gone = await platform.app.inject({ method: "GET", url: `/api/apps/assets/items/${itemId}`, headers: { cookie } });
     assert.equal(gone.statusCode, 404);
 
-    const removedAgain = await platform.app.inject({ method: "DELETE", url: `/api/apps/assets/items/${itemId}` });
+    const removedAgain = await platform.app.inject({ method: "DELETE", url: `/api/apps/assets/items/${itemId}`, headers: { cookie } });
     assert.equal(removedAgain.statusCode, 404);
     assert.equal(removedAgain.json().error.code, "not_found");
   });
@@ -330,14 +351,20 @@ describe("assets app API", () => {
       method: "POST",
       url: "/api/apps/assets/items",
       payload: { name: "Camera" },
+      headers: { cookie },
     });
     const itemId = created.json().id as string;
     const content = "attachment-payload-123";
 
+    const uploadBody = multipartBody([
+      { name: "file", filename: "receipt.txt", contentType: "text/plain", data: content },
+    ]);
     const upload = await platform.app.inject({
       method: "POST",
       url: `/api/apps/assets/items/${itemId}/attachments`,
-      ...multipartBody([{ name: "file", filename: "receipt.txt", contentType: "text/plain", data: content }]),
+      payload: uploadBody.payload,
+      // Merge instead of spread-override: multipartBody sets the content-type.
+      headers: { ...uploadBody.headers, cookie },
     });
     assert.equal(upload.statusCode, 201);
     assert.equal(upload.json().filename, "receipt.txt");
@@ -348,6 +375,7 @@ describe("assets app API", () => {
     const list = await platform.app.inject({
       method: "GET",
       url: `/api/apps/assets/items/${itemId}/attachments`,
+      headers: { cookie },
     });
     assert.equal(list.statusCode, 200);
     assert.equal(list.json().items.length, 1);
@@ -356,6 +384,7 @@ describe("assets app API", () => {
     const download = await platform.app.inject({
       method: "GET",
       url: `/api/apps/assets/items/${itemId}/attachments/${attachmentId}`,
+      headers: { cookie },
     });
     assert.equal(download.statusCode, 200);
     assert.equal(download.rawPayload.toString("utf8"), content);
@@ -368,23 +397,25 @@ describe("assets app API", () => {
     const missingDownload = await platform.app.inject({
       method: "GET",
       url: `/api/apps/assets/items/${itemId}/attachments/00000000-0000-0000-0000-000000000000`,
+      headers: { cookie },
     });
     assert.equal(missingDownload.statusCode, 404);
     assert.equal(missingDownload.json().error.code, "not_found");
   });
 
   it("reports summary counts", async () => {
-    const before = await platform.app.inject({ method: "GET", url: "/api/apps/assets/summary" });
+    const before = await platform.app.inject({ method: "GET", url: "/api/apps/assets/summary", headers: { cookie } });
     const beforeBody = before.json() as { items: number; categories: number };
 
-    const categories = await platform.app.inject({ method: "POST", url: "/api/apps/assets/categories", payload: { name: "Summary Cat" } });
+    const categories = await platform.app.inject({ method: "POST", url: "/api/apps/assets/categories", payload: { name: "Summary Cat" }, headers: { cookie } });
     await platform.app.inject({
       method: "POST",
       url: "/api/apps/assets/items",
       payload: { name: "Summary Item", categoryId: categories.json().id },
+      headers: { cookie },
     });
 
-    const after = await platform.app.inject({ method: "GET", url: "/api/apps/assets/summary" });
+    const after = await platform.app.inject({ method: "GET", url: "/api/apps/assets/summary", headers: { cookie } });
     const afterBody = after.json() as { items: number; categories: number };
     assert.equal(afterBody.items, beforeBody.items + 1);
     assert.equal(afterBody.categories, beforeBody.categories + 1);
@@ -397,6 +428,7 @@ describe("tasks app API", () => {
       method: "POST",
       url: "/api/apps/tasks/tasks",
       payload: { title: "Buy groceries", dueAt: new Date().toISOString() },
+      headers: { cookie },
     });
     assert.equal(created.statusCode, 201);
     assert.equal(created.json().title, "Buy groceries");
@@ -408,6 +440,7 @@ describe("tasks app API", () => {
       method: "POST",
       url: "/api/apps/tasks/tasks",
       payload: { description: "no title" },
+      headers: { cookie },
     });
     assert.equal(missingTitle.statusCode, 400);
     assert.equal(missingTitle.json().error.code, "validation_error");
@@ -418,29 +451,32 @@ describe("tasks app API", () => {
       method: "POST",
       url: "/api/apps/tasks/tasks",
       payload: { title: "Filter Todo" },
+      headers: { cookie },
     });
     const done = await platform.app.inject({
       method: "POST",
       url: "/api/apps/tasks/tasks",
       payload: { title: "Filter Done" },
+      headers: { cookie },
     });
     await platform.app.inject({
       method: "PATCH",
       url: `/api/apps/tasks/tasks/${done.json().id}`,
       payload: { status: "done" },
+      headers: { cookie },
     });
 
-    const all = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/tasks" });
+    const all = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/tasks", headers: { cookie } });
     const allTitles = all.json().items.map((t: { title: string }) => t.title);
     assert.ok(allTitles.includes("Filter Todo"));
     assert.ok(allTitles.includes("Filter Done"));
 
-    const todoList = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/tasks?status=todo" });
+    const todoList = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/tasks?status=todo", headers: { cookie } });
     const todoTitles = todoList.json().items.map((t: { title: string }) => t.title);
     assert.ok(todoTitles.includes("Filter Todo"));
     assert.ok(!todoTitles.includes("Filter Done"));
 
-    const doneList = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/tasks?status=done" });
+    const doneList = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/tasks?status=done", headers: { cookie } });
     const doneTitles = doneList.json().items.map((t: { title: string }) => t.title);
     assert.ok(doneTitles.includes("Filter Done"));
     assert.ok(!doneTitles.includes("Filter Todo"));
@@ -452,6 +488,7 @@ describe("tasks app API", () => {
       method: "POST",
       url: "/api/apps/tasks/tasks",
       payload: { title: "Cycle" },
+      headers: { cookie },
     });
     const taskId = created.json().id as string;
 
@@ -459,6 +496,7 @@ describe("tasks app API", () => {
       method: "PATCH",
       url: `/api/apps/tasks/tasks/${taskId}`,
       payload: { status: "done" },
+      headers: { cookie },
     });
     assert.equal(done.statusCode, 200);
     assert.equal(done.json().status, "done");
@@ -468,6 +506,7 @@ describe("tasks app API", () => {
       method: "PATCH",
       url: `/api/apps/tasks/tasks/${taskId}`,
       payload: { status: "todo" },
+      headers: { cookie },
     });
     assert.equal(reopened.statusCode, 200);
     assert.equal(reopened.json().status, "todo");
@@ -479,19 +518,20 @@ describe("tasks app API", () => {
       method: "POST",
       url: "/api/apps/tasks/tasks",
       payload: { title: "Delete Me" },
+      headers: { cookie },
     });
     const taskId = created.json().id as string;
 
-    const removed = await platform.app.inject({ method: "DELETE", url: `/api/apps/tasks/tasks/${taskId}` });
+    const removed = await platform.app.inject({ method: "DELETE", url: `/api/apps/tasks/tasks/${taskId}`, headers: { cookie } });
     assert.equal(removed.statusCode, 204);
 
-    const gone = await platform.app.inject({ method: "GET", url: `/api/apps/tasks/tasks/${taskId}` });
+    const gone = await platform.app.inject({ method: "GET", url: `/api/apps/tasks/tasks/${taskId}`, headers: { cookie } });
     assert.equal(gone.statusCode, 404);
     assert.equal(gone.json().error.code, "not_found");
   });
 
   it("summarizes today, overdue and done counts", async () => {
-    const baseline = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/summary" });
+    const baseline = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/summary", headers: { cookie } });
     const before = baseline.json() as {
       today: number;
       overdue: number;
@@ -512,24 +552,28 @@ describe("tasks app API", () => {
       method: "POST",
       url: "/api/apps/tasks/tasks",
       payload: { title: "Due Today", dueAt: dueToday },
+      headers: { cookie },
     });
     await platform.app.inject({
       method: "POST",
       url: "/api/apps/tasks/tasks",
       payload: { title: "Overdue One", dueAt: overdueDue },
+      headers: { cookie },
     });
     const toFinish = await platform.app.inject({
       method: "POST",
       url: "/api/apps/tasks/tasks",
       payload: { title: "Already Done" },
+      headers: { cookie },
     });
     await platform.app.inject({
       method: "PATCH",
       url: `/api/apps/tasks/tasks/${toFinish.json().id}`,
       payload: { status: "done" },
+      headers: { cookie },
     });
 
-    const summary = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/summary" });
+    const summary = await platform.app.inject({ method: "GET", url: "/api/apps/tasks/summary", headers: { cookie } });
     const counts = summary.json() as {
       today: number;
       overdue: number;
@@ -562,6 +606,7 @@ describe("tasks app API", () => {
       method: "POST",
       url: "/api/apps/tasks/tasks",
       payload: { title: "Publish Me" },
+      headers: { cookie },
     });
     const taskId = created.json().id as string;
 
@@ -569,6 +614,7 @@ describe("tasks app API", () => {
       method: "PATCH",
       url: `/api/apps/tasks/tasks/${taskId}`,
       payload: { status: "done" },
+      headers: { cookie },
     });
     assert.equal(done.statusCode, 200);
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -584,6 +630,7 @@ describe("tasks app API", () => {
       method: "PATCH",
       url: `/api/apps/tasks/tasks/${taskId}`,
       payload: { status: "done" },
+      headers: { cookie },
     });
     assert.equal(doneAgain.statusCode, 200);
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -593,7 +640,7 @@ describe("tasks app API", () => {
 
 describe("mini_game app API", () => {
   it("starts with no save", async () => {
-    const empty = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves" });
+    const empty = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves", headers: { cookie } });
     assert.equal(empty.statusCode, 200);
     assert.deepEqual(empty.json(), { save: null });
   });
@@ -609,18 +656,19 @@ describe("mini_game app API", () => {
       method: "PUT",
       url: "/api/apps/mini_game/saves",
       payload: { score: 128, board, revision: 1 },
+      headers: { cookie },
     });
     assert.equal(saved.statusCode, 200);
     assert.equal(saved.json().accepted, true);
     assert.equal(saved.json().save.score, 128);
     assert.equal(saved.json().save.highScore, 128);
 
-    const loaded = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves" });
+    const loaded = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves", headers: { cookie } });
     assert.equal(loaded.statusCode, 200);
     assert.equal(loaded.json().save.score, 128);
     assert.deepEqual(loaded.json().save.board, board);
 
-    const summary = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/summary" });
+    const summary = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/summary", headers: { cookie } });
     assert.equal(summary.json().highScore, 128);
 
     const higherBoard = [
@@ -633,16 +681,17 @@ describe("mini_game app API", () => {
       method: "PUT",
       url: "/api/apps/mini_game/saves",
       payload: { score: 512, board: higherBoard, revision: 2 },
+      headers: { cookie },
     });
     assert.equal(upgraded.statusCode, 200);
     assert.equal(upgraded.json().accepted, true);
     assert.equal(upgraded.json().save.score, 512);
 
-    const reloaded = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves" });
+    const reloaded = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves", headers: { cookie } });
     assert.equal(reloaded.json().save.score, 512);
     assert.deepEqual(reloaded.json().save.board, higherBoard);
 
-    const newSummary = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/summary" });
+    const newSummary = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/summary", headers: { cookie } });
     assert.equal(newSummary.json().highScore, 512);
 
     // A reset run (New Game) never lowers the historical high score.
@@ -650,6 +699,7 @@ describe("mini_game app API", () => {
       method: "PUT",
       url: "/api/apps/mini_game/saves",
       payload: { score: 0, board, revision: 3 },
+      headers: { cookie },
     });
     assert.equal(reset.json().save.score, 0);
     assert.equal(reset.json().save.highScore, 512);
@@ -660,6 +710,7 @@ describe("mini_game app API", () => {
       method: "PUT",
       url: "/api/apps/mini_game/saves",
       payload: {},
+      headers: { cookie },
     });
     assert.equal(emptyBody.statusCode, 400);
     assert.equal(emptyBody.json().error.code, "validation_error");
@@ -668,6 +719,7 @@ describe("mini_game app API", () => {
       method: "PUT",
       url: "/api/apps/mini_game/saves",
       payload: { score: 10, revision: 1 },
+      headers: { cookie },
     });
     assert.equal(missingBoard.statusCode, 400);
     assert.equal(missingBoard.json().error.code, "validation_error");
@@ -676,6 +728,7 @@ describe("mini_game app API", () => {
       method: "PUT",
       url: "/api/apps/mini_game/saves",
       payload: { board: [], revision: 1 },
+      headers: { cookie },
     });
     assert.equal(missingScore.statusCode, 400);
     assert.equal(missingScore.json().error.code, "validation_error");
@@ -684,6 +737,7 @@ describe("mini_game app API", () => {
       method: "PUT",
       url: "/api/apps/mini_game/saves",
       payload: { score: -5, board: [], revision: 1 },
+      headers: { cookie },
     });
     assert.equal(negativeScore.statusCode, 400);
     assert.equal(negativeScore.json().error.code, "validation_error");

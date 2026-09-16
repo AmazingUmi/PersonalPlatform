@@ -6,7 +6,7 @@ import { Database } from "../../src/core/database/index.js";
 import assetsApp from "../../src/apps/assets/index.js";
 import type { BackendAppModule } from "../../src/core/app-registry/types.js";
 import type { Platform } from "../../src/core/platform.js";
-import { buildFixturePlatform } from "../helpers/platform.js";
+import { buildFixturePlatform, ensureTestAdmin, loginCookie } from "../helpers/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 import { multipartBody } from "../helpers/multipart.js";
 import { runMigrations } from "../../src/core/database/migrate.js";
@@ -78,19 +78,25 @@ let db: Database;
 let platform: Platform;
 let cleanup: () => void;
 let root: string;
+/** Session cookie for the app APIs (every /api/apps/* route needs one). */
+let cookie: string;
+/** Owning user for user-scoped attachment storage (AUTH-4). */
+let adminId: string;
 
 function attachmentPath(itemId: string, attachmentId: string): string {
-  return join(root, "storage", "apps", "assets", "attachments", itemId, attachmentId);
+  // AUTH-4: attachments live in the owner's user-scoped storage root.
+  return join(root, "storage", "users", adminId, "apps", "assets", "attachments", itemId, attachmentId);
 }
 
 async function json<T>(method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE", url: string, payload?: object): Promise<{ status: number; body: T }> {
-  const response = await platform.app.inject({ method, url, payload });
+  const response = await platform.app.inject({ method, url, payload, headers: { cookie } });
   const raw = response.body;
   return { status: response.statusCode, body: (raw ? JSON.parse(raw) : null) as T };
 }
 
 before(async () => {
   db = await resetDatabase();
+  adminId = await ensureTestAdmin(db);
   const fixture = await buildFixturePlatform({
     database: db,
     manifests: [
@@ -102,6 +108,7 @@ before(async () => {
   platform = fixture.platform;
   cleanup = fixture.cleanup;
   root = fixture.root;
+  cookie = await loginCookie(platform);
   await runMigrations({
     databaseUrl: TEST_DATABASE_URL,
     targets: [{ scope: "assets", schema: "assets", dir: join(root, "apps", "assets", "migrations") }],
@@ -197,10 +204,15 @@ describe("attachment lifecycle and orphan cleanup (FP-2B.2)", () => {
   });
 
   it("uploads an attachment with a physical storage object", async () => {
+    const uploadBody = multipartBody([
+      { name: "file", filename: "receipt.txt", contentType: "text/plain", data: "receipt-data" },
+    ]);
     const upload = await platform.app.inject({
       method: "POST",
       url: `/api/apps/assets/items/${itemId}/attachments`,
-      ...multipartBody([{ name: "file", filename: "receipt.txt", contentType: "text/plain", data: "receipt-data" }]),
+      payload: uploadBody.payload,
+      // Merge instead of spread-override: multipartBody sets the content-type.
+      headers: { ...uploadBody.headers, cookie },
     });
     assert.equal(upload.statusCode, 201);
     attachmentId = upload.json().id;
@@ -224,15 +236,19 @@ describe("attachment lifecycle and orphan cleanup (FP-2B.2)", () => {
   });
 
   it("deleting the item removes row, attachment metadata and storage objects", async () => {
+    const uploadBody1 = multipartBody([{ name: "file", filename: "a.txt", data: "a" }]);
     const upload1 = await platform.app.inject({
       method: "POST",
       url: `/api/apps/assets/items/${itemId}/attachments`,
-      ...multipartBody([{ name: "file", filename: "a.txt", data: "a" }]),
+      payload: uploadBody1.payload,
+      headers: { ...uploadBody1.headers, cookie },
     });
+    const uploadBody2 = multipartBody([{ name: "file", filename: "b.txt", data: "b" }]);
     const upload2 = await platform.app.inject({
       method: "POST",
       url: `/api/apps/assets/items/${itemId}/attachments`,
-      ...multipartBody([{ name: "file", filename: "b.txt", data: "b" }]),
+      payload: uploadBody2.payload,
+      headers: { ...uploadBody2.headers, cookie },
     });
     assert.ok(existsSync(attachmentPath(itemId, upload1.json().id)));
     assert.ok(existsSync(attachmentPath(itemId, upload2.json().id)));

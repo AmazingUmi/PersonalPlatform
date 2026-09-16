@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import type { AppInfo } from "../shared/api";
+import type { AppInfo, AuthUser } from "../shared/api";
 import type { AppStatusChip } from "../shared/appTypes";
 import { useAppDisplayName } from "../shared/PresentationContext";
 import { PixelBadge } from "../shared/ui/PixelBadge";
@@ -43,7 +43,16 @@ function useWallClock(): string {
  * wall clock, per-app status chips (from the app-status providers) and the
  * enabled-app count. All values are real; nothing is decorative filler.
  */
-export function TopBar({ apps }: { apps: AppInfo[] }) {
+export function TopBar({
+  apps,
+  user = null,
+  onLogout,
+}: {
+  apps: AppInfo[];
+  /** Current session user (AUTH-5); null hides the account chip. */
+  user?: AuthUser | null;
+  onLogout?: () => void;
+}) {
   const { pathname } = useLocation();
   const enabled = apps.filter((app) => app.status === "enabled");
   const statuses = useAppStatuses();
@@ -75,6 +84,30 @@ export function TopBar({ apps }: { apps: AppInfo[] }) {
         <span className="topbar__clock" title="Local time">
           {clock}
         </span>
+        {user ? (
+          <span className="topbar__account">
+            <span className="topbar__user" title={`Signed in as ${user.username} (${user.role})`}>
+              <span className="topbar__user-sigil" aria-hidden="true">
+                ▚
+              </span>{" "}
+              {user.displayName ?? user.username}
+              {user.role === "admin" ? (
+                <span className="topbar__user-role" aria-label="administrator role">
+                  ★
+                </span>
+              ) : null}
+            </span>
+            <button
+              type="button"
+              className="topbar__logout"
+              onClick={onLogout}
+              aria-label="Log out"
+              title="Log out"
+            >
+              LOGOUT
+            </button>
+          </span>
+        ) : null}
       </span>
     </header>
   );

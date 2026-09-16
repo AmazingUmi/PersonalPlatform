@@ -5,7 +5,7 @@ import { after, before, describe, it } from "node:test";
 import { Database } from "../../src/core/database/index.js";
 import tasksApp from "../../src/apps/tasks/index.js";
 import type { Platform } from "../../src/core/platform.js";
-import { buildFixturePlatform } from "../helpers/platform.js";
+import { buildFixturePlatform, ensureTestAdmin, loginCookie } from "../helpers/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 import { runMigrations } from "../../src/core/database/migrate.js";
 
@@ -13,15 +13,19 @@ const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
 const tasksMigrations = [
   readFileSync(join(repoRoot, "apps/tasks/migrations/20260101000001-init.sql"), "utf8"),
   readFileSync(join(repoRoot, "apps/tasks/migrations/20260829000002-start-priority.sql"), "utf8"),
+  readFileSync(join(repoRoot, "apps/tasks/migrations/20260916100000-user-ownership.sql"), "utf8"),
 ];
 
 let db: Database;
 let platform: Platform;
 let cleanup: () => void;
 let root: string;
+/** Session cookie for the app APIs (every /api/apps/* route needs one). */
+let cookie: string;
 
 before(async () => {
   db = await resetDatabase();
+  await ensureTestAdmin(db);
   const fixture = await buildFixturePlatform({
     database: db,
     manifests: [{ id: "tasks", migrations: tasksMigrations }],
@@ -30,6 +34,7 @@ before(async () => {
   platform = fixture.platform;
   cleanup = fixture.cleanup;
   root = fixture.root;
+  cookie = await loginCookie(platform);
   await runMigrations({
     databaseUrl: TEST_DATABASE_URL,
     targets: [{ scope: "tasks", schema: "tasks", dir: join(root, "apps", "tasks", "migrations") }],
@@ -45,7 +50,7 @@ after(async () => {
 });
 
 async function json<T>(method: "GET" | "POST" | "PATCH" | "PUT" | "DELETE", url: string, payload?: object): Promise<{ status: number; body: T }> {
-  const response = await platform.app.inject({ method, url, payload });
+  const response = await platform.app.inject({ method, url, payload, headers: { cookie } });
   const raw = response.body;
   return { status: response.statusCode, body: (raw ? JSON.parse(raw) : null) as T };
 }

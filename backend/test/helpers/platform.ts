@@ -8,6 +8,59 @@ import type { PlatformConfig } from "../../src/core/config/index.js";
 import { createLogger } from "../../src/core/logging/index.js";
 import type { BackendAppModule } from "../../src/core/app-registry/types.js";
 import type { Database } from "../../src/core/database/index.js";
+import {
+  createUser,
+  ensureBootstrapAdmin,
+  type AuthUserView,
+} from "../../src/core/auth/service.js";
+
+/** Deterministic credentials integration tests activate the bootstrap admin with. */
+export const TEST_ADMIN_USERNAME = "admin";
+export const TEST_ADMIN_PASSWORD = "test-admin-password-1";
+
+/** Activate the placeholder admin (idempotent) and return its id. */
+export async function ensureTestAdmin(db: Database): Promise<string> {
+  await ensureBootstrapAdmin(db.context(), {
+    username: TEST_ADMIN_USERNAME,
+    password: TEST_ADMIN_PASSWORD,
+  });
+  const { rows } = await db
+    .context()
+    .query<{ id: string }>("SELECT id FROM core.users WHERE username = $1", [TEST_ADMIN_USERNAME]);
+  return rows[0]!.id;
+}
+
+/** Create a regular user directly through the core auth service. */
+export async function createTestUser(
+  db: Database,
+  username: string,
+  password = `test-password-${username}`,
+): Promise<AuthUserView> {
+  return createUser(db.context(), { username, password, displayName: username });
+}
+
+/**
+ * Log in through the real endpoint and return the raw Cookie header value
+ * (`pp_session=…`) for inject() requests.
+ */
+export async function loginCookie(
+  platform: Platform,
+  username: string = TEST_ADMIN_USERNAME,
+  password: string = TEST_ADMIN_PASSWORD,
+): Promise<string> {
+  const response = await platform.app.inject({
+    method: "POST",
+    url: "/api/core/auth/login",
+    payload: { username, password },
+  });
+  if (response.statusCode !== 200) {
+    throw new Error(`login failed for "${username}": HTTP ${response.statusCode} ${response.body}`);
+  }
+  const setCookie = response.headers["set-cookie"];
+  const first = Array.isArray(setCookie) ? setCookie[0] : setCookie;
+  if (!first) throw new Error("login response carried no set-cookie header");
+  return first.split(";")[0]!;
+}
 
 export interface FixtureManifest {
   id: string;

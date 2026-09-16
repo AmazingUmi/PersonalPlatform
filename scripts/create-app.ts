@@ -87,6 +87,8 @@ export function runCreateApp(options: CreateAppOptions): void {
 const id = "${id}";
 
 async function registerApi(ctx: AppContext): Promise<void> {
+  // Routes sit behind the Core lifecycle + auth guards; handlers resolve the
+  // requesting user with: const user = await ctx.auth.requireUser(request);
   ctx.api.get("/ping", async () => ({ app: id, pong: true }));
 }
 

@@ -5,7 +5,7 @@ import { createLogger } from "../../src/core/logging/index.js";
 import { runMigrations } from "../../src/core/database/migrate.js";
 import type { BackendAppModule } from "../../src/core/app-registry/types.js";
 import type { Platform } from "../../src/core/platform.js";
-import { buildFixturePlatform } from "../helpers/platform.js";
+import { buildFixturePlatform, ensureTestAdmin, loginCookie } from "../helpers/platform.js";
 import { registerTestSchemas, resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 import { join } from "node:path";
 
@@ -18,6 +18,8 @@ let db: Database;
 let platform: Platform;
 let cleanup: () => void;
 let root: string;
+/** Session cookie for protected routes (AUTH-1: app APIs and core reads/writes). */
+let cookie: string;
 
 /** Shared state the lifecycle module writes to; inspected by the tests. */
 const jobRuns: number[] = [];
@@ -57,6 +59,7 @@ const lifecycleApp: BackendAppModule = {
 
 before(async () => {
   db = await resetDatabase();
+  await ensureTestAdmin(db);
   const fixture = await buildFixturePlatform({
     database: db,
     manifests: [
@@ -70,6 +73,7 @@ before(async () => {
   platform = fixture.platform;
   cleanup = fixture.cleanup;
   root = fixture.root;
+  cookie = await loginCookie(platform);
   await runMigrations({
     databaseUrl: TEST_DATABASE_URL,
     targets: [{ scope: "lifecyc", schema: "lifecyc", dir: join(root, "apps", "lifecyc", "migrations") }],
@@ -87,15 +91,23 @@ after(async () => {
 
 describe("app lifecycle end to end", () => {
   it("serves the app API while enabled", async () => {
-    const created = await platform.app.inject({ method: "POST", url: "/api/apps/lifecyc/data" });
+    const created = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/lifecyc/data",
+      headers: { cookie },
+    });
     assert.equal(created.statusCode, 201);
-    const data = await platform.app.inject({ method: "GET", url: "/api/apps/lifecyc/data" });
+    const data = await platform.app.inject({ method: "GET", url: "/api/apps/lifecyc/data", headers: { cookie } });
     assert.equal(data.statusCode, 200);
     assert.equal(data.json().records, 1);
   });
 
   it("health endpoint reports ok while enabled", async () => {
-    const health = await platform.app.inject({ method: "GET", url: "/api/core/apps/lifecyc/health" });
+    const health = await platform.app.inject({
+      method: "GET",
+      url: "/api/core/apps/lifecyc/health",
+      headers: { cookie },
+    });
     assert.equal(health.statusCode, 200);
     assert.equal(health.json().status, "ok");
   });
@@ -105,17 +117,23 @@ describe("app lifecycle end to end", () => {
       method: "PUT",
       url: "/api/core/apps/lifecyc/enabled",
       payload: { enabled: false },
+      headers: { cookie },
     });
     assert.equal(updated.statusCode, 200);
     assert.equal(updated.json().status, "disabled");
 
-    // App API now answers 404.
+    // App API now answers 404. No cookie on purpose: the lifecycle guard runs
+    // before the auth guard, so a disabled app 404s even unauthenticated.
     const data = await platform.app.inject({ method: "GET", url: "/api/apps/lifecyc/data" });
     assert.equal(data.statusCode, 404);
     assert.equal(data.json().error.code, "not_found");
 
-    // Health endpoint 404s for non-enabled apps.
-    const health = await platform.app.inject({ method: "GET", url: "/api/core/apps/lifecyc/health" });
+    // Health endpoint 404s for non-enabled apps (auth passes first).
+    const health = await platform.app.inject({
+      method: "GET",
+      url: "/api/core/apps/lifecyc/health",
+      headers: { cookie },
+    });
     assert.equal(health.statusCode, 404);
 
     // Jobs stop and subscriptions are removed.
@@ -146,11 +164,12 @@ describe("app lifecycle end to end", () => {
       method: "PUT",
       url: "/api/core/apps/lifecyc/enabled",
       payload: { enabled: true },
+      headers: { cookie },
     });
     assert.equal(updated.statusCode, 200);
     assert.equal(updated.json().status, "enabled");
 
-    const data = await platform.app.inject({ method: "GET", url: "/api/apps/lifecyc/data" });
+    const data = await platform.app.inject({ method: "GET", url: "/api/apps/lifecyc/data", headers: { cookie } });
     assert.equal(data.statusCode, 200);
     assert.equal(data.json().records, 1, "data still there after re-enable");
 
@@ -163,6 +182,7 @@ describe("app lifecycle end to end", () => {
       method: "PUT",
       url: "/api/core/apps/ghost/enabled",
       payload: { enabled: true },
+      headers: { cookie },
     });
     assert.equal(response.statusCode, 404);
     assert.equal(response.json().error.code, "app_not_found");
@@ -173,6 +193,7 @@ describe("app lifecycle end to end", () => {
       method: "PUT",
       url: "/api/core/apps/lifecyc/enabled",
       payload: { enabled: true },
+      headers: { cookie },
     });
     assert.equal(again.statusCode, 200);
     assert.equal(again.json().status, "enabled");

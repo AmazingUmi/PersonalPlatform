@@ -20,7 +20,9 @@ Do not duplicate those documents here.
 
 PersonalPlatform is a:
 
-> single-user, self-hosted modular monolith.
+> self-hosted modular monolith with authentication and multi-user data isolation as Core capabilities.
+
+Identity is a Core capability (`backend/src/core/auth/`): session authentication with server-side sessions in `core.sessions`, and user-owned app data — every app row is keyed by `user_id` referencing `core.users`. App Contract remains V1: `ctx.auth` and `Storage.forUser` were added additively, without bumping `platformApiVersion`.
 
 The platform base is frozen at:
 

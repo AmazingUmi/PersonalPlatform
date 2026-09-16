@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { expect, test, type Page } from "@playwright/test";
+import { adminFetch } from "./helpers";
 
 /**
  * Motion-system regression specs (FE-MOTION-5): the animation layer must be
@@ -32,11 +33,8 @@ async function seedLayout(page: Page, value: unknown): Promise<void> {
 }
 
 async function setAppEnabled(id: string, enabled: boolean): Promise<void> {
-  const response = await fetch(`${CORE}/api/core/apps/${id}/enabled`, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ enabled }),
-  });
+  // AUTH-5: raw API writes carry the admin session cookie via helpers.adminFetch.
+  const response = await adminFetch("PUT", `/api/core/apps/${id}/enabled`, { enabled });
   if (!response.ok) throw new Error(`toggle ${id} failed: HTTP ${response.status}`);
 }
 

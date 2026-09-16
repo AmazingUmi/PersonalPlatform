@@ -79,8 +79,13 @@ step "integration tests"
 TEST_DATABASE_URL="$TEST_DATABASE_URL" npm run test:integration
 
 step "backend smoke test"
+# The smoke backend bootstraps a dedicated admin so the authenticated API
+# surface can be exercised (cookies via curl's cookie jar).
+SMOKE_ADMIN_USER="verify-admin"
+SMOKE_ADMIN_PASSWORD="verify-only-password-1"
 PORT="$BACKEND_PORT" DATABASE_URL="$DATABASE_URL" \
-  npm run start --workspace @personal-platform/backend > /tmp/pp-backend.log 2>&1 &
+BOOTSTRAP_ADMIN_USERNAME="$SMOKE_ADMIN_USER" BOOTSTRAP_ADMIN_PASSWORD="$SMOKE_ADMIN_PASSWORD" \
+npm run start --workspace @personal-platform/backend > /tmp/pp-backend.log 2>&1 &
 BACKEND_PID=$!
 trap 'kill "$BACKEND_PID" 2>/dev/null || true' EXIT
 
@@ -93,7 +98,17 @@ curl -fsS "http://localhost:$BACKEND_PORT/api/core/health/live"
 echo ""
 curl -fsS "http://localhost:$BACKEND_PORT/api/core/health/ready"
 echo ""
-APPS_JSON="$(curl -fsS "http://localhost:$BACKEND_PORT/api/core/apps")"
+COOKIE_JAR="$(mktemp)"
+LOGIN_CODE="$(curl -sS -o /dev/null -w '%{http_code}' -c "$COOKIE_JAR" \
+  -H 'content-type: application/json' \
+  -d "{\"username\":\"$SMOKE_ADMIN_USER\",\"password\":\"$SMOKE_ADMIN_PASSWORD\"}" \
+  "http://localhost:$BACKEND_PORT/api/core/auth/login")"
+if [ "$LOGIN_CODE" != "200" ]; then
+  echo "login failed with HTTP $LOGIN_CODE"
+  exit 1
+fi
+echo "login OK"
+APPS_JSON="$(curl -fsS -b "$COOKIE_JAR" "http://localhost:$BACKEND_PORT/api/core/apps")"
 echo "$APPS_JSON"
 node -e '
   const { existsSync, readdirSync } = require("node:fs");
@@ -122,6 +137,7 @@ node -e '
 ' "$APPS_JSON"
 
 kill "$BACKEND_PID" 2>/dev/null || true
+rm -f "$COOKIE_JAR"
 trap - EXIT
 
 echo ""

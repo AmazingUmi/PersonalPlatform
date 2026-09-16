@@ -89,17 +89,24 @@ function invalidCityError(): AppError {
 }
 
 /** A malformed uuid must not reach pg as a 22P02 parse error — it is simply not found. */
-async function findAlarmView(db: Db, alarmId: string): Promise<AlarmView | null> {
+async function findAlarmView(db: Db, alarmId: string, userId: string): Promise<AlarmView | null> {
   if (!isUuid(alarmId)) return null;
-  const { rows } = await db.query<AlarmRow>("SELECT * FROM clock.alarms WHERE id = $1", [alarmId]);
+  const { rows } = await db.query<AlarmRow>(
+    "SELECT * FROM clock.alarms WHERE id = $1 AND user_id = $2",
+    [alarmId, userId],
+  );
   return rows[0] ? toAlarmView(rows[0]) : null;
 }
 
-async function findWorldClockView(db: Db, id: string): Promise<WorldClockView | null> {
+async function findWorldClockView(
+  db: Db,
+  id: string,
+  userId: string,
+): Promise<WorldClockView | null> {
   if (!isUuid(id)) return null;
   const { rows } = await db.query<WorldClockRow>(
-    "SELECT * FROM clock.world_clocks WHERE id = $1",
-    [id],
+    "SELECT * FROM clock.world_clocks WHERE id = $1 AND user_id = $2",
+    [id, userId],
   );
   return rows[0] ? toWorldClockView(rows[0]) : null;
 }
@@ -107,19 +114,19 @@ async function findWorldClockView(db: Db, id: string): Promise<WorldClockView | 
 const id = "clock";
 const SETTINGS_ID = "current";
 
-async function getSettings(db: Db): Promise<ClockSettingsView> {
+async function getSettings(db: Db, userId: string): Promise<ClockSettingsView> {
   const { rows } = await db.query<{ value: unknown }>(
-    "SELECT value FROM clock.settings WHERE id = $1",
-    [SETTINGS_ID],
+    "SELECT value FROM clock.settings WHERE id = $1 AND user_id = $2",
+    [SETTINGS_ID, userId],
   );
   return sanitizeClockSettings(rows[0]?.value) ?? DEFAULT_CLOCK_SETTINGS;
 }
 
-async function saveSettings(db: Db, next: ClockSettingsView): Promise<void> {
+async function saveSettings(db: Db, userId: string, next: ClockSettingsView): Promise<void> {
   await db.query(
-    `INSERT INTO clock.settings (id, value, updated_at) VALUES ($1, $2::jsonb, now())
-     ON CONFLICT (id) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-    [SETTINGS_ID, JSON.stringify(next)],
+    `INSERT INTO clock.settings (id, user_id, value, updated_at) VALUES ($1, $2, $3::jsonb, now())
+     ON CONFLICT (user_id, id) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [SETTINGS_ID, userId, JSON.stringify(next)],
   );
 }
 
@@ -128,8 +135,12 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
   // ---- Settings (focus GET/PUT /settings precedent: single-row, full replace).
   // One source of truth — the dashboard card and the app page read the same row.
+  // AUTH-3: the row is per-user ("current" is a slot inside (user_id, id)).
 
-  ctx.api.get("/settings", async () => getSettings(db));
+  ctx.api.get("/settings", async (request) => {
+    const user = await ctx.auth.requireUser(request);
+    return getSettings(db, user.id);
+  });
 
   ctx.api.put("/settings", {
     schema: {
@@ -146,22 +157,25 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async handler(request) {
+      const user = await ctx.auth.requireUser(request);
       // Defense in depth after the schema (focus PUT /settings precedent).
       const sanitized = sanitizeClockSettings(request.body);
       if (!sanitized) {
         throw new AppError(422, "invalid_settings", "settings payload is not a legal settings object");
       }
-      await saveSettings(db, sanitized);
-      return getSettings(db);
+      await saveSettings(db, user.id, sanitized);
+      return getSettings(db, user.id);
     },
   });
 
   // ---- Alarms. `time` is a local wall-clock 'HH:MM' — firing is detected by
   // the client while the app is open (browser limitation, see apps/clock/README.md).
 
-  ctx.api.get("/alarms", async () => {
+  ctx.api.get("/alarms", async (request) => {
+    const user = await ctx.auth.requireUser(request);
     const { rows } = await db.query<AlarmRow>(
-      "SELECT * FROM clock.alarms ORDER BY time ASC, created_at ASC",
+      "SELECT * FROM clock.alarms WHERE user_id = $1 ORDER BY time ASC, created_at ASC",
+      [user.id],
     );
     return { items: rows.map(toAlarmView) };
   });
@@ -186,6 +200,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async handler(request, reply) {
+      const user = await ctx.auth.requireUser(request);
       const body = request.body as {
         time: string;
         label?: string;
@@ -194,11 +209,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
       };
       const newId = randomUUID();
       await db.query(
-        `INSERT INTO clock.alarms (id, time, label, enabled, repeat_days)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [newId, body.time, body.label?.trim() ?? "", body.enabled ?? true, body.repeatDays ?? []],
+        `INSERT INTO clock.alarms (id, user_id, time, label, enabled, repeat_days)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [newId, user.id, body.time, body.label?.trim() ?? "", body.enabled ?? true, body.repeatDays ?? []],
       );
-      return reply.code(201).send(await findAlarmView(db, newId));
+      return reply.code(201).send(await findAlarmView(db, newId, user.id));
     },
   });
 
@@ -223,6 +238,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async handler(request) {
+      const user = await ctx.auth.requireUser(request);
       if (!isUuid(request.params.id)) throw new AppError(404, "not_found", "alarm not found");
       const body = request.body as {
         time?: string;
@@ -231,12 +247,12 @@ async function registerApi(ctx: AppContext): Promise<void> {
         repeatDays?: number[];
       };
       if (Object.keys(body).length === 0) {
-        const view = await findAlarmView(db, request.params.id);
+        const view = await findAlarmView(db, request.params.id, user.id);
         if (!view) throw new AppError(404, "not_found", "alarm not found");
         return view;
       }
       const sets: string[] = [];
-      const params: unknown[] = [request.params.id];
+      const params: unknown[] = [request.params.id, user.id];
       const set = (column: string, value: unknown): void => {
         params.push(value);
         sets.push(`${column} = $${params.length}`);
@@ -247,7 +263,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       if (body.repeatDays !== undefined) set("repeat_days", normalizeRepeatDays(body.repeatDays));
       const updated = await db.query<AlarmRow>(
         `UPDATE clock.alarms SET ${sets.join(", ")}, updated_at = now()
-         WHERE id = $1 RETURNING *`,
+         WHERE id = $1 AND user_id = $2 RETURNING *`,
         params,
       );
       if (!updated.rows[0]) throw new AppError(404, "not_found", "alarm not found");
@@ -256,8 +272,12 @@ async function registerApi(ctx: AppContext): Promise<void> {
   });
 
   ctx.api.delete<{ Params: { id: string } }>("/alarms/:id", async (request, reply) => {
+    const user = await ctx.auth.requireUser(request);
     if (!isUuid(request.params.id)) throw new AppError(404, "not_found", "alarm not found");
-    const result = await db.query("DELETE FROM clock.alarms WHERE id = $1", [request.params.id]);
+    const result = await db.query("DELETE FROM clock.alarms WHERE id = $1 AND user_id = $2", [
+      request.params.id,
+      user.id,
+    ]);
     if (result.rowCount === 0) throw new AppError(404, "not_found", "alarm not found");
     return reply.code(204).send();
   });
@@ -265,9 +285,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
   // ---- World clocks. Timezone is always stored as an IANA name (never a UTC
   // offset) so DST is resolved by Intl at display time, not by stored data.
 
-  ctx.api.get("/world-clocks", async () => {
+  ctx.api.get("/world-clocks", async (request) => {
+    const user = await ctx.auth.requireUser(request);
     const { rows } = await db.query<WorldClockRow>(
-      "SELECT * FROM clock.world_clocks ORDER BY sort_order ASC, created_at ASC",
+      "SELECT * FROM clock.world_clocks WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC",
+      [user.id],
     );
     return { items: rows.map(toWorldClockView) };
   });
@@ -285,6 +307,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async handler(request, reply) {
+      const user = await ctx.auth.requireUser(request);
       const body = request.body as { city: string; timezone: string };
       const city = body.city.trim();
       const timezone = body.timezone.trim();
@@ -294,12 +317,15 @@ async function registerApi(ctx: AppContext): Promise<void> {
       if (!isValidTimezone(timezone)) throw invalidTimezoneError(timezone);
       const newId = randomUUID();
       // sort_order is "append at the end", computed atomically in one statement.
+      // The MAX is scoped per user (AUTH-3): each user's list is numbered 1..n
+      // independently of other users' entries.
       await db.query(
-        `INSERT INTO clock.world_clocks (id, city, timezone, sort_order)
-         SELECT $1, $2, $3, COALESCE(MAX(sort_order), 0) + 1 FROM clock.world_clocks`,
-        [newId, city, timezone],
+        `INSERT INTO clock.world_clocks (id, user_id, city, timezone, sort_order)
+         SELECT $1, $2, $3, $4, COALESCE(MAX(sort_order), 0) + 1
+         FROM clock.world_clocks WHERE user_id = $2`,
+        [newId, user.id, city, timezone],
       );
-      return reply.code(201).send(await findWorldClockView(db, newId));
+      return reply.code(201).send(await findWorldClockView(db, newId, user.id));
     },
   });
 
@@ -315,6 +341,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async handler(request) {
+      const user = await ctx.auth.requireUser(request);
       if (!isUuid(request.params.id)) throw new AppError(404, "not_found", "world clock not found");
       const body = request.body as { city?: string; timezone?: string };
       const city = body.city?.trim();
@@ -322,7 +349,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       if (city !== undefined && city.length === 0) throw invalidCityError();
       if (timezone !== undefined && !isValidTimezone(timezone)) throw invalidTimezoneError(timezone);
       const sets: string[] = [];
-      const params: unknown[] = [request.params.id];
+      const params: unknown[] = [request.params.id, user.id];
       if (city !== undefined) {
         params.push(city);
         sets.push(`city = $${params.length}`);
@@ -334,23 +361,25 @@ async function registerApi(ctx: AppContext): Promise<void> {
       if (sets.length > 0) {
         const updated = await db.query<WorldClockRow>(
           `UPDATE clock.world_clocks SET ${sets.join(", ")}, updated_at = now()
-           WHERE id = $1 RETURNING *`,
+           WHERE id = $1 AND user_id = $2 RETURNING *`,
           params,
         );
         if (!updated.rows[0]) throw new AppError(404, "not_found", "world clock not found");
         return toWorldClockView(updated.rows[0]);
       }
-      const view = await findWorldClockView(db, request.params.id);
+      const view = await findWorldClockView(db, request.params.id, user.id);
       if (!view) throw new AppError(404, "not_found", "world clock not found");
       return view;
     },
   });
 
   ctx.api.delete<{ Params: { id: string } }>("/world-clocks/:id", async (request, reply) => {
+    const user = await ctx.auth.requireUser(request);
     if (!isUuid(request.params.id)) throw new AppError(404, "not_found", "world clock not found");
-    const result = await db.query("DELETE FROM clock.world_clocks WHERE id = $1", [
-      request.params.id,
-    ]);
+    const result = await db.query(
+      "DELETE FROM clock.world_clocks WHERE id = $1 AND user_id = $2",
+      [request.params.id, user.id],
+    );
     if (result.rowCount === 0) throw new AppError(404, "not_found", "world clock not found");
     return reply.code(204).send();
   });
@@ -369,6 +398,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async handler(request) {
+      const user = await ctx.auth.requireUser(request);
       const ids = (request.body as { ids: string[] }).ids;
       const invalid = ids.filter((value) => !isUuid(value));
       if (invalid.length > 0) {
@@ -379,7 +409,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
       if (new Set(ids).size !== ids.length) {
         throw new AppError(422, "invalid_order", "ids must not contain duplicates", { ids });
       }
-      const existing = await db.query<{ id: string }>("SELECT id FROM clock.world_clocks");
+      // Only the calling user's entries may be (re)ordered (AUTH-3).
+      const existing = await db.query<{ id: string }>(
+        "SELECT id FROM clock.world_clocks WHERE user_id = $1",
+        [user.id],
+      );
       const existingIds = new Set(existing.rows.map((row) => row.id));
       if (ids.length !== existingIds.size || ids.some((value) => !existingIds.has(value))) {
         throw new AppError(422, "invalid_order", "ids must list every world clock exactly once", {
@@ -389,13 +423,14 @@ async function registerApi(ctx: AppContext): Promise<void> {
       await db.withTransaction(async (tx) => {
         for (let index = 0; index < ids.length; index += 1) {
           await tx.query(
-            "UPDATE clock.world_clocks SET sort_order = $2, updated_at = now() WHERE id = $1",
-            [ids[index], index + 1],
+            "UPDATE clock.world_clocks SET sort_order = $2, updated_at = now() WHERE id = $1 AND user_id = $3",
+            [ids[index], index + 1, user.id],
           );
         }
       });
       const { rows } = await db.query<WorldClockRow>(
-        "SELECT * FROM clock.world_clocks ORDER BY sort_order ASC, created_at ASC",
+        "SELECT * FROM clock.world_clocks WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC",
+        [user.id],
       );
       return { items: rows.map(toWorldClockView) };
     },

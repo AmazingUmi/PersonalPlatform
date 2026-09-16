@@ -8,6 +8,16 @@ export interface Storage {
   exists(key: string): Promise<boolean>;
 }
 
+/**
+ * App-scoped storage surface (AUTH-2): the app root for platform-owned files
+ * plus per-user roots for user data. `forUser` returns a driver rooted at
+ * `storage/users/<userId>/apps/<appId>` — every traversal/symlink protection
+ * of the base driver applies to user roots as well.
+ */
+export interface AppStorage extends Storage {
+  forUser(userId: string): Storage;
+}
+
 export class StorageError extends Error {
   constructor(
     message: string,

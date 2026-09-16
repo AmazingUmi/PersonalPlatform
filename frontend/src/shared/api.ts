@@ -48,6 +48,13 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Broadcast a session loss so the auth provider can send the user back to
+ * /login. Dispatched for any 401 outside /api/core/auth/* (the auth endpoints
+ * themselves manage the session lifecycle).
+ */
+export const UNAUTHORIZED_EVENT = "pp:unauthorized";
+
 /** Generic JSON API helper with unified error extraction. */
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
@@ -65,8 +72,15 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     // Message extraction is unchanged: envelope message if present, else HTTP <status>.
     const message =
       errorBody !== null && typeof errorBody === "object"
-        ? String((errorBody as { message?: string }).message ?? `HTTP ${response.status}`)
+        ? String((errorBody as { message?: unknown }).message ?? `HTTP ${response.status}`)
         : `HTTP ${response.status}`;
+    if (
+      response.status === 401 &&
+      !path.startsWith("/api/core/auth/") &&
+      typeof window !== "undefined"
+    ) {
+      window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+    }
     if (errorBody !== null && typeof errorBody === "object") {
       const { code, details } = errorBody as { code?: unknown; details?: unknown };
       throw new ApiError(message, response.status, typeof code === "string" ? code : null, details);
@@ -75,6 +89,67 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(message);
   }
   return body as T;
+}
+
+// ---------------------------------------------------------------------------
+// Session (AUTH): HttpOnly cookie only — the token never touches JS.
+// Same-origin fetch sends cookies by default; no credentials config needed.
+// ---------------------------------------------------------------------------
+
+export type UserRole = "admin" | "user";
+
+export interface AuthUser {
+  id: string;
+  username: string;
+  displayName: string | null;
+  role: UserRole;
+}
+
+export interface UserAccount extends AuthUser {
+  status: string;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+export async function login(username: string, password: string): Promise<AuthUser> {
+  const body = await api<{ user: AuthUser }>("/api/core/auth/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  });
+  return body.user;
+}
+
+export async function logout(): Promise<void> {
+  await api("/api/core/auth/logout", { method: "POST" });
+}
+
+/** Current session user; null when unauthenticated (401). */
+export async function fetchMe(): Promise<AuthUser | null> {
+  try {
+    return await api<AuthUser>("/api/core/auth/me");
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) return null;
+    throw error;
+  }
+}
+
+export async function listUsers(): Promise<UserAccount[]> {
+  const body = await api<{ items: UserAccount[] }>("/api/core/auth/users");
+  return body.items;
+}
+
+export async function createUser(input: {
+  username: string;
+  password: string;
+  displayName?: string | null;
+}): Promise<AuthUser> {
+  const body = await api<{ user: AuthUser }>("/api/core/auth/users", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return body.user;
 }
 
 export async function fetchApps(): Promise<AppInfo[]> {

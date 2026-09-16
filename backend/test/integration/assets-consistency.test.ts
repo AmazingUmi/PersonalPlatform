@@ -5,7 +5,7 @@ import { after, before, describe, it } from "node:test";
 import { Database } from "../../src/core/database/index.js";
 import assetsApp from "../../src/apps/assets/index.js";
 import type { Platform } from "../../src/core/platform.js";
-import { buildFixturePlatform } from "../helpers/platform.js";
+import { buildFixturePlatform, ensureTestAdmin, loginCookie } from "../helpers/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 import { multipartBody } from "../helpers/multipart.js";
 import { runMigrations } from "../../src/core/database/migrate.js";
@@ -28,9 +28,14 @@ let db: Database;
 let platform: Platform;
 let cleanup: () => void;
 let root: string;
+/** Owning user for user-scoped attachment storage (AUTH-4). */
+let adminId: string;
+/** Session cookie for the app APIs (every /api/apps/* route needs one). */
+let cookie: string;
 
 before(async () => {
   db = await resetDatabase();
+  adminId = await ensureTestAdmin(db);
   const fixture = await buildFixturePlatform({
     database: db,
     manifests: [{ id: "assets", migrations: assetsMigrations }],
@@ -39,6 +44,7 @@ before(async () => {
   platform = fixture.platform;
   cleanup = fixture.cleanup;
   root = fixture.root;
+  cookie = await loginCookie(platform);
   await runMigrations({
     databaseUrl: TEST_DATABASE_URL,
     targets: [{ scope: "assets", schema: "assets", dir: join(root, "apps", "assets", "migrations") }],
@@ -56,25 +62,34 @@ async function createItem(name: string): Promise<string> {
     method: "POST",
     url: "/api/apps/assets/items",
     payload: { name },
+    headers: { cookie },
   });
   assert.equal(response.statusCode, 201);
   return response.json().id as string;
 }
 
 function upload(itemId: string, filename: string, data: Buffer | string, contentType?: string) {
+  const body = multipartBody([{ name: "file", filename, contentType, data }]);
   return platform.app.inject({
     method: "POST",
     url: `/api/apps/assets/items/${itemId}/attachments`,
-    ...multipartBody([{ name: "file", filename, contentType, data }]),
+    payload: body.payload,
+    // Merge instead of spread-override: multipartBody sets the content-type.
+    headers: { ...body.headers, cookie },
   });
 }
 
 function attachmentFile(itemId: string, attachmentId: string): string {
-  return join(root, "storage", "apps", "assets", "attachments", itemId, attachmentId);
+  // AUTH-4: attachments live in the owner's user-scoped storage root.
+  return join(root, "storage", "users", adminId, "apps", "assets", "attachments", itemId, attachmentId);
 }
 
 async function reconcile(): Promise<{ queue: { processed: number; failed: number }; danglingDropped: number }> {
-  const response = await platform.app.inject({ method: "POST", url: "/api/apps/assets/maintenance/reconcile" });
+  const response = await platform.app.inject({
+    method: "POST",
+    url: "/api/apps/assets/maintenance/reconcile",
+    headers: { cookie },
+  });
   assert.equal(response.statusCode, 200);
   return response.json();
 }
@@ -101,7 +116,7 @@ describe("multipart upload validation (FP-12.2)", () => {
       method: "POST",
       url: `/api/apps/assets/items/${itemId}/attachments`,
       payload: { filename: "x.txt", dataBase64: "eA==" },
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", cookie },
     });
     // The multipart content-type parser rejects non-multipart bodies.
     assert.equal(response.statusCode, 406);
@@ -118,6 +133,7 @@ describe("multipart upload validation (FP-12.2)", () => {
     const list = await platform.app.inject({
       method: "GET",
       url: `/api/apps/assets/items/${itemId}/attachments`,
+      headers: { cookie },
     });
     const names = list.json().items.map((item: { filename: string }) => item.filename);
     assert.ok(!names.includes("big.bin"), "no metadata for rejected upload");
@@ -149,7 +165,7 @@ describe("upload compensation: DB failure after storage save (FP-12.1)", () => {
     for (const job of jobs.rows) {
       assert.equal(job.kind, "delete_storage");
       assert.equal(job.status, "done", "inline cleanup deleted the orphan");
-      assert.ok(!existsSync(join(root, "storage", "apps", "assets", job.storage_key)), "orphan file removed");
+      assert.ok(!existsSync(join(root, "storage", "users", adminId, "apps", "assets", job.storage_key)), "orphan file removed");
     }
 
     await db.context().query("ALTER TABLE assets.attachments DROP CONSTRAINT test_block_insert");
@@ -177,6 +193,7 @@ describe("delete compensation: DB failure after storage removal (FP-12.1)", () =
     const response = await platform.app.inject({
       method: "DELETE",
       url: `/api/apps/assets/items/${itemId}/attachments/${attachmentId}`,
+      headers: { cookie },
     });
     assert.equal(response.statusCode, 500, "metadata delete fails");
     assert.ok(!existsSync(attachmentFile(itemId, attachmentId)), "file already removed");
@@ -222,6 +239,7 @@ describe("reconciliation drops metadata whose file vanished (FP-12.1)", () => {
     const list = await platform.app.inject({
       method: "GET",
       url: `/api/apps/assets/items/${itemId}/attachments`,
+      headers: { cookie },
     });
     assert.equal(list.json().items.length, 0, "metadata for the lost file is gone");
   });
@@ -239,8 +257,9 @@ describe("cleanup job retry and failure observability (FP-12.1)", () => {
   it("marks permanently failing jobs as failed with the last error", async () => {
     const itemId = await createItem("Retry target");
     await db.context().query(
-      `INSERT INTO assets.cleanup_jobs (id, kind, storage_key, reason)
-       VALUES ('11111111-1111-4111-8111-111111111111', 'delete_storage', '../escape-attempt', 'test poison')`,
+      `INSERT INTO assets.cleanup_jobs (id, user_id, kind, storage_key, reason)
+       VALUES ('11111111-1111-4111-8111-111111111111', $1, 'delete_storage', '../escape-attempt', 'test poison')`,
+      [adminId],
     );
 
     for (let i = 0; i < 5; i += 1) {
@@ -256,12 +275,16 @@ describe("cleanup job retry and failure observability (FP-12.1)", () => {
     assert.match(job.rows[0]!.last_error ?? "", /traversal|invalid_path|storage/i);
 
     // The queue listing endpoint exposes it to operators.
-    const listed = await platform.app.inject({ method: "GET", url: "/api/apps/assets/maintenance/cleanup-jobs" });
+    const listed = await platform.app.inject({
+      method: "GET",
+      url: "/api/apps/assets/maintenance/cleanup-jobs",
+      headers: { cookie },
+    });
     assert.equal(listed.statusCode, 200);
     const poison = listed.json().items.find((item: { id: string }) => item.id === "11111111-1111-4111-8111-111111111111");
     assert.equal(poison.status, "failed");
 
     // Storage root stayed intact (the traversal key deleted nothing real).
-    assert.ok(existsSync(join(root, "storage", "apps", "assets", "attachments")));
+    assert.ok(existsSync(join(root, "storage", "users", adminId, "apps", "assets", "attachments")));
   });
 });

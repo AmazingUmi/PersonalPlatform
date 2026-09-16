@@ -14,7 +14,7 @@ import { scanApps } from "../../src/core/app-registry/scanner.js";
 import type { AppRecord } from "../../src/core/app-registry/types.js";
 import type { Platform } from "../../src/core/platform.js";
 import { backendAppModules, frontendAppIds } from "../../src/generated/apps.js";
-import { buildFixturePlatform } from "../helpers/platform.js";
+import { buildFixturePlatform, ensureTestAdmin, loginCookie } from "../helpers/platform.js";
 import { registerTestSchemas, resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 
 /**
@@ -78,11 +78,14 @@ registerTestSchemas(
 let db: Database;
 let platform: Platform;
 let cleanup: () => void;
+/** Session cookie for protected routes (AUTH-1); /api/core/platform stays public. */
+let cookie: string;
 
 before(async () => {
   // Mirror the main.ts startup path against the real repository: fresh core
   // schema, then core + every real app's migrations from apps/<id>/migrations.
   db = await resetDatabase();
+  await ensureTestAdmin(db);
   await runMigrations({
     databaseUrl: TEST_DATABASE_URL,
     targets: [coreMigrationTarget(repoRoot), ...(await appMigrationTargets(appsDir))],
@@ -107,6 +110,7 @@ before(async () => {
   });
   platform = fixture.platform;
   cleanup = fixture.cleanup;
+  cookie = await loginCookie(platform);
 });
 
 after(async () => {
@@ -119,7 +123,7 @@ after(async () => {
 
 /** App list exactly as an API client sees it. */
 async function coreApps(): Promise<AppRecord[]> {
-  const res = await platform.app.inject({ method: "GET", url: "/api/core/apps" });
+  const res = await platform.app.inject({ method: "GET", url: "/api/core/apps", headers: { cookie } });
   assert.equal(res.statusCode, 200);
   const body = res.json() as { items: AppRecord[] };
   assert.ok(Array.isArray(body.items) && body.items.length > 0, "registry must not be empty");
@@ -180,7 +184,7 @@ describe("App Contract V1: probe routes", () => {
       // applies as soon as the module exists.
       if (!app.hasBackend) continue;
       const route = probeRoute(app.id);
-      const res = await platform.app.inject({ method: "GET", url: route });
+      const res = await platform.app.inject({ method: "GET", url: route, headers: { cookie } });
       assert.equal(res.statusCode, 200, `GET ${route} for app "${app.id}"`);
     }
   });
@@ -215,11 +219,14 @@ describe("App Contract V1: lifecycle guard", () => {
       method: "PUT",
       url: `/api/core/apps/${target.id}/enabled`,
       payload: { enabled: false },
+      headers: { cookie },
     });
     assert.equal(disable.statusCode, 200);
     assert.equal(disable.json().status, "disabled");
 
     // Any /api/apps/<id>/* request for a non-enabled app answers 404 (doc 4.4).
+    // No cookie on purpose: the lifecycle guard runs before the auth guard,
+    // so a disabled app 404s even unauthenticated.
     const guarded = await platform.app.inject({ method: "GET", url: targetRoute });
     assert.equal(guarded.statusCode, 404);
     assert.equal(guarded.json().error.code, "not_found");
@@ -236,11 +243,12 @@ describe("App Contract V1: lifecycle guard", () => {
       method: "PUT",
       url: `/api/core/apps/${target.id}/enabled`,
       payload: { enabled: true },
+      headers: { cookie },
     });
     assert.equal(enable.statusCode, 200);
     assert.equal(enable.json().status, "enabled");
 
-    const restored = await platform.app.inject({ method: "GET", url: targetRoute });
+    const restored = await platform.app.inject({ method: "GET", url: targetRoute, headers: { cookie } });
     assert.equal(restored.statusCode, 200, "re-enable must restore the app API");
   });
 });

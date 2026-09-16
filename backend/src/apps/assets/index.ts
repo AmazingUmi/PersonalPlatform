@@ -48,6 +48,7 @@ interface CleanupJobRow {
   kind: "delete_storage" | "drop_dangling_attachment";
   storage_key: string | null;
   attachment_id: string | null;
+  user_id: string;
   reason: string;
   status: "pending" | "done" | "failed";
   attempts: number;
@@ -244,15 +245,28 @@ function parseCategoriesQuery(raw: string | undefined): string[] {
  * Replace an item's category set wholesale (PATCH categoryIds semantics:
  * absent = keep, [] = clear, non-empty list = replace). Must run inside the
  * same transaction as any item-field update so an FK failure rolls the whole
- * update back (notes replaceNoteTags precedent).
+ * update back (notes replaceNoteTags precedent). Only the user's OWN
+ * categories can be attached — a foreign user's category id is
+ * indistinguishable from a nonexistent one (422 category_not_found).
  */
-async function replaceItemCategories(tx: Db, itemId: string, categoryIds: string[]): Promise<void> {
+async function replaceItemCategories(
+  tx: Db,
+  userId: string,
+  itemId: string,
+  categoryIds: string[],
+): Promise<void> {
   await tx.query("DELETE FROM assets.item_categories WHERE item_id = $1", [itemId]);
   if (categoryIds.length > 0) {
-    await tx.query("INSERT INTO assets.item_categories (item_id, category_id) SELECT $1, unnest($2::uuid[])", [
-      itemId,
-      categoryIds,
-    ]);
+    const inserted = await tx.query(
+      `INSERT INTO assets.item_categories (item_id, category_id)
+       SELECT $1, id FROM assets.categories WHERE id = ANY($2::uuid[]) AND user_id = $3`,
+      [itemId, categoryIds, userId],
+    );
+    if ((inserted.rowCount ?? 0) !== categoryIds.length) {
+      throw new AppError(422, "category_not_found", "categoryIds reference categories that do not exist", {
+        categoryIds,
+      });
+    }
   }
 }
 
@@ -283,15 +297,18 @@ async function categoriesForItems(db: Db, itemIds: string[]): Promise<Map<string
   return map;
 }
 
-async function findItemView(db: Db, itemId: string): Promise<ItemView | null> {
-  const { rows } = await db.query<ItemRow>(`SELECT ${ITEM_COLUMNS} FROM assets.items WHERE id = $1`, [itemId]);
+async function findItemView(db: Db, userId: string, itemId: string): Promise<ItemView | null> {
+  const { rows } = await db.query<ItemRow>(
+    `SELECT ${ITEM_COLUMNS} FROM assets.items WHERE id = $1 AND user_id = $2`,
+    [itemId, userId],
+  );
   if (!rows[0]) return null;
   const categories = await categoriesForItems(db, [itemId]);
   return toItemView(rows[0], categories.get(itemId) ?? []);
 }
 
-async function requireItemView(db: Db, itemId: string): Promise<ItemView> {
-  const view = await findItemView(db, itemId);
+async function requireItemView(db: Db, userId: string, itemId: string): Promise<ItemView> {
+  const view = await findItemView(db, userId, itemId);
   if (!view) throw new AppError(404, "not_found", "item not found");
   return view;
 }
@@ -315,28 +332,31 @@ interface ItemQueryFilters {
  * (worklist §10): counts call it with an empty categoryIds so only the
  * categories facet drops out — the two WHERE clauses can never drift apart.
  * Every caller queries `FROM assets.items i`, so conditions may use the `i`
- * alias; ids and search terms only ever reach parameter slots.
+ * alias; ids and search terms only ever reach parameter slots. Ownership is
+ * the leading, always-present predicate (AUTH-3).
  */
 function itemConditions(
   filters: ItemQueryFilters,
   categoryIds: string[],
+  userId: string,
 ): { conditions: string[]; params: unknown[] } {
   const conditions: string[] = [];
-  const params: unknown[] = [];
+  const params: unknown[] = [userId];
+  conditions.push(`i.user_id = $1`);
   if (filters.q) {
     params.push(`%${filters.q}%`);
     // Search matches item name, description, or ANY assigned category name
-    // via the relation table (own schema only).
+    // via the relation table (own schema only; same-owner categories only).
     conditions.push(
       `(i.name ILIKE $${params.length} OR i.description ILIKE $${params.length} OR EXISTS (
          SELECT 1 FROM assets.item_categories ic
-         JOIN assets.categories c ON c.id = ic.category_id
+         JOIN assets.categories c ON c.id = ic.category_id AND c.user_id = i.user_id
          WHERE ic.item_id = i.id AND c.name ILIKE $${params.length}
        ))`,
     );
   }
   // Multi-category AND: one EXISTS per requested id (notes multi-tag style —
-  // no GROUP BY/HAVING needed).
+  // no GROUP BY/HAVING needed). A foreign user's category id matches nothing.
   for (const categoryId of categoryIds) {
     params.push(categoryId);
     conditions.push(
@@ -374,15 +394,18 @@ function whereClause(conditions: string[]): string {
  * Storage/DB consistency compensation (FP-12.1): a failed cross-store step
  * enqueues a retryable, idempotent cleanup job. Neither store can be "first"
  * safely — the queue absorbs the mismatch until both sides agree again.
+ * Since AUTH-4 every job carries its owning user: the storage scope of a
+ * storage_key resolves through user_id, never an implicit "current user".
  */
 async function enqueueCleanup(
   ctx: AppContext,
+  userId: string,
   job: Pick<CleanupJobRow, "kind" | "storage_key" | "attachment_id" | "reason">,
 ): Promise<void> {
   await ctx.database.query(
-    `INSERT INTO assets.cleanup_jobs (id, kind, storage_key, attachment_id, reason)
-     VALUES ($1, $2, $3, $4, $5)`,
-    [randomUUID(), job.kind, job.storage_key, job.attachment_id, job.reason],
+    `INSERT INTO assets.cleanup_jobs (id, user_id, kind, storage_key, attachment_id, reason)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [randomUUID(), userId, job.kind, job.storage_key, job.attachment_id, job.reason],
   );
 }
 
@@ -393,7 +416,7 @@ async function enqueueCleanup(
  */
 async function processCleanupQueue(ctx: AppContext): Promise<{ processed: number; failed: number }> {
   const { rows } = await ctx.database.query<CleanupJobRow>(
-    `SELECT id, kind, storage_key, attachment_id, reason, status, attempts, last_error, created_at, updated_at
+    `SELECT id, kind, storage_key, attachment_id, user_id, reason, status, attempts, last_error, created_at, updated_at
      FROM assets.cleanup_jobs WHERE status = 'pending' ORDER BY created_at LIMIT 100`,
   );
   let failed = 0;
@@ -401,10 +424,13 @@ async function processCleanupQueue(ctx: AppContext): Promise<{ processed: number
     try {
       if (job.kind === "delete_storage") {
         if (job.storage_key === null) throw new Error("delete_storage job without storage_key");
-        await ctx.storage.delete(job.storage_key);
+        await ctx.storage.forUser(job.user_id).delete(job.storage_key);
       } else {
         if (job.attachment_id === null) throw new Error("drop_dangling_attachment job without attachment_id");
-        await ctx.database.query("DELETE FROM assets.attachments WHERE id = $1", [job.attachment_id]);
+        await ctx.database.query(
+          "DELETE FROM assets.attachments WHERE id = $1 AND user_id = $2",
+          [job.attachment_id, job.user_id],
+        );
       }
       await ctx.database.query(
         "UPDATE assets.cleanup_jobs SET status = 'done', attempts = attempts + 1, last_error = NULL, updated_at = now() WHERE id = $1",
@@ -430,19 +456,20 @@ async function processCleanupQueue(ctx: AppContext): Promise<{ processed: number
 
 /**
  * Full reconciliation: work the queue, then drop metadata whose backing file
- * vanished (manual deletion, disk loss, crash between steps).
+ * vanished (manual deletion, disk loss, crash between steps). Every
+ * attachment is checked inside its OWNER's storage root (AUTH-4).
  */
 async function reconcileStorage(ctx: AppContext): Promise<{
   queue: { processed: number; failed: number };
   danglingDropped: number;
 }> {
   const queue = await processCleanupQueue(ctx);
-  const { rows } = await ctx.database.query<{ id: string; storage_key: string }>(
-    "SELECT id, storage_key FROM assets.attachments",
+  const { rows } = await ctx.database.query<{ id: string; storage_key: string; user_id: string }>(
+    "SELECT id, storage_key, user_id FROM assets.attachments",
   );
   let danglingDropped = 0;
   for (const attachment of rows) {
-    if (await ctx.storage.exists(attachment.storage_key)) continue;
+    if (await ctx.storage.forUser(attachment.user_id).exists(attachment.storage_key)) continue;
     await ctx.database.query("DELETE FROM assets.attachments WHERE id = $1", [attachment.id]);
     danglingDropped += 1;
     ctx.log.warn({ attachmentId: attachment.id }, "dropped attachment metadata with missing file");
@@ -453,9 +480,10 @@ async function reconcileStorage(ctx: AppContext): Promise<{
 /** Enqueue and immediately try to drain: most compensations succeed inline. */
 async function compensate(
   ctx: AppContext,
-  job: Parameters<typeof enqueueCleanup>[1],
+  userId: string,
+  job: Parameters<typeof enqueueCleanup>[2],
 ): Promise<void> {
-  await enqueueCleanup(ctx, job);
+  await enqueueCleanup(ctx, userId, job);
   await processCleanupQueue(ctx).catch((error: unknown) => {
     ctx.log.warn({ error, kind: job.kind }, "inline cleanup deferred to scheduler");
   });
@@ -472,9 +500,11 @@ function attachmentTooLarge(cause: unknown): never {
 async function registerApi(ctx: AppContext): Promise<void> {
   const db = ctx.database;
 
-  ctx.api.get("/categories", async () => {
+  ctx.api.get("/categories", async (request) => {
+    const user = await ctx.auth.requireUser(request);
     const { rows } = await db.query<CategoryRow>(
-      "SELECT id, name, color, created_at FROM assets.categories ORDER BY name",
+      "SELECT id, name, color, created_at FROM assets.categories WHERE user_id = $1 ORDER BY name",
+      [user.id],
     );
     return { items: rows.map(toCategoryView) };
   });
@@ -495,10 +525,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request, reply) => {
+      const user = await ctx.auth.requireUser(request);
       try {
         const { rows } = await db.query<CategoryRow>(
-          "INSERT INTO assets.categories (id, name, color) VALUES ($1, $2, $3) RETURNING id, name, color, created_at",
-          [randomUUID(), request.body.name, request.body.color ?? null],
+          "INSERT INTO assets.categories (id, user_id, name, color) VALUES ($1, $2, $3, $4) RETURNING id, name, color, created_at",
+          [randomUUID(), user.id, request.body.name, request.body.color ?? null],
         );
         if (!rows[0]) throw new AppError(500, "internal_error", "category row vanished after insert");
         return reply.code(201).send(toCategoryView(rows[0]));
@@ -527,9 +558,10 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request) => {
+      const user = await ctx.auth.requireUser(request);
       const body = request.body;
       const sets: string[] = [];
-      const params: unknown[] = [request.params.id];
+      const params: unknown[] = [request.params.id, user.id];
       if (body.name !== undefined) {
         params.push(body.name);
         sets.push(`name = $${params.length}`);
@@ -540,15 +572,15 @@ async function registerApi(ctx: AppContext): Promise<void> {
       }
       if (sets.length === 0) {
         const current = await db.query<CategoryRow>(
-          "SELECT id, name, color, created_at FROM assets.categories WHERE id = $1",
-          [request.params.id],
+          "SELECT id, name, color, created_at FROM assets.categories WHERE id = $1 AND user_id = $2",
+          [request.params.id, user.id],
         );
         if (!current.rows[0]) throw new AppError(404, "not_found", "category not found");
         return toCategoryView(current.rows[0]);
       }
       try {
         const { rows } = await db.query<CategoryRow>(
-          `UPDATE assets.categories SET ${sets.join(", ")} WHERE id = $1 RETURNING id, name, color, created_at`,
+          `UPDATE assets.categories SET ${sets.join(", ")} WHERE id = $1 AND user_id = $2 RETURNING id, name, color, created_at`,
           params,
         );
         if (!rows[0]) throw new AppError(404, "not_found", "category not found");
@@ -566,7 +598,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
   // away (ON DELETE CASCADE), so each item only loses this one category —
   // items with no other category become uncategorized.
   ctx.api.delete<{ Params: { id: string } }>("/categories/:id", async (request, reply) => {
-    const result = await db.query("DELETE FROM assets.categories WHERE id = $1", [request.params.id]);
+    const user = await ctx.auth.requireUser(request);
+    const result = await db.query("DELETE FROM assets.categories WHERE id = $1 AND user_id = $2", [
+      request.params.id,
+      user.id,
+    ]);
     if (result.rowCount === 0) throw new AppError(404, "not_found", "category not found");
     return reply.code(204).send();
   });
@@ -594,9 +630,10 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request) => {
+      const user = await ctx.auth.requireUser(request);
       const query = request.query;
       const categoryFilter = parseCategoriesQuery(query.categories);
-      const { conditions, params } = itemConditions(query, categoryFilter);
+      const { conditions, params } = itemConditions(query, categoryFilter, user.id);
 
       const sortColumn = ITEM_SORT_COLUMNS[query.sortBy ?? "createdAt"] ?? "created_at";
       const direction = query.order === "asc" ? "ASC" : "DESC";
@@ -616,7 +653,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       // category (the relation PK keeps each count duplicate-free). Same
       // builder as the items query, minus the categories conditions, so the
       // two can never drift apart.
-      const facet = itemConditions(query, []);
+      const facet = itemConditions(query, [], user.id);
       const facetWhere = whereClause(facet.conditions);
       const all = await db.query<{ count: number }>(
         `SELECT count(*)::int AS count FROM assets.items i ${facetWhere}`,
@@ -630,8 +667,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
          GROUP BY ic.category_id`,
         facet.params,
       );
-      // Every existing category is present, including those matching zero items.
-      const existing = await db.query<{ id: string }>("SELECT id FROM assets.categories");
+      // Every existing category of THIS user is present, including zero-item ones.
+      const existing = await db.query<{ id: string }>(
+        "SELECT id FROM assets.categories WHERE user_id = $1",
+        [user.id],
+      );
       const categoryCounts: Record<string, number> = {};
       for (const category of existing.rows) categoryCounts[category.id] = 0;
       for (const row of byCategory.rows) categoryCounts[row.category_id] = row.count;
@@ -665,6 +705,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request, reply) => {
+      const user = await ctx.auth.requireUser(request);
       const b = request.body;
       const categoryIds = dedupeCategoryIds(b.categoryIds ?? []);
       assertValidCategoryIds(categoryIds);
@@ -672,11 +713,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
       try {
         await ctx.database.withTransaction(async (tx) => {
           await tx.query(
-            `INSERT INTO assets.items (id, name, description, quantity, acquired_at, target_location)
-             VALUES ($1, $2, $3, $4, $5, $6)`,
-            [newId, b.name, b.description ?? null, b.quantity ?? 1, b.acquiredAt ?? null, b.targetLocation ?? null],
+            `INSERT INTO assets.items (id, user_id, name, description, quantity, acquired_at, target_location)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [newId, user.id, b.name, b.description ?? null, b.quantity ?? 1, b.acquiredAt ?? null, b.targetLocation ?? null],
           );
-          await replaceItemCategories(tx, newId, categoryIds);
+          await replaceItemCategories(tx, user.id, newId, categoryIds);
         });
       } catch (error) {
         if (isForeignKeyViolation(error)) throw categoryNotFoundError(categoryIds);
@@ -684,13 +725,18 @@ async function registerApi(ctx: AppContext): Promise<void> {
       }
       // The create transaction has committed — publish only now so the event
       // reflects persisted state (focus/notes "events after commit" precedent).
-      ctx.events.publish("assets.item.created.v2", { id: newId, name: b.name, categoryIds }, "assets");
-      return reply.code(201).send(await requireItemView(db, newId));
+      ctx.events.publish(
+        "assets.item.created.v2",
+        { userId: user.id, id: newId, name: b.name, categoryIds },
+        "assets",
+      );
+      return reply.code(201).send(await requireItemView(db, user.id, newId));
     },
   );
 
   ctx.api.get<{ Params: { id: string } }>("/items/:id", async (request) => {
-    return requireItemView(db, request.params.id);
+    const user = await ctx.auth.requireUser(request);
+    return requireItemView(db, user.id, request.params.id);
   });
 
   // Partial update with real nullable semantics (FP-2B.1): a missing property
@@ -716,6 +762,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request) => {
+      const user = await ctx.auth.requireUser(request);
       const body = request.body as Record<string, unknown>;
       const columns: Array<[string, string]> = [
         ["name", "name"],
@@ -725,7 +772,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
         ["targetLocation", "target_location"],
       ];
       const sets: string[] = [];
-      const params: unknown[] = [request.params.id];
+      const params: unknown[] = [request.params.id, user.id];
       for (const [key, column] of columns) {
         if (!(key in body)) continue;
         params.push(body[key]);
@@ -736,7 +783,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       if (replaceCategories) assertValidCategoryIds(categoryIds);
 
       if (sets.length === 0 && !replaceCategories) {
-        return requireItemView(db, request.params.id);
+        return requireItemView(db, user.id, request.params.id);
       }
 
       try {
@@ -744,43 +791,48 @@ async function registerApi(ctx: AppContext): Promise<void> {
           if (sets.length > 0) {
             sets.push("updated_at = now()");
             const updated = await tx.query(
-              `UPDATE assets.items SET ${sets.join(", ")} WHERE id = $1 RETURNING id`,
+              `UPDATE assets.items SET ${sets.join(", ")} WHERE id = $1 AND user_id = $2 RETURNING id`,
               params,
             );
             if (!updated.rows[0]) throw new AppError(404, "not_found", "item not found");
           } else {
-            const exists = await tx.query("SELECT id FROM assets.items WHERE id = $1", [request.params.id]);
+            const exists = await tx.query("SELECT id FROM assets.items WHERE id = $1 AND user_id = $2", [
+              request.params.id,
+              user.id,
+            ]);
             if (!exists.rows[0]) throw new AppError(404, "not_found", "item not found");
           }
-          if (replaceCategories) await replaceItemCategories(tx, request.params.id, categoryIds);
+          if (replaceCategories) await replaceItemCategories(tx, user.id, request.params.id, categoryIds);
         });
       } catch (error) {
         if (isForeignKeyViolation(error)) throw categoryNotFoundError(categoryIds);
         throw error;
       }
-      return requireItemView(db, request.params.id);
+      return requireItemView(db, user.id, request.params.id);
     },
   );
 
   ctx.api.delete<{ Params: { id: string } }>("/items/:id", async (request, reply) => {
+    const user = await ctx.auth.requireUser(request);
     // Collect attachment metadata first, remove the physical objects, then
     // drop the row. Storage failures abort with metadata intact. If the DB
     // delete fails after files are gone, the dangling metadata rows are
-    // enqueued for compensation (FP-12.1).
+    // enqueued for compensation (FP-12.1). All file operations run inside
+    // the OWNER's storage root (AUTH-4).
     const attachments = await db.query<AttachmentRow>(
-      "SELECT id, item_id, filename, content_type, size, storage_key, created_at FROM assets.attachments WHERE item_id = $1",
-      [request.params.id],
+      "SELECT id, item_id, filename, content_type, size, storage_key, created_at FROM assets.attachments WHERE item_id = $1 AND user_id = $2",
+      [request.params.id, user.id],
     );
     const deletedFiles: AttachmentRow[] = [];
     for (const row of attachments.rows) {
       try {
-        await ctx.storage.delete(row.storage_key);
+        await ctx.storage.forUser(user.id).delete(row.storage_key);
         deletedFiles.push(row);
       } catch (error) {
         // Files already removed above must not keep dangling metadata, but
         // the row stays (the item delete aborted), so enqueue the drop.
         for (const done of deletedFiles) {
-          await compensate(ctx, {
+          await compensate(ctx, user.id, {
             kind: "drop_dangling_attachment",
             storage_key: null,
             attachment_id: done.id,
@@ -791,13 +843,16 @@ async function registerApi(ctx: AppContext): Promise<void> {
       }
     }
     try {
-      const result = await db.query("DELETE FROM assets.items WHERE id = $1", [request.params.id]);
+      const result = await db.query("DELETE FROM assets.items WHERE id = $1 AND user_id = $2", [
+        request.params.id,
+        user.id,
+      ]);
       if (result.rowCount === 0) throw new AppError(404, "not_found", "item not found");
     } catch (error) {
       if (error instanceof AppError) throw error;
       // Files are gone but the row remains: queue metadata drops.
       for (const done of deletedFiles) {
-        await compensate(ctx, {
+        await compensate(ctx, user.id, {
           kind: "drop_dangling_attachment",
           storage_key: null,
           attachment_id: done.id,
@@ -817,7 +872,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
   ctx.api.post<{ Params: { id: string } }>(
     "/items/:id/attachments",
     async (request, reply) => {
-      const item = await db.query<ItemRow>("SELECT id FROM assets.items WHERE id = $1", [request.params.id]);
+      const user = await ctx.auth.requireUser(request);
+      const item = await db.query<ItemRow>(
+        "SELECT id FROM assets.items WHERE id = $1 AND user_id = $2",
+        [request.params.id, user.id],
+      );
       if (!item.rows[0]) throw new AppError(404, "not_found", "item not found");
 
       // The plugin may abort an oversized part while opening or draining it.
@@ -843,20 +902,22 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
       const attachmentId = randomUUID();
       const storageKey = `attachments/${request.params.id}/${attachmentId}`;
-      await ctx.storage.save(storageKey, data);
+      // User-owned data lands inside the OWNER's storage root (AUTH-4);
+      // guessing ids or keys cannot cross into another user's tree.
+      await ctx.storage.forUser(user.id).save(storageKey, data);
       try {
         const { rows } = await db.query<AttachmentViewRow>(
-          `INSERT INTO assets.attachments (id, item_id, filename, content_type, size, storage_key)
-           VALUES ($1, $2, $3, $4, $5, $6)
+          `INSERT INTO assets.attachments (id, user_id, item_id, filename, content_type, size, storage_key)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
            RETURNING id, item_id, filename, content_type, size, created_at`,
-          [attachmentId, request.params.id, filename, file.mimetype || null, data.length, storageKey],
+          [attachmentId, user.id, request.params.id, filename, file.mimetype || null, data.length, storageKey],
         );
         if (!rows[0]) throw new Error("attachment metadata row vanished after insert");
         return reply.code(201).send(toAttachmentView(rows[0]));
       } catch (error) {
         // DB failed after the file landed: compensate so no orphan remains
         // (enqueued + inline best-effort, hourly scheduler as backstop).
-        await compensate(ctx, {
+        await compensate(ctx, user.id, {
           kind: "delete_storage",
           storage_key: storageKey,
           attachment_id: null,
@@ -868,9 +929,16 @@ async function registerApi(ctx: AppContext): Promise<void> {
   );
 
   ctx.api.get<{ Params: { id: string } }>("/items/:id/attachments", async (request) => {
+    const user = await ctx.auth.requireUser(request);
+    // Foreign items answer 404 like GET /items/:id (no existence leak).
+    const item = await db.query<{ id: string }>("SELECT id FROM assets.items WHERE id = $1 AND user_id = $2", [
+      request.params.id,
+      user.id,
+    ]);
+    if (!item.rows[0]) throw new AppError(404, "not_found", "item not found");
     const { rows } = await db.query<AttachmentViewRow>(
-      "SELECT id, item_id, filename, content_type, size, created_at FROM assets.attachments WHERE item_id = $1 ORDER BY created_at",
-      [request.params.id],
+      "SELECT id, item_id, filename, content_type, size, created_at FROM assets.attachments WHERE item_id = $1 AND user_id = $2 ORDER BY created_at",
+      [request.params.id, user.id],
     );
     return { items: rows.map(toAttachmentView) };
   });
@@ -878,12 +946,13 @@ async function registerApi(ctx: AppContext): Promise<void> {
   ctx.api.get<{ Params: { id: string; attachmentId: string } }>(
     "/items/:id/attachments/:attachmentId",
     async (request, reply) => {
+      const user = await ctx.auth.requireUser(request);
       const { rows } = await db.query<{ storage_key: string; filename: string; content_type: string | null }>(
-        "SELECT storage_key, filename, content_type FROM assets.attachments WHERE id = $1 AND item_id = $2",
-        [request.params.attachmentId, request.params.id],
+        "SELECT storage_key, filename, content_type FROM assets.attachments WHERE id = $1 AND item_id = $2 AND user_id = $3",
+        [request.params.attachmentId, request.params.id, user.id],
       );
       if (!rows[0]) throw new AppError(404, "not_found", "attachment not found");
-      const data = await ctx.storage.read(rows[0].storage_key);
+      const data = await ctx.storage.forUser(user.id).read(rows[0].storage_key);
       const safeFilename = rows[0].filename.replace(/[\r\n"]/g, "_");
       return reply
         .type(rows[0].content_type ?? "application/octet-stream")
@@ -898,16 +967,20 @@ async function registerApi(ctx: AppContext): Promise<void> {
   ctx.api.delete<{ Params: { id: string; attachmentId: string } }>(
     "/items/:id/attachments/:attachmentId",
     async (request, reply) => {
+      const user = await ctx.auth.requireUser(request);
       const { rows } = await db.query<{ id: string; storage_key: string }>(
-        "SELECT id, storage_key FROM assets.attachments WHERE id = $1 AND item_id = $2",
-        [request.params.attachmentId, request.params.id],
+        "SELECT id, storage_key FROM assets.attachments WHERE id = $1 AND item_id = $2 AND user_id = $3",
+        [request.params.attachmentId, request.params.id, user.id],
       );
       if (!rows[0]) throw new AppError(404, "not_found", "attachment not found");
-      await ctx.storage.delete(rows[0].storage_key);
+      await ctx.storage.forUser(user.id).delete(rows[0].storage_key);
       try {
-        await db.query("DELETE FROM assets.attachments WHERE id = $1", [request.params.attachmentId]);
+        await db.query("DELETE FROM assets.attachments WHERE id = $1 AND user_id = $2", [
+          request.params.attachmentId,
+          user.id,
+        ]);
       } catch (error) {
-        await compensate(ctx, {
+        await compensate(ctx, user.id, {
           kind: "drop_dangling_attachment",
           storage_key: null,
           attachment_id: rows[0].id,
@@ -919,10 +992,15 @@ async function registerApi(ctx: AppContext): Promise<void> {
     },
   );
 
-  ctx.api.get("/summary", async () => {
-    const items = await db.query<{ count: string }>("SELECT count(*)::text AS count FROM assets.items");
+  ctx.api.get("/summary", async (request) => {
+    const user = await ctx.auth.requireUser(request);
+    const items = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM assets.items WHERE user_id = $1",
+      [user.id],
+    );
     const categories = await db.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM assets.categories",
+      "SELECT count(*)::text AS count FROM assets.categories WHERE user_id = $1",
+      [user.id],
     );
     return {
       items: Number(items.rows[0]?.count ?? 0),
@@ -932,19 +1010,26 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
   // Operator surface for the consistency machinery: run reconciliation on
   // demand and observe the queue (also used by integration tests).
-  ctx.api.post("/maintenance/reconcile", async () => {
+  // Admin-only: it sweeps every user's queue state.
+  ctx.api.post("/maintenance/reconcile", async (request) => {
+    await ctx.auth.requireRole(request, "admin");
     return reconcileStorage(ctx);
   });
-  ctx.api.get("/maintenance/cleanup-jobs", async () => {
+  ctx.api.get("/maintenance/cleanup-jobs", async (request) => {
+    const user = await ctx.auth.requireUser(request);
     const { rows } = await db.query<CleanupJobRow>(
-      `SELECT id, kind, storage_key, attachment_id, reason, status, attempts, last_error, created_at, updated_at
-       FROM assets.cleanup_jobs ORDER BY created_at DESC LIMIT 100`,
+      `SELECT id, kind, storage_key, attachment_id, user_id, reason, status, attempts, last_error, created_at, updated_at
+       FROM assets.cleanup_jobs WHERE user_id = $1 ORDER BY created_at DESC LIMIT 100`,
+      [user.id],
     );
     return { items: rows.map(toCleanupJobView) };
   });
 }
 
 async function registerJobs(ctx: AppContext): Promise<JobHandle[]> {
+  // Platform-level sweep with explicit per-row ownership (AUTH-GATE-06):
+  // every queue entry and attachment carries its user_id, and every file
+  // operation resolves the scope through forUser(user_id).
   const reconcile = async () => {
     const result = await reconcileStorage(ctx);
     if (result.queue.processed > 0 || result.danglingDropped > 0) {

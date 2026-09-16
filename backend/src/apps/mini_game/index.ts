@@ -53,10 +53,11 @@ function toSave(row: SaveRow) {
 async function registerApi(ctx: AppContext): Promise<void> {
   const db = ctx.database;
 
-  ctx.api.get("/saves", async () => {
+  ctx.api.get("/saves", async (request) => {
+    const user = await ctx.auth.requireUser(request);
     const { rows } = await db.query<SaveRow>(
-      "SELECT id, score, high_score, board, revision, updated_at FROM mini_game.saves WHERE id = $1",
-      [SAVE_ID],
+      "SELECT id, score, high_score, board, revision, updated_at FROM mini_game.saves WHERE id = $1 AND user_id = $2",
+      [SAVE_ID, user.id],
     );
     // Defensive read (FP-13.2): a poisoned/stale row is reported as "no save"
     // instead of feeding the client a broken board.
@@ -81,6 +82,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request) => {
+      const user = await ctx.auth.requireUser(request);
       const body = request.body;
 
       // Business validation on top of the JSON shape (FP-13.2): shape errors
@@ -98,15 +100,16 @@ async function registerApi(ctx: AppContext): Promise<void> {
       // revision) is rejected so rapid overlapping saves can never roll the
       // board back to an older state (FP-2A.4). The row lock makes the
       // previous-high-score read and the upsert atomic for concurrent moves.
+      // The save slot is per-user (AUTH-3): (user_id, id) is the conflict key.
       const { row, prevHigh, existed } = await db.withTransaction(async (tx) => {
         const prev = await tx.query<{ high_score: number }>(
-          "SELECT high_score FROM mini_game.saves WHERE id = $1 FOR UPDATE",
-          [SAVE_ID],
+          "SELECT high_score FROM mini_game.saves WHERE id = $1 AND user_id = $2 FOR UPDATE",
+          [SAVE_ID, user.id],
         );
         const { rows } = await tx.query<SaveRow>(
-          `INSERT INTO mini_game.saves (id, score, high_score, board, revision, updated_at)
-           VALUES ($1, $2, $2, $3::jsonb, $4, now())
-           ON CONFLICT (id) DO UPDATE
+          `INSERT INTO mini_game.saves (id, user_id, score, high_score, board, revision, updated_at)
+           VALUES ($1, $2, $3, $3, $4::jsonb, $5, now())
+           ON CONFLICT (user_id, id) DO UPDATE
              SET score = EXCLUDED.score,
                  high_score = GREATEST(mini_game.saves.high_score, EXCLUDED.score),
                  board = EXCLUDED.board,
@@ -114,7 +117,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
                  updated_at = now()
            WHERE mini_game.saves.revision < EXCLUDED.revision
            RETURNING id, score, high_score, board, revision, updated_at`,
-          [SAVE_ID, body.score, JSON.stringify(body.board), body.revision],
+          [SAVE_ID, user.id, body.score, JSON.stringify(body.board), body.revision],
         );
         return {
           row: rows[0],
@@ -128,8 +131,8 @@ async function registerApi(ctx: AppContext): Promise<void> {
       // (idempotent no-op); return the authoritative server state.
       if (!row) {
         const existing = await db.query<SaveRow>(
-          "SELECT id, score, high_score, board, revision, updated_at FROM mini_game.saves WHERE id = $1",
-          [SAVE_ID],
+          "SELECT id, score, high_score, board, revision, updated_at FROM mini_game.saves WHERE id = $1 AND user_id = $2",
+          [SAVE_ID, user.id],
         );
         if (!existing.rows[0]) throw new AppError(500, "save_failed", "save state could not be read back");
         return { save: toSave(existing.rows[0]), accepted: false };
@@ -141,7 +144,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       if (existed && body.score > (prevHigh ?? 0)) {
         ctx.events.publish(
           "mini_game.highscore.beaten.v1",
-          { score: row.high_score, previous: prevHigh },
+          { userId: user.id, score: row.high_score, previous: prevHigh },
           "mini_game",
         );
       }
@@ -149,12 +152,13 @@ async function registerApi(ctx: AppContext): Promise<void> {
     },
   );
 
-  ctx.api.get("/summary", async () => {
+  ctx.api.get("/summary", async (request) => {
+    const user = await ctx.auth.requireUser(request);
     // The dashboard widget must show the HISTORICAL high score, not the
     // current run's score (FP-2A.3).
     const { rows } = await db.query<{ high_score: number }>(
-      "SELECT high_score FROM mini_game.saves WHERE id = $1",
-      [SAVE_ID],
+      "SELECT high_score FROM mini_game.saves WHERE id = $1 AND user_id = $2",
+      [SAVE_ID, user.id],
     );
     return { highScore: rows[0]?.high_score ?? 0 };
   });

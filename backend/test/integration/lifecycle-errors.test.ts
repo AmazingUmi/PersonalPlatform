@@ -8,7 +8,7 @@ import { runMigrations } from "../../src/core/database/migrate.js";
 import { appMigrationTargets } from "../../src/core/database/startup-migrations.js";
 import type { BackendAppModule } from "../../src/core/app-registry/types.js";
 import type { Platform } from "../../src/core/platform.js";
-import { buildFixturePlatform, prepareFixtureRoot } from "../helpers/platform.js";
+import { buildFixturePlatform, ensureTestAdmin, loginCookie, prepareFixtureRoot } from "../helpers/platform.js";
 import { registerTestSchemas, resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 
 // The migration-lifecycle suite below creates the "latecol" schema; registering
@@ -86,9 +86,11 @@ const RECORDS_MIGRATION =
 describe("app migration lifecycle (FP-1.1)", () => {
   let fixture: Fixture;
   let db: Database;
+  let cookie: string;
 
   before(async () => {
     db = await resetDatabase();
+    await ensureTestAdmin(db);
     const mod: BackendAppModule = {
       id: "latecol",
       async registerApi(ctx) {
@@ -107,6 +109,7 @@ describe("app migration lifecycle (FP-1.1)", () => {
       [{ id: "latecol", yaml: manifestYaml("latecol", false), migrations: [RECORDS_MIGRATION] }],
       { latecol: mod },
     );
+    cookie = await loginCookie(fixture.platform);
   });
 
   after(async () => {
@@ -127,6 +130,8 @@ describe("app migration lifecycle (FP-1.1)", () => {
   });
 
   it("keeps the business API unavailable while disabled", async () => {
+    // No cookie on purpose: the lifecycle guard runs before the auth guard,
+    // so a disabled app 404s even unauthenticated.
     const data = await fixture.platform.app.inject({ method: "GET", url: "/api/apps/latecol/data" });
     assert.equal(data.statusCode, 404);
   });
@@ -142,6 +147,7 @@ describe("app migration lifecycle (FP-1.1)", () => {
       method: "PUT",
       url: "/api/core/apps/latecol/enabled",
       payload: { enabled: true },
+      headers: { cookie },
     });
     assert.equal(enabled.statusCode, 200);
     assert.equal(enabled.json().status, "enabled");
@@ -154,7 +160,11 @@ describe("app migration lifecycle (FP-1.1)", () => {
       "pending migration applied during runtime enable",
     );
 
-    const data = await fixture.platform.app.inject({ method: "GET", url: "/api/apps/latecol/data" });
+    const data = await fixture.platform.app.inject({
+      method: "GET",
+      url: "/api/apps/latecol/data",
+      headers: { cookie },
+    });
     assert.equal(data.statusCode, 200);
   });
 });
@@ -162,10 +172,12 @@ describe("app migration lifecycle (FP-1.1)", () => {
 describe("activation failure state consistency (FP-1.2)", () => {
   let fixture: Fixture;
   let db: Database;
+  let cookie: string;
   let eventsShouldFail = true;
 
   before(async () => {
     db = await resetDatabase();
+    await ensureTestAdmin(db);
 
     const flakyEvents: BackendAppModule = {
       id: "flaky",
@@ -196,6 +208,7 @@ describe("activation failure state consistency (FP-1.2)", () => {
       ],
       { flaky: flakyEvents, jobsapp: brokenJobs },
     );
+    cookie = await loginCookie(fixture.platform);
   });
 
   after(async () => {
@@ -219,7 +232,11 @@ describe("activation failure state consistency (FP-1.2)", () => {
   }
 
   it("registerEvents failure: API reports error with enabled=true (intent preserved)", async () => {
-    const list = await fixture.platform.app.inject({ method: "GET", url: "/api/core/apps" });
+    const list = await fixture.platform.app.inject({
+      method: "GET",
+      url: "/api/core/apps",
+      headers: { cookie },
+    });
     const flaky = list.json().items.find((item: { id: string }) => item.id === "flaky");
     assert.equal(flaky.status, "error");
     assert.equal(flaky.enabled, true, "user intent stays enabled=true on activation failure");
@@ -234,7 +251,11 @@ describe("activation failure state consistency (FP-1.2)", () => {
   });
 
   it("registerJobs failure: same consistent error state", async () => {
-    const list = await fixture.platform.app.inject({ method: "GET", url: "/api/core/apps" });
+    const list = await fixture.platform.app.inject({
+      method: "GET",
+      url: "/api/core/apps",
+      headers: { cookie },
+    });
     const jobsapp = list.json().items.find((item: { id: string }) => item.id === "jobsapp");
     assert.equal(jobsapp.status, "error");
     assert.equal(jobsapp.enabled, true);
@@ -250,6 +271,7 @@ describe("activation failure state consistency (FP-1.2)", () => {
       method: "PUT",
       url: "/api/core/apps/flaky/enabled",
       payload: { enabled: false },
+      headers: { cookie },
     });
     assert.equal(updated.statusCode, 200);
     assert.equal(updated.json().status, "disabled");
@@ -268,12 +290,17 @@ describe("activation failure state consistency (FP-1.2)", () => {
       method: "PUT",
       url: "/api/core/apps/flaky/enabled",
       payload: { enabled: true },
+      headers: { cookie },
     });
     assert.equal(updated.statusCode, 200);
     assert.equal(updated.json().status, "enabled");
     assert.equal(updated.json().errorMessage, undefined);
 
-    const api = await fixture.platform.app.inject({ method: "GET", url: "/api/apps/flaky/ping" });
+    const api = await fixture.platform.app.inject({
+      method: "GET",
+      url: "/api/apps/flaky/ping",
+      headers: { cookie },
+    });
     assert.equal(api.statusCode, 200);
 
     const row = await readAppRow("flaky");
@@ -287,6 +314,7 @@ describe("activation failure state consistency (FP-1.2)", () => {
       method: "PUT",
       url: "/api/core/apps/flaky/enabled",
       payload: { enabled: true },
+      headers: { cookie },
     });
     assert.equal(updated.statusCode, 200);
     const body = updated.json();

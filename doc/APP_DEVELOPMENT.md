@@ -4,7 +4,7 @@ The authoritative reference for building Apps on Personal Platform: manifest, re
 
 ## Overview
 
-Personal Platform is a single-user, self-hosted monolith. An **App** is a vertically sliced feature (tasks, assets, mini game, …) that plugs into the platform at three places sharing one id:
+Personal Platform is a self-hosted monolith with session authentication and per-user data isolation as Core capabilities (see [Users and ownership](#users-and-ownership)). An **App** is a vertically sliced feature (tasks, assets, mini game, …) that plugs into the platform at three places sharing one id:
 
 | Location | Contents | Load mechanism |
 |---|---|---|
@@ -148,10 +148,11 @@ interface BackendAppModule {
 | `log` | Child logger tagged `{ app: appId }` |
 | `api` | Fastify instance already scoped to `/api/apps/<id>`, behind the lifecycle guard |
 | `database` | `DatabaseContext`: `query(text, params)` and `withTransaction(fn)` (`backend/src/core/database/index.ts`) |
-| `storage` | Local storage driver rooted at `<storageRoot>/apps/<appId>` (`backend/src/core/storage/local.ts`) |
+| `storage` | Local storage driver rooted at `<storageRoot>/apps/<appId>`; `forUser(userId)` returns a driver rooted at `<storageRoot>/users/<userId>/apps/<appId>` for user-owned files such as attachments (`backend/src/core/storage/local.ts`) |
 | `events` | App-scoped event bus facade (`backend/src/core/events/index.ts`) |
 | `scheduler` | App-scoped scheduler facade (`backend/src/core/scheduler/index.ts`) |
 | `time` | Platform time service (`backend/src/core/time/index.ts`) |
+| `auth` | Request identity (`backend/src/core/auth/`): `user`/`requireUser`/`requireRole` — always available like `api`/`log`/`time`; apps never touch cookies or `core.sessions` |
 
 Contexts are built by `createAppContext` in `backend/src/core/app-registry/context.ts`.
 
@@ -185,13 +186,14 @@ A service the manifest does not declare is still present on the context (uniform
 - PostgreSQL constraint violations are mapped by hand at the call site — precedent: unique violation `23505` → `422 category_name_taken` in `backend/src/apps/assets/index.ts`. Keep these mappings explicit and give them stable codes.
 - Method and shape conventions (mirrored in [`DEVELOPMENT.md`](DEVELOPMENT.md)): lists are `{ items: [...] }`, updates use PATCH, nullable semantics are absent = keep / explicit `null` = clear / value = update, `sortBy` goes through an in-code allowlist that maps to column names (never interpolate request values into SQL), DATE crosses the API as `YYYY-MM-DD`, timestamptz as ISO UTC.
 - Response casing: the DB layer speaks snake_case; the response layer converts. New apps should return camelCase at the view boundary — precedent: `toSave(row)` in `backend/src/apps/mini_game/index.ts` mapping `high_score`/`updated_at` to `highScore`/`updatedAt`.
-- App APIs are always under `/api/apps/<id>` and always behind the lifecycle guard — no auth layer exists in V1 because the platform is single-user self-hosted.
+- App APIs are always under `/api/apps/<id>` and sit behind two Core guards, in order: the **lifecycle guard** first (404 for any app whose status is not `enabled`), then the **auth guard** (401 for unauthenticated requests). Handlers obtain the request's user via `ctx.auth.requireUser(request)` — apps never read cookies or touch `core.sessions` (see [Users and ownership](#users-and-ownership)).
 
 ## Events
 
 `ctx.events.publish(type, payload, source)` / `ctx.events.subscribe(type, handler)` — the in-process bus in `backend/src/core/events/index.ts`.
 
 - Event type names are **enforced**: `<app_id>.<entity>.<action>.v<N>`. Publishing anything else throws immediately (examples in the wild: `tasks.task.completed.v1`, `assets.item.created.v1`).
+- Payload evolution rule: **additive** fields are allowed within an existing `.vN`; renames, removals, or semantic changes to existing fields require a new `.vN`. (The multi-user batch added `userId` to user-data events additively, on the existing `.v1`/`.v2` names — consumers that ignore the new field keep working.)
 - Semantics: purely in-process, asynchronous handlers, no persistence, no replay, at-most-once observer isolation (a failing subscriber is logged, the publisher is unaffected). Treat events as notifications, not as a data pipeline.
 - Subscribing requires the `events` capability and belongs in `registerEvents`: subscriptions made through the app facade are owner-tagged with the appId so Core can reclaim them wholesale on disable/re-enable — even when a previous activation threw halfway.
 
@@ -233,12 +235,71 @@ Statically enforced by `backend/test/unit/isolation.test.ts`, which scans every 
 
 Write to your own schema, read platform state only through Core APIs. These rules are what keeps apps independently enable/disable-able.
 
+## Users and ownership
+
+The platform is multi-user: authentication and sessions are Core-only (`backend/src/core/auth/`), and **every business row an app stores is owned by exactly one user**. App routes sit behind the Core auth guard (lifecycle guard first, then 401 for unauthenticated requests); there is no implicit "current user" outside a request.
+
+### Identity in handlers
+
+Apps read the request-scoped identity through `ctx.auth` — never cookies, never `core.sessions`:
+
+```ts
+// On an app route the auth guard has already run, so requireUser cannot fail
+// in practice; it exists for type-safety and defense in depth.
+const user = await ctx.auth.requireUser(request); // { id, username, displayName, role }
+```
+
+### User-owned table recipe
+
+Every business table carries `user_id uuid NOT NULL REFERENCES core.users(id) ON DELETE CASCADE`. For a **new** table, declare it inline; for an **existing single-user table**, upgrade it with the backfill-to-bootstrap pattern (this is how the six shipped apps migrated — precedent: `apps/tasks/migrations/20260916100000-user-ownership.sql`):
+
+```sql
+ALTER TABLE items ADD COLUMN user_id uuid;
+
+-- Backfill to the bootstrap user (core.users is seeded with exactly one
+-- placeholder admin before app migrations run).
+UPDATE items SET user_id = (SELECT id FROM core.users ORDER BY created_at, id LIMIT 1);
+
+-- Fail loudly if any row would stay NULL: a silent NULL owner is data loss.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM items WHERE user_id IS NULL) THEN
+    RAISE EXCEPTION 'items ownership backfill failed: no core.users row to own existing items';
+  END IF;
+END $$;
+
+ALTER TABLE items ALTER COLUMN user_id SET NOT NULL;
+ALTER TABLE items
+  ADD CONSTRAINT items_user_id_fkey FOREIGN KEY (user_id) REFERENCES core.users(id) ON DELETE CASCADE;
+```
+
+Key rules:
+
+- **Natural keys are per-user**: `UNIQUE(user_id, name)`, not `UNIQUE(name)` — two users may share a tag/category name (precedent: assets categories/tags, notes tags). **Junction tables carry NO `user_id`** — they are scoped through their owned parents (join via the parent's `user_id`).
+- **Single-row-per-user settings** are keyed `(user_id, id)` with a fixed id (precedent: focus/clock settings rows).
+- **Queries must lead with `user_id`** (`WHERE id = $1 AND user_id = $2`) and answer **404 for foreign ids** — another user's row must be indistinguishable from a missing one.
+- **Scheduler jobs have no request**, so they iterate rows with explicit `user_id` and attribute their effects per user — precedent: `tasks.overdue_check` selects `user_id` and publishes `tasks.task.overdue.v1` with `userId`; the assets reconcile/cleanup jobs carry `user_id` through the cleanup queue.
+- **User-data events carry `userId`** (added additively on the existing `.v1`/`.v2` names — see the payload evolution rule under [Events](#events)).
+
+### User files
+
+`ctx.storage.forUser(userId)` returns a driver rooted at `storage/users/<userId>/apps/<appId>/` for user-owned files; app-level `ctx.storage` still roots at `storage/apps/<appId>/`. Precedent — assets attachments:
+
+```ts
+const user = await ctx.auth.requireUser(request);
+await ctx.storage.forUser(user.id).save(storageKey, data);   // storage/users/<userId>/apps/assets/…
+// …later, keyed by the row's own user_id (jobs have no request):
+await ctx.storage.forUser(row.user_id).read(row.storage_key);
+```
+
+The one-time legacy relocation from `storage/apps/<appId>/**` to the bootstrap owner's user root is a Core startup step, not app code — see [`MIGRATION_RUNBOOK.md`](MIGRATION_RUNBOOK.md).
+
 ## App settings ownership
 
 Frozen V1 decision — platform settings and app settings are strictly separated:
 
 - `core.settings` (the `/api/core/settings/*` API) stores **platform-level preferences only**: keys such as `dashboard.widgets` (dashboard layout), `apps.presentation` (per-app nickname/accent), `platform.timezone`. The dashboard and the shell own these; apps must not read or write them.
-- **App business settings live in the app's own schema.** The pattern: a migration creates a settings table (a single-row table keyed by a fixed id is usually enough), the backend module exposes its own `GET/PUT /api/apps/<id>/settings` routes with JSON Schema validation and app-level checks, and the app frontend reads/writes those routes like any other resource.
+- **App business settings live in the app's own schema and are per-user.** The pattern: a migration creates a settings table keyed `(user_id, id)` — one row per user with a fixed id (precedent: the focus and clock settings rows), the backend module exposes its own `GET/PUT /api/apps/<id>/settings` routes with JSON Schema validation and app-level checks scoped to `ctx.auth.requireUser(request)`, and the app frontend reads/writes those routes like any other resource. See [Users and ownership](#users-and-ownership).
 - Rationale: `AppContext` exposes no settings service, and the isolation rules forbid apps from touching the `core` schema — so `core.settings` is not an option even if it looked convenient.
 - Deferred to V1.1 (do not build speculatively): once at least two apps need it, consider a minimal Core extension `ctx.settings` reading/writing an `apps.<id>.*` namespace. Also deferred: auto-start ordering for apps.
 
@@ -281,6 +342,7 @@ The shell combines the manifest `frontend.route` with each module's route paths 
 
 - Meaning: the response contract described by this document — Manifest v1 plus the `BackendAppModule`/`FrontendAppModule` contracts, the `AppContext` surface, capability gating, and the isolation rules. Clients and tools can branch on it.
 - Bump rule: increment only on a **breaking** contract change (a manifest field apps must stop sending, a removed/renamed context service, a changed error envelope). Additive changes (a new optional field, a new capability flag) do not bump. Any bump must be reflected here and in the version-pinning test in `backend/test/integration/platform-api.test.ts` in the same change.
+- Post-freeze precedent: the multi-user batch added `ctx.auth` and `Storage.forUser(userId)` to the `AppContext` surface **without** bumping `platformApiVersion` — both are additive (apps that ignore them behave exactly as before), which is the additive rule above applied in practice.
 
 ## Testing
 
@@ -309,7 +371,7 @@ The scaffold seed: `npm run create:app` copies this tree into a new `apps/<id>/`
 The reference implementation of App Contract V1: a Pomodoro timer as a full vertical slice across all three mounting points (`apps/focus/`, `backend/src/apps/focus/`, `frontend/src/apps/focus/`). Patterns worth copying, with pointers:
 
 - **Manifest and capabilities** — `apps/focus/app.yaml`: declares `database` and `events`, and nothing it does not use.
-- **Own schema, forward-only migrations** — `apps/focus/migrations/`. The single-active-session invariant is a partial unique index (`sessions_one_active_idx … WHERE status IN ('running', 'paused')`) enforced by the database, not by application code.
+- **Own schema, forward-only migrations** — `apps/focus/migrations/`. The single-active-session invariant is a partial unique index per user (`sessions_one_active_idx ON sessions(user_id) … WHERE status IN ('running', 'paused')`) enforced by the database, not by application code.
 - **Backend layering** — three files, three jobs:
   - `backend/src/apps/focus/timer.ts` — pure domain logic: zero imports, an injectable clock, no I/O. Every status transition and duration computation is testable without a database.
   - `backend/src/apps/focus/repository.ts` — SQL, `ctx.database.withTransaction`, and revision-based optimistic locking.
@@ -327,8 +389,8 @@ Start a new app from `_template`; when it needs time semantics, concurrency cont
 
 1. `npm run create:app -- <id> "Name"` — scaffolds `apps/<id>/`, backend and frontend stubs, runs `generate:apps`.
 2. Edit `apps/<id>/app.yaml`: description, widgets, capabilities (only what you use), keep `frontend.route` under `/<id>`.
-3. Write the first migration: `npm run migration:create -- --scope <id> --name init`, edit the SQL (bare table names), apply with `npm run migration:up`.
-4. Implement `backend/src/apps/<id>/index.ts`: `registerApi` with JSON Schema validation and `AppError` mapping; optional `registerEvents`/`registerJobs`/`healthcheck`.
+3. Write the first migration: `npm run migration:create -- --scope <id> --name init`, edit the SQL (bare table names; every business table gets `user_id` — see [Users and ownership](#users-and-ownership)), apply with `npm run migration:up`.
+4. Implement `backend/src/apps/<id>/index.ts`: `registerApi` with JSON Schema validation and `AppError` mapping, resolving the requesting user via `ctx.auth.requireUser(request)`; optional `registerEvents`/`registerJobs`/`healthcheck`.
 5. Implement `frontend/src/apps/<id>/index.tsx`: `routes` (path `""` is the app home) and optional `widgets` (ids matching the manifest).
 6. OPTIONAL visual identity: `APP_ICONS`/`APP_ACCENTS` in `frontend/src/shared/ui/appIcons.ts` and a `[data-app="<id>"]` accent in `frontend/src/styles/tokens.css`; add a glyph in `frontend/src/shared/ui/icons.tsx` only if needed. Skipping this is fine — the app falls back to the generic `"apps"` icon and the `--px-primary` accent, and is fully usable without these edits.
 7. If the app has a schema, add it to `APP_SCHEMAS` in `backend/test/helpers/db.ts`; add unit/integration coverage. E2E specs are not part of app development — see the e2e policy under [Testing](#testing).

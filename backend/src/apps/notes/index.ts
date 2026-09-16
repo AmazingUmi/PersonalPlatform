@@ -135,36 +135,58 @@ async function tagsForNotes(db: Db, noteIds: string[]): Promise<Map<string, Note
  * expression is the same parameterized `(occurred_at AT TIME ZONE $tz)::date`
  * form the list filter uses, so grouping and filtering never drift apart
  * (focus repository AT TIME ZONE precedent; CURRENT_DATE is forbidden).
+ * AUTH-3: scoped to the owning user — a foreign note id is a 404, never a leak.
  */
-async function findNoteView(db: Db, noteId: string, timezone: string): Promise<NoteView | null> {
+async function findNoteView(
+  db: Db,
+  noteId: string,
+  timezone: string,
+  userId: string,
+): Promise<NoteView | null> {
   const { rows } = await db.query<NoteRow>(
     `SELECT ${NOTE_COLUMNS}, (occurred_at AT TIME ZONE $2)::date::text AS day_key
-     FROM notes.notes WHERE id = $1`,
-    [noteId, timezone],
+     FROM notes.notes WHERE id = $1 AND user_id = $3`,
+    [noteId, timezone, userId],
   );
   if (!rows[0]) return null;
   const tags = await tagsForNotes(db, [noteId]);
   return toNoteView(rows[0], tags.get(noteId) ?? []);
 }
 
-async function requireNoteView(db: Db, noteId: string, timezone: string): Promise<NoteView> {
-  const view = await findNoteView(db, noteId, timezone);
+async function requireNoteView(
+  db: Db,
+  noteId: string,
+  timezone: string,
+  userId: string,
+): Promise<NoteView> {
+  const view = await findNoteView(db, noteId, timezone, userId);
   if (!view) throw new AppError(404, "not_found", "note not found");
   return view;
 }
 
 /**
  * Replace a note's tag set wholesale (PATCH tagIds semantics). Must run inside
- * the same transaction as any note-field update so an FK failure rolls the
- * whole update back (worklist §8).
+ * the same transaction as any note-field update so a failure rolls the whole
+ * update back (worklist §8). AUTH-3: only tags owned by the same user may be
+ * linked — the INSERT ... SELECT filters on user_id, so a foreign user's tag
+ * id is indistinguishable from a nonexistent one and fails the count check
+ * with the same 422 tag_not_found (never a cross-user attach).
  */
-async function replaceNoteTags(tx: Db, noteId: string, tagIds: string[]): Promise<void> {
+async function replaceNoteTags(
+  tx: Db,
+  noteId: string,
+  tagIds: string[],
+  userId: string,
+): Promise<void> {
   await tx.query("DELETE FROM notes.note_tags WHERE note_id = $1", [noteId]);
-  if (tagIds.length > 0) {
-    await tx.query("INSERT INTO notes.note_tags (note_id, tag_id) SELECT $1, unnest($2::uuid[])", [
-      noteId,
-      tagIds,
-    ]);
+  if (tagIds.length === 0) return;
+  const inserted = await tx.query(
+    `INSERT INTO notes.note_tags (note_id, tag_id)
+     SELECT $1, id FROM notes.tags WHERE id = ANY($2::uuid[]) AND user_id = $3`,
+    [noteId, tagIds, userId],
+  );
+  if (inserted.rowCount !== tagIds.length) {
+    throw tagNotFoundError(tagIds);
   }
 }
 
@@ -197,14 +219,16 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request) => {
+      const user = await ctx.auth.requireUser(request);
       const query = request.query;
       const tagFilter = parseTagsQuery(query.tags);
       const params: unknown[] = [];
       const placeholder = (value: unknown): string => `$${params.push(value)}`;
+      // Ownership is the leading, always-present predicate (AUTH-3).
+      const conditions: string[] = [`n.user_id = ${placeholder(user.id)}`];
       // One timezone parameter shared by the dayKey projection and the
       // occurredFrom/To filters — same expression, same value, no drift.
       const tzParam = placeholder(ctx.time.timezone());
-      const conditions: string[] = [];
       if (query.q) {
         const p = placeholder(`%${query.q}%`);
         conditions.push(
@@ -238,7 +262,8 @@ async function registerApi(ctx: AppContext): Promise<void> {
         const p = placeholder(query.occurredTo);
         conditions.push(`(n.occurred_at AT TIME ZONE ${tzParam})::date <= ${p}::date`);
       }
-      const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+      // conditions always holds the ownership predicate — the WHERE is never empty.
+      const where = `WHERE ${conditions.join(" AND ")}`;
 
       const sortColumn = SORT_COLUMNS[query.sortBy ?? DEFAULT_SORT_BY] ?? SORT_COLUMNS[DEFAULT_SORT_BY];
       const direction = query.order === "asc" ? "ASC" : "DESC";
@@ -268,9 +293,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
   // Lightweight count surface for shell chrome (dock badge / status chip):
   // the list route materializes every note just to expose `total`, so
   // polling it from the navigation would be wasteful.
-  ctx.api.get("/summary", async () => {
+  ctx.api.get("/summary", async (request) => {
+    const user = await ctx.auth.requireUser(request);
     const { rows } = await db.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM notes.notes",
+      "SELECT count(*)::text AS count FROM notes.notes WHERE user_id = $1",
+      [user.id],
     );
     return { total: Number(rows[0]?.count ?? 0) };
   });
@@ -304,6 +331,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request, reply) => {
+      const user = await ctx.auth.requireUser(request);
       const b = request.body;
       const tagIds = dedupeTagIds(b.tagIds ?? []);
       assertValidTagIds(tagIds);
@@ -315,23 +343,24 @@ async function registerApi(ctx: AppContext): Promise<void> {
       try {
         await ctx.database.withTransaction(async (tx) => {
           await tx.query(
-            `INSERT INTO notes.notes (id, title, content, mood, occurred_at, pinned)
-             VALUES ($1, $2, $3, $4, $5, $6)`,
-            [newId, b.title ?? null, b.content, b.mood ?? null, occurredAt, b.pinned ?? false],
+            `INSERT INTO notes.notes (id, user_id, title, content, mood, occurred_at, pinned)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            [newId, user.id, b.title ?? null, b.content, b.mood ?? null, occurredAt, b.pinned ?? false],
           );
-          await replaceNoteTags(tx, newId, tagIds);
+          await replaceNoteTags(tx, newId, tagIds, user.id);
         });
       } catch (error) {
         if (isForeignKeyViolation(error)) throw tagNotFoundError(tagIds);
         throw error;
       }
       // capabilities.events is false: no publish (worklist §2.6).
-      return reply.code(201).send(await requireNoteView(db, newId, timezone()));
+      return reply.code(201).send(await requireNoteView(db, newId, timezone(), user.id));
     },
   );
 
   ctx.api.get<{ Params: { id: string } }>("/notes/:id", async (request) => {
-    return requireNoteView(db, request.params.id, timezone());
+    const user = await ctx.auth.requireUser(request);
+    return requireNoteView(db, request.params.id, timezone(), user.id);
   });
 
   // Partial update with three-state semantics (assets PATCH precedent):
@@ -358,6 +387,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request) => {
+      const user = await ctx.auth.requireUser(request);
       const body = request.body;
       const columns: Array<[string, string]> = [
         ["content", "content"],
@@ -382,43 +412,56 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
       if (sets.length === 0 && !replaceTags) {
         // Nothing mutable supplied: return the current view as-is.
-        return requireNoteView(db, request.params.id, timezone());
+        return requireNoteView(db, request.params.id, timezone(), user.id);
       }
+      // Ownership predicate appended after the SET params; foreign note ids
+      // 404 (AUTH-3: never a 403, never another user's row).
+      params.push(user.id);
+      const owned = `id = $1 AND user_id = $${params.length}`;
 
       try {
         await ctx.database.withTransaction(async (tx) => {
           if (sets.length > 0) {
             sets.push("updated_at = now()");
             const updated = await tx.query(
-              `UPDATE notes.notes SET ${sets.join(", ")} WHERE id = $1 RETURNING id`,
+              `UPDATE notes.notes SET ${sets.join(", ")} WHERE ${owned} RETURNING id`,
               params,
             );
             if (!updated.rows[0]) throw new AppError(404, "not_found", "note not found");
           } else {
-            const exists = await tx.query("SELECT id FROM notes.notes WHERE id = $1", [
+            const exists = await tx.query("SELECT id FROM notes.notes WHERE id = $1 AND user_id = $2", [
               request.params.id,
+              user.id,
             ]);
             if (!exists.rows[0]) throw new AppError(404, "not_found", "note not found");
           }
-          if (replaceTags) await replaceNoteTags(tx, request.params.id, tagIds);
+          if (replaceTags) await replaceNoteTags(tx, request.params.id, tagIds, user.id);
         });
       } catch (error) {
         if (isForeignKeyViolation(error)) throw tagNotFoundError(tagIds);
         throw error;
       }
-      return requireNoteView(db, request.params.id, timezone());
+      return requireNoteView(db, request.params.id, timezone(), user.id);
     },
   );
 
   // Deleting a note cascades its note_tags rows (FK ON DELETE CASCADE).
   ctx.api.delete<{ Params: { id: string } }>("/notes/:id", async (request, reply) => {
-    const result = await db.query("DELETE FROM notes.notes WHERE id = $1", [request.params.id]);
+    const user = await ctx.auth.requireUser(request);
+    const result = await db.query("DELETE FROM notes.notes WHERE id = $1 AND user_id = $2", [
+      request.params.id,
+      user.id,
+    ]);
     if (result.rowCount === 0) throw new AppError(404, "not_found", "note not found");
     return reply.code(204).send();
   });
 
-  ctx.api.get("/tags", async () => {
-    const { rows } = await db.query<TagRow>("SELECT id, name, created_at FROM notes.tags ORDER BY name");
+  ctx.api.get("/tags", async (request) => {
+    const user = await ctx.auth.requireUser(request);
+    const { rows } = await db.query<TagRow>(
+      "SELECT id, name, created_at FROM notes.tags WHERE user_id = $1 ORDER BY name",
+      [user.id],
+    );
     return { items: rows.map(toTagView) };
   });
 
@@ -439,18 +482,19 @@ async function registerApi(ctx: AppContext): Promise<void> {
       },
     },
     async (request, reply) => {
+      const user = await ctx.auth.requireUser(request);
       const name = normalizeTagName(request.body.name);
       if (name === null) {
         throw new AppError(400, "validation_error", "tag name must be 1-50 characters after trimming");
       }
       const inserted = await db.query<TagRow>(
-        "INSERT INTO notes.tags (id, name) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING RETURNING id, name, created_at",
-        [randomUUID(), name],
+        "INSERT INTO notes.tags (id, user_id, name) VALUES ($1, $2, $3) ON CONFLICT (user_id, name) DO NOTHING RETURNING id, name, created_at",
+        [randomUUID(), user.id, name],
       );
       if (inserted.rows[0]) return reply.code(201).send(toTagView(inserted.rows[0]));
       const existing = await db.query<TagRow>(
-        "SELECT id, name, created_at FROM notes.tags WHERE name = $1",
-        [name],
+        "SELECT id, name, created_at FROM notes.tags WHERE name = $1 AND user_id = $2",
+        [name, user.id],
       );
       if (!existing.rows[0]) throw new AppError(500, "internal_error", "tag vanished after upsert");
       return reply.code(200).send(toTagView(existing.rows[0]));
@@ -459,7 +503,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
   // Deleting a tag keeps notes (only the note_tags links cascade away).
   ctx.api.delete<{ Params: { id: string } }>("/tags/:id", async (request, reply) => {
-    const result = await db.query("DELETE FROM notes.tags WHERE id = $1", [request.params.id]);
+    const user = await ctx.auth.requireUser(request);
+    const result = await db.query("DELETE FROM notes.tags WHERE id = $1 AND user_id = $2", [
+      request.params.id,
+      user.id,
+    ]);
     if (result.rowCount === 0) throw new AppError(404, "not_found", "tag not found");
     return reply.code(204).send();
   });

@@ -1,4 +1,4 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Database } from "../database/index.js";
 import type { AppRecord } from "../app-registry/types.js";
 
@@ -10,6 +10,8 @@ export interface CoreApiHandlers {
   putSetting(key: string, value: unknown): Promise<{ key: string; value: unknown }>;
 }
 
+export type CoreRouteHook = (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
+
 export function registerCoreRoutes(
   app: FastifyInstance,
   deps: {
@@ -17,6 +19,9 @@ export function registerCoreRoutes(
     handlers: CoreApiHandlers;
     platform: { name: string; environment: string };
     time: { timezone(): string };
+    /** Auth guards (AUTH-1). Public routes: health/*, platform, time, auth/login. */
+    requireAuth: CoreRouteHook;
+    requireAdmin: CoreRouteHook;
   },
 ): void {
   app.get("/api/core/health/live", async () => ({
@@ -38,7 +43,8 @@ export function registerCoreRoutes(
     now: new Date().toISOString(),
   }));
 
-  app.get("/api/core/health/ready", async (request, reply) => {    const databaseOk = deps.database ? await deps.database.ping() : false;
+  app.get("/api/core/health/ready", async (request, reply) => {
+    const databaseOk = deps.database ? await deps.database.ping() : false;
     if (!databaseOk) {
       return reply.code(503).send({
         status: "error",
@@ -51,13 +57,17 @@ export function registerCoreRoutes(
     };
   });
 
-  app.get("/api/core/apps", async () => ({
+  // The app list feeds the shell for every logged-in user (navigation,
+  // App Center, dashboard); enabling apps and editing platform settings is
+  // the deployment operator's surface (admin).
+  app.get("/api/core/apps", { onRequest: [deps.requireAuth] }, async () => ({
     items: deps.handlers.getApps(),
   }));
 
   app.put<{ Params: { id: string }; Body: { enabled: boolean } }>(
     "/api/core/apps/:id/enabled",
     {
+      onRequest: [deps.requireAdmin],
       schema: {
         params: {
           type: "object",
@@ -78,12 +88,15 @@ export function registerCoreRoutes(
     },
   );
 
-  app.get<{ Params: { id: string } }>("/api/core/apps/:id/health", async (request, reply) => {
+  app.get<{ Params: { id: string } }>("/api/core/apps/:id/health", { onRequest: [deps.requireAuth] }, async (request, reply) => {
     const result = await deps.handlers.getAppHealth(request.params.id);
     return reply.code(result.statusCode).send(result.body);
   });
 
   // Platform settings store (dashboard layout etc.). Values are arbitrary JSON.
+  // Reads are authenticated (the shell reads layout/presentation for every
+  // user); writes are the operator's surface — settings stay platform-level
+  // by design this phase (worklist AD-4 / spec §16).
   const settingsSchema = {
     params: {
       type: "object",
@@ -92,7 +105,7 @@ export function registerCoreRoutes(
     },
   };
 
-  app.get<{ Params: { key: string } }>("/api/core/settings/:key", { schema: settingsSchema }, async (request, reply) => {
+  app.get<{ Params: { key: string } }>("/api/core/settings/:key", { onRequest: [deps.requireAuth], schema: settingsSchema }, async (request, reply) => {
     const setting = await deps.handlers.getSetting(request.params.key);
     if (setting === null) return reply.code(404).send({ error: { code: "setting_not_found", message: "Setting not found", requestId: request.id } });
     return setting;
@@ -101,6 +114,7 @@ export function registerCoreRoutes(
   app.put<{ Params: { key: string }; Body: { value: unknown } }>(
     "/api/core/settings/:key",
     {
+      onRequest: [deps.requireAdmin],
       schema: {
         ...settingsSchema,
         body: {

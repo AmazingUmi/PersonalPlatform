@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import cookiePlugin from "@fastify/cookie";
 import Fastify, { type FastifyBaseLogger, type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { AppError, notFoundHandler, errorHandler } from "./api/errors.js";
 import { registerCoreRoutes } from "./api/routes.js";
@@ -12,6 +13,7 @@ import { createTimeService, type PlatformTimeService } from "./time/index.js";
 import { createAppContext } from "./app-registry/context.js";
 import { AppRegistry } from "./app-registry/registry.js";
 import type { AppContext, AppHealth, AppRecord, BackendAppModule } from "./app-registry/types.js";
+import { createRequireAdmin, createRequireAuth, purgeExpiredSessions, registerAuthRoutes } from "./auth/index.js";
 
 export const TIMEZONE_SETTING_KEY = "platform.timezone";
 
@@ -87,6 +89,7 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
   });
   app.setErrorHandler(errorHandler);
   app.setNotFoundHandler(notFoundHandler);
+  await app.register(cookiePlugin);
 
   /**
    * Unified route guard: only apps with status "enabled" serve traffic.
@@ -102,6 +105,10 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
       }
     };
   }
+
+  // Identity boundary (AUTH-1): every app API requires an authenticated
+  // session. Order is lifecycle → auth, so a disabled app still answers 404
+  // (no state leak) and an enabled app answers 401 when unauthenticated.
 
   // Register API routes for every installed app with a compiled backend module.
   // A lifecycle guard makes disabled/error apps return 404/503 without unloading
@@ -124,6 +131,7 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
       });
       contexts.set(appId, ctx);
       instance.addHook("onRequest", lifecycleGuard(registry, appId));
+      instance.addHook("onRequest", createRequireAuth({ database, now: deps.clock }));
       try {
         await mod.registerApi(ctx);
       } catch (error) {
@@ -133,11 +141,19 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
     }, { prefix: `/api/apps/${appId}` });
   }
 
+  const authDeps = { database, now: deps.clock };
+  registerAuthRoutes(app, {
+    database,
+    isProduction: config.platform.environment === "production",
+    now: deps.clock,
+  });
   registerCoreRoutes(app, {
     database,
     handlers: { getApps, setAppEnabled, getAppHealth, getSetting, putSetting },
     platform: { name: config.platform.name, environment: config.platform.environment },
     time: { timezone: () => time.timezone() },
+    requireAuth: createRequireAuth(authDeps),
+    requireAdmin: createRequireAdmin(authDeps),
   });
 
   // Force plugin bodies to run so every AppContext is populated before activation.
@@ -180,6 +196,19 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
 
   if (deps.beforeActivation) {
     await deps.beforeActivation();
+  }
+
+  // Core-owned housekeeping: purge expired sessions hourly. Registered after
+  // app activation and before scheduler.start(), so it runs on every boot.
+  if (database) {
+    scheduler.register({
+      id: "core.sessions.cleanup",
+      schedule: { cron: "23 * * * *", timezone: time.timezone() },
+      run: async () => {
+        const removed = await purgeExpiredSessions(database.context(), new Date());
+        if (removed > 0) log.info({ removed }, "expired sessions purged");
+      },
+    });
   }
 
   for (const record of registry.getApps()) {

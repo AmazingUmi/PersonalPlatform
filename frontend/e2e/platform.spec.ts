@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { expect, test, type Page } from "@playwright/test";
+import { adminFetch } from "./helpers";
 
 /**
  * Key end-to-end flows for the four validation apps plus the disable/enable
@@ -10,11 +11,8 @@ import { expect, test, type Page } from "@playwright/test";
 const CORE = "http://127.0.0.1:8902";
 
 async function setAppEnabled(id: string, enabled: boolean): Promise<void> {
-  const response = await fetch(`${CORE}/api/core/apps/${id}/enabled`, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ enabled }),
-  });
+  // AUTH-5: raw API writes carry the admin session cookie via helpers.adminFetch.
+  const response = await adminFetch("PUT", `/api/core/apps/${id}/enabled`, { enabled });
   if (!response.ok) throw new Error(`toggle ${id} failed: HTTP ${response.status}`);
 }
 

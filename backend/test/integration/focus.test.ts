@@ -5,7 +5,7 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { Database } from "../../src/core/database/index.js";
 import focusApp from "../../src/apps/focus/index.js";
 import type { Platform } from "../../src/core/platform.js";
-import { buildFixturePlatform } from "../helpers/platform.js";
+import { buildFixturePlatform, ensureTestAdmin, loginCookie } from "../helpers/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 import { runMigrations } from "../../src/core/database/migrate.js";
 
@@ -135,11 +135,18 @@ const DEFAULT_SETTINGS = {
 
 let db: Database;
 let platform: Platform;
+/**
+ * Session cookie (AUTH-1: every /api/apps/* and protected core route needs
+ * one). Sessions live in core.sessions on the shared database, so the cookie
+ * stays valid across the in-file platform restarts.
+ */
+let cookie: string;
 /** LIFO list of fixture cleanups (each restart adds one; only env restore). */
 const cleanups: Array<() => void> = [];
 
 before(async () => {
   db = await resetDatabase();
+  await ensureTestAdmin(db);
   const fixture = await buildFixturePlatform({
     database: db,
     manifests: [{ id: "focus", migrations: focusMigrations }],
@@ -148,6 +155,13 @@ before(async () => {
   });
   platform = fixture.platform;
   cleanups.push(fixture.cleanup);
+  cookie = await loginCookie(platform);
+  // The login route mints expires_at = clock-now + 30d, and the core-route
+  // guards validate against this suite's MUTABLE clock — which the DST cases
+  // below jump to Nov 2026, past a T0-minted expiry. Pin the session's expiry
+  // far out (auth.test.ts precedent for writing core.sessions) so session
+  // lifetime never interferes with the clock scenarios.
+  await db.context().query("UPDATE core.sessions SET expires_at = '2099-01-01T00:00:00Z'");
   await runMigrations({
     databaseUrl: TEST_DATABASE_URL,
     targets: [{ scope: "focus", schema: "focus", dir: join(fixture.root, "apps", "focus", "migrations") }],
@@ -187,6 +201,7 @@ async function putTimezone(value: string): Promise<void> {
     method: "PUT",
     url: "/api/core/settings/platform.timezone",
     payload: { value },
+    headers: { cookie },
   });
   assert.equal(response.statusCode, 200, `platform.timezone=${value} must be accepted`);
 }
@@ -196,7 +211,7 @@ async function putTimezone(value: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 function api(method: "GET" | "POST" | "PUT", url: string, body?: object) {
-  return platform.app.inject({ method, url: `/api/apps/focus${url}`, payload: body });
+  return platform.app.inject({ method, url: `/api/apps/focus${url}`, payload: body, headers: { cookie } });
 }
 
 async function getBody<T>(url: string): Promise<{ status: number; body: T }> {
@@ -308,15 +323,24 @@ describe("state machine transitions (APP-1 §24.1-7)", () => {
   it("body-less transition POSTs are valid optimistic requests", async () => {
     await postBody("/start", { kind: "focus" });
     // No payload at all: a client retry or plain curl must not trip validation.
-    const bare = await platform.app.inject({ method: "POST", url: "/api/apps/focus/pause" });
+    const bare = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/focus/pause",
+      headers: { cookie },
+    });
     assert.equal(bare.statusCode, 200);
     assert.equal((bare.json() as TransitionBody).state.active!.status, "paused");
-    const bareStop = await platform.app.inject({ method: "POST", url: "/api/apps/focus/stop" });
+    const bareStop = await platform.app.inject({
+      method: "POST",
+      url: "/api/apps/focus/stop",
+      headers: { cookie },
+    });
     assert.equal(bareStop.statusCode, 200);
     const rejected = await platform.app.inject({
       method: "POST",
       url: "/api/apps/focus/start",
       payload: { kind: "focus", baseRevision: "not-a-number" },
+      headers: { cookie },
     });
     assert.equal(rejected.statusCode, 400);
   });

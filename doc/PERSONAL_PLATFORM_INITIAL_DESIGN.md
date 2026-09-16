@@ -4,6 +4,8 @@
 > Status: Initial Design  
 > Architecture: B/S + Modular Monolith
 
+> **2026-09 更新注**：本文是 v0.1 初始化设计的快照，不再随实现逐节重写。其中「单用户自托管」「多用户复杂权限暂不实现」的表述已过时：平台后来以 Core 能力加入了会话认证与按用户隔离的数据所有权（Argon2id 密码、`core.sessions` 服务端会话、`ctx.auth`、`Storage.forUser`、全部 App 数据按 `user_id` 归属），属 App Contract V1 的附加扩展，未 bump `platformApiVersion`。现状文档见：README「身份认证（多用户）」、[`APP_DEVELOPMENT.md`](APP_DEVELOPMENT.md) 的 "Users and ownership" 一节、[`MIGRATION_RUNBOOK.md`](MIGRATION_RUNBOOK.md) 的「单用户 → 多用户升级」一节。本节之外的其余内容保持原样。
+
 ---
 
 ## 1. 项目目标

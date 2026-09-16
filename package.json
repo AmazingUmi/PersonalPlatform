@@ -15,6 +15,7 @@
     "migration:up": "tsx backend/src/cli/migrate.ts up",
     "migration:status": "tsx backend/src/cli/migrate.ts status",
     "migration:create": "tsx backend/src/cli/migrate.ts create",
+    "bootstrap:admin": "tsx backend/src/cli/bootstrap-admin.ts",
     "create:app": "tsx scripts/create-app.ts",
     "backup": "tsx scripts/backup.ts create",
     "verify": "bash scripts/verify.sh",

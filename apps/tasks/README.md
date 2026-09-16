@@ -13,7 +13,14 @@ filtering, a scheduled overdue-check job and events on the platform.
 (Clock today; Calendar / Statistics later) to consume task timing. It is a
 read-only HTTP contract — consumers must never touch `tasks.*` tables or
 import this app's internals, and they must tolerate `404` whenever the Tasks
-app is disabled (platform lifecycle guard).
+app is disabled (platform lifecycle guard) and `401` without a session
+(platform auth guard, applied after the lifecycle guard).
+
+"Public" means a **stable cross-app read contract, never cross-user**: the
+route is authenticated and strictly per-user. Every response describes only
+the requesting user's tasks (via `ctx.auth.requireUser`); one user's `current`
+/`next`/`today` are invisible to any other user, as if the route were
+`404`-absent for them.
 
 Response (camelCase, timestamptz as ISO UTC):
 
@@ -25,7 +32,7 @@ Response (camelCase, timestamptz as ISO UTC):
 }
 ```
 
-Semantics (frozen):
+Semantics (frozen; everything below is scoped to the requesting user):
 
 - `current` — the most recently started `todo` task with `start_at <= now`
   (`ORDER BY start_at DESC`). `due_at` is the target deadline and **never**

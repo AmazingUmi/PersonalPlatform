@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { fetchApps, getSetting, type AppInfo } from "../shared/api";
 import { PresentationProvider } from "../shared/PresentationContext";
 import { normalizeOverrides, PRESENTATION_KEY, type PresentationOverrides } from "../shared/presentation";
@@ -8,10 +8,12 @@ import { PixelButton } from "../shared/ui/PixelButton";
 import { PixelIcon } from "../shared/ui/PixelIcon";
 import { PixelWindow } from "../shared/ui/PixelWindow";
 import { StatusMessage } from "../shared/ui/StatusMessage";
+import { AuthProvider, useAuth } from "./AuthContext";
 import { AppCenter } from "./AppCenter";
 import { AppDock } from "./AppDock";
 import { AppStatusProvider } from "./AppStatusContext";
 import { Dashboard } from "./Dashboard";
+import { LoginPage } from "./LoginPage";
 import { MobileNav } from "./MobileNav";
 import { NotFound } from "./NotFound";
 import { Settings } from "./Settings";
@@ -19,6 +21,68 @@ import { TopBar } from "./TopBar";
 import { enabledAppModules, resolveRoutes } from "./routes";
 
 export function App() {
+  return (
+    <AuthProvider>
+      <BrowserRouter>
+        <SessionGate />
+      </BrowserRouter>
+    </AuthProvider>
+  );
+}
+
+/**
+ * Identity boundary at the shell root (AUTH-5): boot checks the session via
+ * GET /api/core/auth/me — 200 renders the platform, 401 (or a later 401 from
+ * any API) renders only the login flow. The return path is preserved so a
+ * successful login lands where the user was heading.
+ */
+function SessionGate() {
+  const { status } = useAuth();
+  const location = useLocation();
+
+  if (status === "loading") {
+    return (
+      <div className="shell shell--boot">
+        <header className="topbar">
+          <span className="topbar__brand">
+            <PixelIcon name="logo" size={24} className="topbar__logo" />
+            <span className="topbar__brand-text">Personal Platform</span>
+          </span>
+        </header>
+        <main className="shell__content">
+          <div className="page page--boot">
+            <PixelWindow title="Booting" icon="logo">
+              <LoadingState label="Checking session…" />
+            </PixelWindow>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
+  if (status === "anonymous") {
+    return (
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route
+          path="*"
+          element={
+            <Navigate
+              to="/login"
+              replace
+              state={{ from: location.pathname + location.search }}
+            />
+          }
+        />
+      </Routes>
+    );
+  }
+
+  return <PlatformShell />;
+}
+
+function PlatformShell() {
+  const { user, signOut } = useAuth();
   const [apps, setApps] = useState<AppInfo[] | null>(null);
   // Initial-load error (no data at all) gets the full boot error screen.
   const [error, setError] = useState<string | null>(null);
@@ -112,14 +176,13 @@ export function App() {
   const retryRefresh = () => setRefreshKey((key) => key + 1);
 
   return (
-    <BrowserRouter>
-      <PresentationProvider value={overrides}>
-        <AppStatusProvider modules={modules}>
-          <div className="shell">
+    <PresentationProvider value={overrides}>
+      <AppStatusProvider modules={modules}>
+        <div className="shell">
             <a className="skip-link" href="#shell-content">
               Skip to content
             </a>
-            <TopBar apps={apps} />
+            <TopBar apps={apps} user={user} onLogout={() => void signOut()} />
             <div className="shell__workspace">
               <AppDock apps={enabled} presentation={overrides} />
               <main className="shell__content" id="shell-content" tabIndex={-1} aria-busy={refreshing}>
@@ -147,18 +210,18 @@ export function App() {
                       />
                     }
                   />
+                  <Route path="/login" element={<Navigate to="/" replace />} />
                   <Route path="/settings" element={<Settings apps={apps} />} />
                   {routes.map((route) => (
                     <Route key={route.path} path={route.path} element={route.element} />
                   ))}
                   <Route path="*" element={<NotFound />} />
                 </Routes>
-              </main>
+          </main>
             </div>
             <MobileNav apps={enabled} presentation={overrides} />
           </div>
-        </AppStatusProvider>
-      </PresentationProvider>
-    </BrowserRouter>
+      </AppStatusProvider>
+    </PresentationProvider>
   );
 }

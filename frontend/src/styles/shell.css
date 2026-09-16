@@ -823,3 +823,150 @@
   outline: var(--border-2) solid var(--px-primary);
   outline-offset: 2px;
 }
+
+/* ---------------------------------------------------------------------------
+ * AUTH-5: session account chip + login page
+ * ------------------------------------------------------------------------- */
+
+.topbar__account {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2, 6px);
+  margin-left: var(--space-2, 6px);
+}
+
+.topbar__user {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--px-ink);
+  border: 1px solid var(--px-primary);
+  padding: 1px 6px;
+  background: var(--px-bg);
+}
+
+.topbar__user-sigil {
+  color: var(--px-primary);
+}
+
+.topbar__user-role {
+  color: var(--px-accent-warning, #b87400);
+}
+
+.topbar__logout {
+  appearance: none;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--px-bg);
+  background: var(--px-primary);
+  border: 1px solid var(--px-ink);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.topbar__logout:hover,
+.topbar__logout:focus-visible {
+  background: var(--px-primary-light, var(--px-primary));
+  outline: 2px solid var(--px-ink);
+  outline-offset: -2px;
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  color: var(--px-ink);
+  margin-bottom: var(--space-3, 12px);
+}
+
+.login-brand__sigil {
+  color: var(--px-primary);
+  font-size: 12px;
+}
+
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3, 12px);
+}
+
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.login-field__label {
+  font-size: 12px;
+  color: var(--px-ink-muted, var(--px-ink));
+  font-family: var(--font-mono, monospace);
+}
+
+.login-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 6px);
+  margin-top: var(--space-2, 6px);
+}
+
+.login-hint {
+  margin-top: var(--space-3, 12px);
+  font-size: 11px;
+  color: var(--px-ink-muted, var(--px-ink));
+}
+
+/* Settings: user management table (AUTH-5). */
+.user-panel__form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2, 6px);
+  align-items: flex-end;
+  margin-bottom: var(--space-3, 12px);
+}
+
+.user-panel__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.user-panel__field label {
+  font-size: 11px;
+  color: var(--px-ink-muted, var(--px-ink));
+}
+
+.user-panel__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.user-panel__table th,
+.user-panel__table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--px-bg-grid);
+}
+
+.user-panel__table th {
+  color: var(--px-ink-muted, var(--px-ink));
+  font-weight: 600;
+}
+
+/* Account chip on phones (AUTH-5): the username chip folds away next to the
+ * other topbar status; logout stays reachable as a compact button. Sits at
+ * the end of the sheet so the base .topbar__user/.topbar__logout rules
+ * cannot override the media query by source order. */
+@media (max-width: 599px) {
+  .topbar__user {
+    display: none;
+  }
+
+  .topbar__logout {
+    padding: 2px 6px;
+    font-size: 10px;
+  }
+}

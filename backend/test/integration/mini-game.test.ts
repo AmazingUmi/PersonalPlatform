@@ -6,7 +6,7 @@ import { Database } from "../../src/core/database/index.js";
 import miniGameApp from "../../src/apps/mini_game/index.js";
 import type { BackendAppModule } from "../../src/core/app-registry/types.js";
 import type { Platform } from "../../src/core/platform.js";
-import { buildFixturePlatform } from "../helpers/platform.js";
+import { buildFixturePlatform, ensureTestAdmin, loginCookie } from "../helpers/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 import { runMigrations } from "../../src/core/database/migrate.js";
 
@@ -14,6 +14,7 @@ const repoRoot = resolve(import.meta.dirname, "..", "..", "..");
 const miniGameMigrations = [
   readFileSync(join(repoRoot, "apps/mini_game/migrations/20260101000001-init.sql"), "utf8"),
   readFileSync(join(repoRoot, "apps/mini_game/migrations/20260829000002-high-score-revision.sql"), "utf8"),
+  readFileSync(join(repoRoot, "apps/mini_game/migrations/20260916100000-user-ownership.sql"), "utf8"),
 ];
 
 const highScoreEvents: Array<{ score: number; previous: number }> = [];
@@ -22,9 +23,12 @@ let db: Database;
 let platform: Platform;
 let cleanup: () => void;
 let root: string;
+/** Session cookie (AUTH-1: every /api/apps/* route needs one). */
+let cookie: string;
 
 before(async () => {
   db = await resetDatabase();
+  await ensureTestAdmin(db);
   const spySubscriber: BackendAppModule = {
     id: "spy",
     async registerApi() {},
@@ -50,6 +54,7 @@ before(async () => {
   platform = fixture.platform;
   cleanup = fixture.cleanup;
   root = fixture.root;
+  cookie = await loginCookie(platform);
   await runMigrations({
     databaseUrl: TEST_DATABASE_URL,
     targets: [
@@ -71,6 +76,7 @@ function putSave(body: { score: number; board: number[][]; revision: number }) {
     method: "PUT",
     url: "/api/apps/mini_game/saves",
     payload: body,
+    headers: { cookie },
   });
 }
 
@@ -108,7 +114,11 @@ describe("2048 save semantics (FP-2A.3 / FP-2A.4)", () => {
   });
 
   it("summary reports the historical high score, not the current run", async () => {
-    const summary = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/summary" });
+    const summary = await platform.app.inject({
+      method: "GET",
+      url: "/api/apps/mini_game/summary",
+      headers: { cookie },
+    });
     assert.equal(summary.statusCode, 200);
     assert.equal(summary.json().highScore, 100);
   });
@@ -164,7 +174,11 @@ describe("2048 save semantics (FP-2A.3 / FP-2A.4)", () => {
   });
 
   it("GET /saves returns the full save including revision", async () => {
-    const saves = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves" });
+    const saves = await platform.app.inject({
+      method: "GET",
+      url: "/api/apps/mini_game/saves",
+      headers: { cookie },
+    });
     const body = saves.json();
     assert.equal(body.save.revision, 5);
     assert.equal(body.save.score, 200);
@@ -176,6 +190,7 @@ describe("2048 save semantics (FP-2A.3 / FP-2A.4)", () => {
       method: "PUT",
       url: "/api/apps/mini_game/saves",
       payload: { score: -5, board: [], revision: 6 },
+      headers: { cookie },
     });
     assert.equal(bad.statusCode, 400);
   });
@@ -209,6 +224,7 @@ describe("board validation (FP-13.2)", () => {
       method: "PUT",
       url: "/api/apps/mini_game/saves",
       payload: { score: 0, board: fractional, revision: 11 },
+      headers: { cookie },
     });
     assert.equal(nonInteger.statusCode, 400);
 
@@ -218,6 +234,7 @@ describe("board validation (FP-13.2)", () => {
       method: "PUT",
       url: "/api/apps/mini_game/saves",
       payload: { score: 0, board: negative, revision: 11 },
+      headers: { cookie },
     });
     assert.equal(neg.statusCode, 400);
   });
@@ -237,7 +254,11 @@ describe("board validation (FP-13.2)", () => {
     await db.context().query(
       `UPDATE mini_game.saves SET board = '[[3,3,3,3],[3,3,3,3],[3,3,3,3],[3,3,3,3]]'::jsonb WHERE id = 'current'`,
     );
-    const response = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves" });
+    const response = await platform.app.inject({
+      method: "GET",
+      url: "/api/apps/mini_game/saves",
+      headers: { cookie },
+    });
     assert.equal(response.statusCode, 200);
     assert.equal(response.json().save, null, "corrupted board is masked as no save");
   });

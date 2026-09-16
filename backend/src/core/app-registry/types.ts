@@ -1,10 +1,11 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { Logger } from "../logging/index.js";
 import type { DatabaseContext } from "../database/index.js";
-import type { Storage } from "../storage/index.js";
+import type { AppStorage } from "../storage/index.js";
 import type { AppEventBus, Unsubscribe } from "../events/index.js";
 import type { AppScheduler, JobHandle } from "../scheduler/index.js";
 import type { TimeService } from "../time/index.js";
+import type { AuthUserView } from "../auth/service.js";
 
 export interface ManifestWidget {
   id: string;
@@ -44,6 +45,21 @@ export interface AppHealth {
 }
 
 /**
+ * Identity surface for Apps (AUTH-2). Authentication is Core-only: apps read
+ * the request-scoped identity the auth guard resolved — they never touch
+ * cookies or core.sessions. On app routes the guard has already run, so
+ * requireUser cannot fail; it exists for type-safety and defense in depth.
+ */
+export interface AuthService {
+  /** Identity of the request's user, or null when unauthenticated. */
+  user(request: FastifyRequest): Promise<AuthUserView | null>;
+  /** Identity or a 401 AppError (never null). */
+  requireUser(request: FastifyRequest): Promise<AuthUserView>;
+  /** Identity or a 401/403 AppError when the role does not match. */
+  requireRole(request: FastifyRequest, role: "admin"): Promise<AuthUserView>;
+}
+
+/**
  * The controlled surface an App receives. It exposes shared infrastructure but
  * never another App's repository or schema.
  *
@@ -59,11 +75,13 @@ export interface AppContext {
   /** Fastify instance already scoped to `/api/apps/<app_id>`. */
   api: FastifyInstance;
   database: DatabaseContext;
-  storage: Storage;
+  storage: AppStorage;
   events: AppEventBus;
   scheduler: AppScheduler;
   /** Platform time semantics; follows the platform timezone (FP-10). */
   time: TimeService;
+  /** Request identity (AUTH); always available like api/log/time. */
+  auth: AuthService;
 }
 
 export interface BackendAppModule {

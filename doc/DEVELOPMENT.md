@@ -23,6 +23,7 @@ npm run migration:status    # 各 scope 已应用迁移
 npm run migration:create -- --scope assets --name add_items
 
 npm run create:app -- my_app "My App"   # 从模板创建新 App
+npm run bootstrap:admin -- --username admin   # 激活/创建首个管理员（隐藏密码输入）
 npm run backup              # 备份数据库（backup.sh backup|restore）
 npm run verify              # 本地完整验收（见 scripts/verify.sh）
 ```
@@ -40,6 +41,7 @@ npm run verify              # 本地完整验收（见 scripts/verify.sh）
 backend/src/
 ├── core/               # 平台核心，不含业务逻辑
 │   ├── api/            # /api/core/* 路由 + 统一错误
+│   ├── auth/           # 会话认证：登录/登出/me、用户管理 API（管理员）
 │   ├── app-registry/   # Manifest 校验、扫描、注册表、AppContext
 │   ├── config/         # platform.yaml + 环境变量
 │   ├── database/       # pg.Pool 封装、事务、迁移编排
@@ -54,7 +56,7 @@ backend/src/
 └── main.ts             # 进程入口：配置→迁移→装配→监听→优雅关闭
 ```
 
-App 通过 `AppContext` 获得 `api`（前缀 `/api/apps/<id>`，受生命周期 guard 保护）、`database`、`storage`（根目录 `storage/apps/<id>`）、`events`、`scheduler`、`log`。App 之间不互相 import、不跨 schema 写数据。
+App 通过 `AppContext` 获得 `api`（前缀 `/api/apps/<id>`，先后受生命周期 guard（404）与认证 guard（401）保护）、`auth`（`ctx.auth.requireUser` 取当前用户）、`database`、`storage`（App 级根目录 `storage/apps/<id>`；用户文件用 `forUser(userId)`，根目录 `storage/users/<userId>/apps/<id>`）、`events`、`scheduler`、`log`。App 之间不互相 import、不跨 schema 写数据，也不直接读 Cookie 或 `core.sessions`。
 
 ## 前端结构
 
@@ -71,7 +73,7 @@ Shell 用 `GET /api/core/apps` 的启用状态与编译期模块表求交集：�
 ## API 约定
 
 - Core：`/api/core/*`；App：`/api/apps/<app_id>/*`。
-- 错误统一 `{ error: { code, message, requestId, details? } }`；非 enabled 状态的 App API 一律 404。
+- 错误统一 `{ error: { code, message, requestId, details? } }`；非 enabled 状态的 App API 一律 404（生命周期 guard），未认证请求一律 401（认证 guard，紧随其后）。Core 公开路由仅 `/api/core/health/*`、`/api/core/platform`、`/api/core/time` 与登录；其余 Core 路由需会话（应用启停、settings 写入与用户管理需管理员）。
 - 列表统一 `{ items: [...] }`。
 - 写接口必须提供 JSON Schema 校验；日志不记录请求体。
 - 更新使用 PATCH，nullable 字段语义固定：缺省=不修改、显式 `null`=清空、有值=更新。
@@ -93,6 +95,12 @@ Shell 用 `GET /api/core/apps` 的启用状态与编译期模块表求交集：�
 | 前端 | `frontend/src/**/*.test.tsx` | App Center、Dashboard（顺序/导航/编辑模式）、presentation resolver、Assets/Tasks 编辑器与过滤、2048 逻辑 |
 | E2E | `frontend/e2e`（Playwright） | 三 App 全生命周期、启停数据保留、Dashboard 排序/隐藏持久化、App 个性化持久化 |
 | 验收 | `scripts/verify.sh` | 安装→检查→构建→测试→迁移→启动→健康检查→三 App 冒烟 |
+
+### 测试如何通过认证
+
+- **集成测试**：平台 API 全部需要会话。辅助函数在 `backend/test/helpers/platform.ts`：`ensureTestAdmin(db)` 激活测试管理员并返回其 id，`loginCookie(platform, …)` 走真实 `POST /api/core/auth/login` 返回 `pp_session=…` Cookie 串，之后以 `headers: { cookie }` 注入 `platform.app.inject(...)`。新写的集成测试一律复用这些辅助函数，不要绕过登录直改数据库会话。
+- **E2E（Playwright）**：`frontend/e2e/auth.setup.ts` 以 bootstrap 管理员（`e2e-admin`）登录一次，把 HttpOnly 会话 Cookie 持久化为 storageState（`frontend/playwright/.auth/user.json`），e2e 项目通过 `storageState` 复用。后端由 `frontend/playwright.config.ts` 的 webServer 拉起并注入 `BOOTSTRAP_ADMIN_USERNAME` / `BOOTSTRAP_ADMIN_PASSWORD`；bootstrap 幂等且绝不重置已激活密码——复用的本地库若已用其他密码激活，登录会失败，应指向全新数据库或重新 bootstrap。
+- 需要「另一个用户」的用例：集成测试用同文件的 `createTestUser(db, username, password)`（走 core auth service，可再 `loginCookie` 登录）；E2E 由管理员通过 `POST /api/core/auth/users` 创建。
 
 ## 本地无 Docker 跑法
 

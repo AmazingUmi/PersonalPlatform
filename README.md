@@ -47,6 +47,19 @@ make dev-expose   # database/backend 发布到宿主机回环，frontend 开放�
 
 详见 `docker/compose.expose.yml`。
 
+## 身份认证（多用户）
+
+平台内置会话认证与按用户隔离的数据所有权（Core 能力，`backend/src/core/auth/`）：
+
+- **首个管理员**：数据库迁移只播种一个占位管理员（用户名 `admin`，`!bootstrap-pending` 占位密码哈希，激活前无法登录）。两种激活方式：
+  - 启动时设置环境变量 `BOOTSTRAP_ADMIN_USERNAME` / `BOOTSTRAP_ADMIN_PASSWORD`（见 `.env.example`，后端启动时自动激活）；
+  - 或 CLI：`npm run bootstrap:admin -- --username <name>`（隐藏密码输入，也接受 `BOOTSTRAP_ADMIN_PASSWORD` 环境变量）。
+
+  激活是幂等的：**绝不重置已激活的密码**；当请求的用户名与占位管理员不同且其仍处于未激活状态时，会原地改名（id 稳定，已回填的数据继续归属该账号）。真实密码不进 git。
+- **登录**：前端提供 `/login` 登录页；`POST /api/core/auth/login` 成功后签发 HttpOnly Cookie `pp_session`（SameSite=Lax、Path=/、仅生产环境启用 Secure）。会话为服务端会话，存于 `core.sessions`：数据库只保存 sha256(token)，令牌本身为 256-bit 随机 base64url；有效期 30 天，另有每小时的过期会话清理 Job。登录接口按「用户名 + IP」限速：每 5 分钟 10 次失败。登出（`POST /api/core/auth/logout`）与会话自省（`GET /api/core/auth/me`）配套提供；用户管理 API（`GET/POST /api/core/auth/users`）仅管理员可用。
+- **多用户数据隔离**：所有 App 的业务数据行都以 `user_id` 归属（NOT NULL 外键 → `core.users`，级联删除）；查询始终按当前用户过滤，访问他人资源返回 404。用户文件（如附件）根目录为 `storage/users/<userId>/apps/<appId>/`。
+- **创建更多用户**：管理员登录后在 Settings → Users 面板创建普通账号；管理员账号只能通过 bootstrap 产生。
+
 ## 本地开发与验收
 
 不使用容器时：

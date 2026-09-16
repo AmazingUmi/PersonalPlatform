@@ -1,6 +1,6 @@
 import { mkdir, readFile, realpath, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { sanitizeKey, StorageError, type Storage } from "./index.js";
+import { sanitizeKey, StorageError, type AppStorage, type Storage } from "./index.js";
 
 function toError(error: unknown): never {
   if (error instanceof StorageError) throw error;
@@ -128,4 +128,28 @@ export class LocalStorageDriver implements Storage {
 
 export function createLocalStorage(appRoot: string): Storage {
   return new LocalStorageDriver(appRoot);
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The app's storage surface (AUTH-2): `storage/apps/<appId>` as the app root
+ * and `storage/users/<userId>/apps/<appId>` for user-owned data. The userId
+ * is uuid-validated before it can influence any path.
+ */
+export function createAppStorage(storageRoot: string, appId: string): AppStorage {
+  const appDriver = new LocalStorageDriver(join(storageRoot, "apps", appId));
+  return {
+    save: (key, data) => appDriver.save(key, data),
+    read: (key) => appDriver.read(key),
+    delete: (key) => appDriver.delete(key),
+    list: (prefix) => appDriver.list(prefix),
+    exists: (key) => appDriver.exists(key),
+    forUser(userId: string): Storage {
+      if (typeof userId !== "string" || !UUID_PATTERN.test(userId)) {
+        throw new StorageError("user id must be a uuid", "invalid_path");
+      }
+      return createLocalStorage(join(storageRoot, "users", userId, "apps", appId));
+    },
+  };
 }
