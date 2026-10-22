@@ -521,6 +521,15 @@ async function compensate(
   });
 }
 
+/** Download-only header: UTF-8 names stay usable without injecting HTTP syntax. */
+function attachmentDisposition(filename: string): string {
+  // UTF-8 round-trip replaces a lone surrogate left by legacy name truncation.
+  const name = Buffer.from(filename, "utf8").toString("utf8").replace(/[\x00-\x1f\x7f"\\/]/g, "_") || "attachment";
+  const fallback = name.replace(/[^\x20-\x7e]/g, "_");
+  const encoded = encodeURIComponent(name).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
 /** Convert the multipart plugin's size abort into a stable API error. */
 function attachmentTooLarge(cause: unknown): never {
   if ((cause as { code?: string }).code === "FST_REQ_FILE_TOO_LARGE") {
@@ -985,10 +994,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
       );
       if (!rows[0]) throw new AppError(404, "not_found", "attachment not found");
       const data = await ctx.storage.forUser(user.id).read(rows[0].storage_key);
-      const safeFilename = rows[0].filename.replace(/[\r\n"]/g, "_");
       return reply
-        .type(rows[0].content_type ?? "application/octet-stream")
-        .header("content-disposition", `inline; filename="${safeFilename}"`)
+        .type("application/octet-stream")
+        .header("content-disposition", attachmentDisposition(rows[0].filename))
+        .header("x-content-type-options", "nosniff")
+        .header("content-security-policy", "default-src 'none'; sandbox; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
         .send(data);
     },
   );

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import type { WidgetDensity } from "../../shared/appTypes";
 import { PixelBadge } from "../../shared/ui/PixelBadge";
@@ -27,18 +27,24 @@ function recentLabel(note: NoteView): string {
  */
 export function QuickNoteWidget({ density = "normal" }: { density?: WidgetDensity }) {
   const [content, setContent] = useState("");
+  const editRevision = useRef(0);
   const [savedId, setSavedId] = useState<string | null>(null);
   const recent = useAsync(
     () => (density === "expanded" ? listNotes() : Promise.resolve(null)),
     [density],
   );
   const saved = useMutation(async () => {
+    const submittedContent = content;
+    const submittedRevision = editRevision.current;
     setSavedId(null);
-    const note = await createNote({ content });
+    const note = await createNote({ content: submittedContent });
     setSavedId(note.id);
-    setContent("");
-    // A freshly saved note belongs at the top of the expanded recent list.
-    if (recent.data) void recent.reload();
+    // A response acknowledges only its submitted snapshot. Any user edit,
+    // including A -> B -> A, leaves the entire current draft intact.
+    if (editRevision.current === submittedRevision) setContent("");
+    // The loader uses the current density; normal/compact do not fetch a
+    // list. Refresh even if an expanded list was pending or failed at submit.
+    recent.reload();
   });
 
   return (
@@ -47,7 +53,10 @@ export function QuickNoteWidget({ density = "normal" }: { density?: WidgetDensit
         className="px-textarea notes-quick__input"
         placeholder="今天突然想到……"
         value={content}
-        onChange={(e) => setContent(e.target.value)}
+        onChange={(e) => {
+          editRevision.current += 1;
+          setContent(e.target.value);
+        }}
         aria-label="Quick note content"
         rows={density === "compact" ? 2 : 3}
       />

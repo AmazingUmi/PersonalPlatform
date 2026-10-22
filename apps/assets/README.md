@@ -7,6 +7,12 @@ and a Dashboard widget on the platform.
 - Frontend: `frontend/src/apps/assets/index.tsx`
 - Schema: `assets.*` (categories, items, attachments)
 
+Attachments are downloaded as `application/octet-stream` with an attachment
+disposition, `nosniff` and a restrictive CSP. The uploaded MIME stays in metadata
+but cannot select an executable response type. Unicode filenames use UTF-8
+`filename*` with a safe ASCII fallback. This endpoint provides downloads; the
+App does not embed uploaded files as previews.
+
 Storage reconciliation runs after boot, hourly, or through the admin-only
 `POST /api/apps/assets/maintenance/reconcile` endpoint. Each attachment is
 checked in its owner's storage. Healthy files use `exists=true` without reading

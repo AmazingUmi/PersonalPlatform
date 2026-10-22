@@ -23,6 +23,7 @@ function isFocusStateLike(value: unknown): value is FocusState {
   const candidate = value as Partial<FocusState>;
   return (
     typeof candidate.now === "string" &&
+    Number.isFinite(Date.parse(candidate.now)) &&
     (candidate.active === null || typeof candidate.active === "object") &&
     typeof candidate.today === "object" &&
     candidate.today !== null &&
@@ -35,14 +36,10 @@ function isFocusStateLike(value: unknown): value is FocusState {
 }
 
 /**
- * Focus app data hook (APP-1 F06): server state + local 1s display tick.
- *
- * The server owns all timing: `remainingSeconds` is always DERIVED from the
- * active session's `expectedEndAt` (running) or `remainingSeconds` (paused)
- * against `displayNow`; the client never accumulates elapsed time. Mutations
- * swap in the server-returned FocusState; a 409 conflict self-heals from
- * `error.details.state`. Tabs and the dashboard widget stay coherent through
- * a "focus" BroadcastChannel plus a visibility-gated 15s poll.
+ * Server-authoritative state with ordered reads and a monotonic display clock.
+ * All reads share sequence/generation/epoch guards; starting a mutation
+ * invalidates earlier reads. Each accepted response anchors server `now` to
+ * performance.now(), so client wall-clock changes cannot move the countdown.
  */
 export function useFocusState(): {
   state: FocusState | null;
@@ -58,67 +55,78 @@ export function useFocusState(): {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [displayNow, setDisplayNow] = useState(() => Date.now());
+  const [displayNow, setDisplayNow] = useState(0);
 
-  const mountedRef = useRef(true);
+  const mountedRef = useRef(false);
+  const mountEpochRef = useRef(0);
+  const requestSequenceRef = useRef(0);
+  const mutationGenerationRef = useRef(0);
   const busyRef = useRef(false);
+  const stateRef = useRef<FocusState | null>(null);
+  const anchorRef = useRef<{ serverNow: number; receivedAt: number } | null>(null);
   const channelRef = useRef<BroadcastChannel | null>(null);
 
   const applyState = useCallback((next: FocusState) => {
+    const serverNow = Date.parse(next?.now);
+    if (!Number.isFinite(serverNow)) throw new Error("Invalid focus server time");
+    anchorRef.current = { serverNow, receivedAt: performance.now() };
+    stateRef.current = next;
     setState(next);
-    // Keep the countdown anchored to the moment the new state arrived.
-    setDisplayNow(Date.now());
+    setDisplayNow(serverNow);
   }, []);
 
-  const refetch = useCallback(async () => {
-    if (busyRef.current) return;
+  const loadState = useCallback(async (mode: "foreground" | "background") => {
+    if (!mountedRef.current || busyRef.current) return;
+    const epoch = mountEpochRef.current;
+    const generation = mutationGenerationRef.current;
+    const sequence = ++requestSequenceRef.current;
+    const current = () => mountedRef.current && mountEpochRef.current === epoch &&
+      mutationGenerationRef.current === generation && requestSequenceRef.current === sequence;
+    if (stateRef.current === null) setLoading(true);
     try {
       const next = await fetchFocusState();
-      if (mountedRef.current) applyState(next);
-    } catch {
-      /* Silent background refresh: keep the last known state. */
+      if (!current()) return;
+      applyState(next);
+      setError(null);
+    } catch (err) {
+      if (!current()) return;
+      // A background failure is silent only when there is valid state to
+      // keep displaying; it must not strand a superseded initial load.
+      if (mode === "foreground" || stateRef.current === null) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      if (current()) setLoading(false);
     }
   }, [applyState]);
 
+  const refetch = useCallback(() => loadState("background"), [loadState]);
   const reload = useCallback(() => {
-    if (busyRef.current) return;
-    void (async () => {
-      try {
-        const next = await fetchFocusState();
-        if (!mountedRef.current) return;
-        applyState(next);
-        setError(null);
-      } catch (err) {
-        if (!mountedRef.current) return;
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    })();
-  }, [applyState]);
+    void loadState("foreground");
+  }, [loadState]);
 
-  // Initial load: exactly one GET /state per mount.
+  // StrictMode cleanup/setup is a new epoch even though refs survive it.
   useEffect(() => {
+    mountEpochRef.current += 1;
     mountedRef.current = true;
-    void (async () => {
-      try {
-        const next = await fetchFocusState();
-        if (!mountedRef.current) return;
-        applyState(next);
-        setLoading(false);
-      } catch (err) {
-        if (!mountedRef.current) return;
-        setError(err instanceof Error ? err.message : String(err));
-        setLoading(false);
-      }
-    })();
+    busyRef.current = false;
+    setBusy(false);
+    void loadState("foreground");
     return () => {
       mountedRef.current = false;
+      mountEpochRef.current += 1;
+      requestSequenceRef.current += 1;
+      busyRef.current = false;
     };
-  }, [applyState]);
+  }, [loadState]);
 
-  // Local display tick: only moves displayNow; all countdown math derives
-  // from it, so drift can never accumulate client-side.
+  // Intervals schedule paints; elapsed time always comes from one monotonic
+  // delta, rather than adding a second for each callback that happened to run.
   useEffect(() => {
-    const id = setInterval(() => setDisplayNow(Date.now()), 1000);
+    const id = setInterval(() => {
+      const anchor = anchorRef.current;
+      if (anchor) setDisplayNow(anchor.serverNow + Math.max(0, performance.now() - anchor.receivedAt));
+    }, 1000);
     return () => clearInterval(id);
   }, []);
 
@@ -151,7 +159,12 @@ export function useFocusState(): {
   }, [refetch]);
 
   const dispatch = useCallback(async (action: FocusAction, kind?: SessionKind) => {
-    if (busyRef.current) return;
+    if (!mountedRef.current || busyRef.current) return;
+    const epoch = mountEpochRef.current;
+    const generation = ++mutationGenerationRef.current;
+    requestSequenceRef.current += 1;
+    const current = () => mountedRef.current && mountEpochRef.current === epoch &&
+      mutationGenerationRef.current === generation;
     busyRef.current = true;
     setBusy(true);
     setError(null);
@@ -164,14 +177,14 @@ export function useFocusState(): {
             : action === "resume"
               ? await resumeFocusSession()
               : await stopFocusSession();
-      if (!mountedRef.current) return;
+      if (!current()) return;
       applyState(next);
       channelRef.current?.postMessage({ type: "sync" });
     } catch (err) {
-      if (!mountedRef.current) return;
+      if (!current()) return;
       // 409 self-heal: the server's conflict body carries the authoritative
       // state — adopt it instead of surfacing an error to the user.
-      const details = err instanceof ApiError ? err.details : null;
+      const details = err instanceof ApiError && err.status === 409 ? err.details : null;
       const healed = details !== null && typeof details === "object" && "state" in details
         ? (details as { state: unknown }).state
         : null;
@@ -182,8 +195,11 @@ export function useFocusState(): {
         setError(err instanceof Error ? err.message : String(err));
       }
     } finally {
-      busyRef.current = false;
-      if (mountedRef.current) setBusy(false);
+      if (current()) {
+        busyRef.current = false;
+        setBusy(false);
+        setLoading(false);
+      }
     }
   }, [applyState]);
 
@@ -191,10 +207,11 @@ export function useFocusState(): {
   const remainingSeconds = useMemo(() => {
     if (!active) return 0;
     if (active.status === "running" && active.expectedEndAt !== null) {
-      return Math.max(0, Math.floor((Date.parse(active.expectedEndAt) - displayNow) / 1000));
+      const remaining = Math.floor((Date.parse(active.expectedEndAt) - displayNow) / 1000);
+      return Number.isFinite(remaining) ? Math.max(0, remaining) : 0;
     }
     // Paused sessions freeze at the server-reported snapshot.
-    return active.remainingSeconds;
+    return Number.isFinite(active.remainingSeconds) ? Math.max(0, active.remainingSeconds) : 0;
   }, [active, displayNow]);
 
   return { state, loading, error, busy, displayNow, remainingSeconds, dispatch, reload };

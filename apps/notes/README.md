@@ -17,3 +17,10 @@ parameterized `AT TIME ZONE` (never `CURRENT_DATE`); PATCH uses three-state
 nullable semantics with `tagIds` replaced wholesale inside the note's
 transaction; multi-tag list filtering is AND semantics. `events` is
 deliberately not declared — there are no consumers yet.
+
+Quick Note saves a snapshot while keeping the input editable. A successful
+response clears the input only if no edits occurred during that request;
+otherwise the complete current draft remains, including an A → B → A edit.
+Failures also retain the current draft, and the next save submits that draft.
+Saved/Open identifies the submitted note, while expanded recent entries refresh
+after success. Consecutive clicks share the existing mutation guard.

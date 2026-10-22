@@ -388,11 +388,11 @@ describe("assets app API", () => {
     });
     assert.equal(download.statusCode, 200);
     assert.equal(download.rawPayload.toString("utf8"), content);
-    const contentType = download.headers["content-type"];
-    assert.ok(
-      typeof contentType === "string" && contentType.startsWith("text/plain"),
-      `unexpected content-type: ${String(contentType)}`,
-    );
+    // The original MIME stays in metadata; the download response never
+    // lets that untrusted value select an executable representation.
+    assert.equal(download.headers["content-type"], "application/octet-stream");
+    assert.match(String(download.headers["content-disposition"]), /^attachment;/);
+    assert.equal(download.headers["x-content-type-options"], "nosniff");
 
     const missingDownload = await platform.app.inject({
       method: "GET",

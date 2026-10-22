@@ -7,6 +7,12 @@ function jsonResponse(body: unknown, ok = true, status = 200): Response {
   return { ok, status, json: async () => body } as unknown as Response;
 }
 
+function deferredResponse() {
+  let resolve!: (response: Response) => void;
+  const promise = new Promise<Response>((complete) => { resolve = complete; });
+  return { promise, resolve };
+}
+
 const savedNote = {
   id: "note-9",
   title: null,
@@ -21,10 +27,10 @@ const savedNote = {
 };
 
 /** The widget renders a Link, so it needs a router context. */
-function renderWidget() {
+function renderWidget(density: "compact" | "normal" | "expanded" = "normal") {
   return render(
     <MemoryRouter>
-      <QuickNoteWidget />
+      <QuickNoteWidget density={density} />
     </MemoryRouter>,
   );
 }
@@ -129,6 +135,150 @@ describe("QuickNoteWidget", () => {
     fireEvent.click(retry);
     expect(await screen.findByText("Saved")).toBeDefined();
     expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves edits during a save and submits the current draft on the next save", async () => {
+    const pending = deferredResponse();
+    const fetchMock = vi.fn((_input: URL | RequestInfo, _init?: RequestInit) =>
+      fetchMock.mock.calls.length === 1
+        ? pending.promise
+        : Promise.resolve(jsonResponse({ ...savedNote, id: "note-current-draft" })),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    renderWidget();
+    const input = screen.getByLabelText("Quick note content");
+    fireEvent.change(input, { target: { value: "submitted A" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(input).toBeEnabled();
+    fireEvent.change(input, { target: { value: "current B" } });
+
+    await act(async () => { pending.resolve(jsonResponse({ ...savedNote, id: "note-submitted-A" })); });
+
+    expect(await screen.findByText("Saved")).toBeDefined();
+    expect(input).toHaveValue("current B");
+    expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute("href", "/notes/note-submitted-A");
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toEqual({ content: "submitted A" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute("href", "/notes/note-current-draft"));
+    expect(JSON.parse(String(fetchMock.mock.calls[1]![1]?.body))).toEqual({ content: "current B" });
+    expect(input).toHaveValue("");
+  });
+
+  it("preserves the entire draft when edits change A to B and back to A during the save", async () => {
+    const pending = deferredResponse();
+    const fetchMock = vi.fn(() => pending.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    renderWidget();
+    const input = screen.getByLabelText("Quick note content");
+    fireEvent.change(input, { target: { value: "A" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.change(input, { target: { value: "B" } });
+    fireEvent.change(input, { target: { value: "A" } });
+
+    await act(async () => { pending.resolve(jsonResponse(savedNote)); });
+
+    expect(await screen.findByText("Saved")).toBeDefined();
+    expect(input).toHaveValue("A");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps edits after a failed pending save and retries the current draft", async () => {
+    const pending = deferredResponse();
+    const fetchMock = vi.fn((_input: URL | RequestInfo, _init?: RequestInit) =>
+      fetchMock.mock.calls.length === 1 ? pending.promise : Promise.resolve(jsonResponse(savedNote)),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    renderWidget();
+    const input = screen.getByLabelText("Quick note content");
+    fireEvent.change(input, { target: { value: "failed snapshot A" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.change(input, { target: { value: "retry current B" } });
+
+    await act(async () => {
+      pending.resolve(jsonResponse({ error: { code: "internal_error", message: "Save failed" } }, false, 500));
+    });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Save failed");
+    expect(input).toHaveValue("retry current B");
+    expect(screen.queryByRole("link", { name: "Open" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("Saved")).toBeDefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toEqual({ content: "failed snapshot A" });
+    expect(JSON.parse(String(fetchMock.mock.calls[1]![1]?.body))).toEqual({ content: "retry current B" });
+    expect(input).toHaveValue("");
+  });
+
+  it("issues only one POST for consecutive save clicks while the response is pending", async () => {
+    const pending = deferredResponse();
+    const fetchMock = vi.fn(() => pending.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    renderWidget();
+    fireEvent.change(screen.getByLabelText("Quick note content"), { target: { value: "one submission" } });
+    const save = screen.getByRole("button", { name: "Save" });
+    act(() => { save.click(); save.click(); save.click(); });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Saving…" })).toBeDisabled();
+    await act(async () => { pending.resolve(jsonResponse(savedNote)); });
+    expect(await screen.findByText("Saved")).toBeDefined();
+    expect(screen.getByLabelText("Quick note content")).toHaveValue("");
+  });
+
+  it("refreshes expanded recent entries after saving without discarding a newer draft", async () => {
+    const pending = deferredResponse();
+    let committed = false;
+    const fetchMock = vi.fn((input: URL | RequestInfo, init?: RequestInit) => {
+      if (init?.method === "POST") return pending.promise;
+      return Promise.resolve(jsonResponse({
+        items: [{ ...savedNote, content: committed ? "saved recent A" : "previous recent entry" }],
+        total: 1, todayKey: "2026-08-31", yesterdayKey: "2026-08-30",
+      }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderWidget("expanded");
+    expect(await screen.findByText("previous recent entry")).toBeDefined();
+    const input = screen.getByLabelText("Quick note content");
+    fireEvent.change(input, { target: { value: "saved recent A" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    fireEvent.change(input, { target: { value: "new draft B" } });
+    committed = true;
+    await act(async () => { pending.resolve(jsonResponse({ ...savedNote, content: "saved recent A" })); });
+
+    expect(await screen.findByText("saved recent A")).toBeDefined();
+    expect(screen.queryByText("previous recent entry")).toBeNull();
+    expect(input).toHaveValue("new draft B");
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method !== "POST")).toHaveLength(2);
+    expect(screen.getByRole("link", { name: "Open" })).toHaveAttribute("href", "/notes/note-9");
+  });
+
+  it("refreshes expanded recent entries even while the initial list is still pending", async () => {
+    const initial = deferredResponse();
+    let listRequests = 0;
+    const listResponse = (content: string) => jsonResponse({
+      items: [{ ...savedNote, content }], total: 1,
+      todayKey: "2026-08-31", yesterdayKey: "2026-08-30",
+    });
+    const fetchMock = vi.fn((_input: URL | RequestInfo, init?: RequestInit) => {
+      if (init?.method === "POST") return Promise.resolve(jsonResponse(savedNote));
+      listRequests += 1;
+      return listRequests === 1 ? initial.promise : Promise.resolve(listResponse("newly saved recent entry"));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderWidget("expanded");
+    fireEvent.change(screen.getByLabelText("Quick note content"), { target: { value: "saved before recent load" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    try {
+      expect(await screen.findByText("Saved")).toBeDefined();
+      await waitFor(() => expect(listRequests).toBe(2));
+      expect(await screen.findByText("newly saved recent entry")).toBeDefined();
+    } finally {
+      await act(async () => { initial.resolve(listResponse("stale pre-save recent entry")); });
+    }
+    expect(screen.queryByText("stale pre-save recent entry")).toBeNull();
+    expect(screen.getByText("newly saved recent entry")).toBeDefined();
   });
 });
 

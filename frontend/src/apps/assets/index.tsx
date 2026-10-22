@@ -972,8 +972,8 @@ function AssetDetailPage() {
                 <a
                   className="attachment-row__name"
                   href={`/api/apps/assets/items/${id}/attachments/${attachment.id}`}
-                  target="_blank"
-                  rel="noreferrer"
+                  download
+                  title={`Download ${attachment.filename}`}
                 >
                   {attachment.filename}
                 </a>
