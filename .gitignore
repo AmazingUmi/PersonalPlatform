@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 # Python
 __pycache__/
@@ -21,6 +22,7 @@ frontend/dist/
 storage/*
 !storage/.gitkeep
 postgres-data/
+backups/
 
 # Editors / OS
 .DS_Store

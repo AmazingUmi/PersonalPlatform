@@ -1,20 +1,61 @@
-# Production-style overlay for docker compose.
-#   docker compose -f docker-compose.yml -f docker/docker-compose.prod.yml up -d
-#
-# Differences from the default dev compose file:
-# - runs built artifacts (dist) instead of dev watchers
-# - non-root container user, read-only-ish hardening via resource limits
-# - restart policies for unattended operation
-# - storage volume for /workspace/storage
+# Standalone production deployment; do not merge with the development file.
+# docker compose --env-file .env.production -f docker/docker-compose.prod.yml up -d --build
+name: ${COMPOSE_PROJECT_NAME:-personal-platform-production}
+
 services:
+  database:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB for production}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER for production}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD for production}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: "1.0"
+
   backend:
     build:
       context: ..
       dockerfile: docker/backend.prod.Dockerfile
-    user: "node"
-    command: ["node", "dist/main.js"]
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PLATFORM_ROOT: /workspace
+      PLATFORM_ENVIRONMENT: production
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
+      TRUST_PROXY: ${TRUST_PROXY:-uniquelocal}
+      # The entrypoint constructs DATABASE_URL inside the container so URL
+      # delimiters in credentials cannot change the host, path or query.
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB for production}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER for production}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD for production}
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:?Set BOOTSTRAP_ADMIN_USERNAME for production}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD for production}
+    volumes:
+      - app-storage:/workspace/storage
+    depends_on:
+      database:
+        condition: service_healthy
+    init: true
     restart: unless-stopped
-    volumes: []
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/api/core/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
     deploy:
       resources:
         limits:
@@ -25,19 +66,24 @@ services:
     build:
       context: ..
       dockerfile: docker/frontend.prod.Dockerfile
-    user: "node"
+    ports:
+      - "${BIND_IP:-127.0.0.1}:${FRONTEND_PORT:-5173}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
     restart: unless-stopped
-    volumes: []
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
     deploy:
       resources:
         limits:
           memory: 256M
           cpus: "0.5"
 
-  database:
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          memory: 1G
-          cpus: "1.0"
+volumes:
+  postgres-data:
+  app-storage:

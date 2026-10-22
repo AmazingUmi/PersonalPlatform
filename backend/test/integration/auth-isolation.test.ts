@@ -90,6 +90,9 @@ before(async () => {
       tasks: tasksApp,
     },
     database: db,
+    // The task fixtures below describe this calendar day; real time would
+    // make the ownership assertions fail on every later day.
+    clock: () => new Date("2026-09-16T12:00:00.000Z"),
   });
   platform = fixture.platform;
   cleanup = fixture.cleanup;

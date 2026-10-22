@@ -1,4 +1,7 @@
-.PHONY: dev dev-expose down logs ps check build test verify backup
+.PHONY: dev dev-expose down logs ps prod prod-down prod-logs prod-ps check build test verify verify-docker backup
+
+PROD_ENV ?= .env.production
+PROD_COMPOSE = docker compose --env-file "$(PROD_ENV)" -f docker/docker-compose.prod.yml
 
 dev:
 	docker compose up --build
@@ -17,6 +20,19 @@ logs:
 ps:
 	docker compose ps
 
+# Standalone production stack; do not merge it with docker-compose.yml.
+prod:
+	$(PROD_COMPOSE) up --build -d --wait --wait-timeout 180
+
+prod-down:
+	$(PROD_COMPOSE) down
+
+prod-logs:
+	$(PROD_COMPOSE) logs -f
+
+prod-ps:
+	$(PROD_COMPOSE) ps
+
 check:
 	npm run check
 
@@ -28,6 +44,9 @@ test:
 
 verify:
 	bash scripts/verify.sh
+
+verify-docker:
+	npm run verify:docker
 
 backup:
 	bash scripts/backup.sh backup

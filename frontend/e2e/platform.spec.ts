@@ -95,21 +95,53 @@ test("tasks: create a task and complete it", async ({ page }) => {
 });
 
 test("mini game: board renders, tiles move and the game saves", async ({ page }) => {
+  const previous = await adminFetch("GET", "/api/apps/mini_game/saves");
+  assert.ok(previous.ok);
+  const { save: previousSave } = await previous.json();
+  const board = [[2, 2, 2, 2], [2, 2, 2, 2], [0, 0, 0, 0], [0, 0, 0, 0]];
+  const seeded = await adminFetch("PUT", "/api/apps/mini_game/saves", {
+    board, score: 0, revision: (previousSave?.revision ?? 0) + 1,
+  });
+  assert.ok(seeded.ok);
+  assert.equal((await seeded.json()).accepted, true);
   await page.goto("/mini_game");
   const cells = page.locator(".game__cell, .game-cell");
   await expect(cells).toHaveCount(16);
+  const tiles = page.locator(".game__tile");
+  await expect(tiles).toHaveCount(8);
 
-  const nonEmptyBefore = await page.locator(".game__cell:not(:empty), .game-cell:not(:empty)").count();
+  const moved = page.waitForResponse((response) =>
+    response.url().endsWith("/api/apps/mini_game/saves") && response.request().method() === "PUT",
+  );
   await page.keyboard.press("ArrowLeft");
-  await page.keyboard.press("ArrowUp");
-  await expect
-    .poll(async () => page.locator(".game__cell:not(:empty), .game-cell:not(:empty)").count())
-    .toBeGreaterThanOrEqual(nonEmptyBefore);
-
-  // Save indicator flips to Saved after a move (debounced/immediate PUT).
+  const savedResponse = await moved;
+  assert.ok(savedResponse.ok());
+  const { save, accepted } = await savedResponse.json();
+  assert.equal(accepted, true);
+  assert.equal(save.score, 16); // Four 2+2 merges, then one random new tile.
+  assert.equal(save.board.flat().filter((value: number) => value !== 0).length, 5);
+  await expect(tiles).toHaveCount(5);
   await expect(page.getByText(/saved/i)).toBeVisible({ timeout: 10_000 });
 
+  const reloaded = page.waitForResponse((response) =>
+    response.url().endsWith("/api/apps/mini_game/saves") && response.request().method() === "GET",
+  );
+  await page.reload();
+  const restored = await reloaded;
+  assert.ok(restored.ok());
+  const { save: restoredSave } = await restored.json();
+  assert.deepEqual(restoredSave.board, save.board);
+  assert.equal(restoredSave.score, save.score);
+  await expect(tiles).toHaveCount(5);
+  await expect(tiles).toHaveText(save.board.flat().filter((value: number) => value !== 0).map(String));
+  await expect(page.getByLabel("Score", { exact: true }).locator(".game__score-value")).toHaveText("16");
+
+  const reset = page.waitForResponse((response) =>
+    response.url().endsWith("/api/apps/mini_game/saves") && response.request().method() === "PUT",
+  );
   await page.getByRole("button", { name: "New Game" }).click();
+  assert.ok((await reset).ok());
+  await expect(tiles).toHaveCount(2);
   await expect(page.getByText(/saved/i)).toBeVisible({ timeout: 10_000 });
 });
 

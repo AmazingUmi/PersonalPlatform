@@ -22,6 +22,8 @@
     "test": "npm run test --workspaces --if-present",
     "test:integration": "npm run test:integration --workspaces --if-present",
     "e2e": "npm run e2e --workspace @personal-platform/frontend --if-present",
+    "test:docker:config": "node --test scripts/test/docker-config.test.mjs",
+    "verify:docker": "node scripts/verify-docker.mjs",
     "restore": "tsx scripts/backup.ts restore"
   },
   "engines": {

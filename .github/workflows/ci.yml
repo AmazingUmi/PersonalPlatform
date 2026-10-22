@@ -8,6 +8,19 @@ permissions:
   contents: read
 
 jobs:
+  docker-production:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # This job intentionally has no npm ci or host build output: the two
+      # production images must build entirely from the clean checkout.
+      - name: Build and verify the production Compose stack
+        run: npm run verify:docker
+
   check-build-test:
     runs-on: ubuntu-latest
     services:

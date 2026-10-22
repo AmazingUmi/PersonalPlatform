@@ -1,5 +1,4 @@
-# Production frontend image: build the SPA and serve it with vite preview.
-FROM node:22-alpine
+FROM node:22-alpine AS build
 
 WORKDIR /workspace
 
@@ -8,11 +7,14 @@ COPY backend/package.json backend/package.json
 COPY frontend/package.json frontend/package.json
 RUN npm ci
 
-COPY apps apps
-COPY frontend frontend
+COPY . .
+RUN npm run generate:apps:check \
+    && npm run build --workspace @personal-platform/frontend -- --assetsDir _static
 
-RUN npm run build --workspace @personal-platform/frontend && npm prune --omit=dev
+FROM nginxinc/nginx-unprivileged:stable-alpine AS runtime
 
-USER node
-EXPOSE 5173
-CMD ["npm", "run", "preview", "--workspace", "@personal-platform/frontend", "--", "--host", "0.0.0.0", "--port", "5173"]
+COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /workspace/frontend/dist/ /usr/share/nginx/html/
+
+USER 101
+EXPOSE 8080

@@ -6,7 +6,7 @@
 
 - Node.js ≥ 22（推荐 22 LTS）
 - PostgreSQL 17（本地安装或 Docker Compose 提供）
-- Docker（可选，仅用于 Compose 一键启动）
+- Docker（本地开发可选；Compose 开发/生产和镜像验证需要，见 [DEPLOYMENT.md](DEPLOYMENT.md)）
 
 ## 常用命令
 
@@ -26,6 +26,8 @@ npm run create:app -- my_app "My App"   # 从模板创建新 App
 npm run bootstrap:admin -- --username admin   # 激活/创建首个管理员（隐藏密码输入）
 npm run backup              # 备份数据库（backup.sh backup|restore）
 npm run verify              # 本地完整验收（见 scripts/verify.sh）
+npm run test:docker:config   # 开发/生产 Compose 配置回归，不需 daemon
+npm run verify:docker        # 隔离项目内构建生产镜像、启动并验证持久化
 ```
 
 ## 数据库
@@ -115,5 +117,7 @@ npm run dev --workspace @personal-platform/frontend   # 另一个终端
 ```
 
 ## Docker 网络默认值
+
+以下为开发配置。生产使用独立 `docker/docker-compose.prod.yml`，通过 `make prod` 启动；不与开发 Compose 合并。生产的环境、持久化和旧部署迁移见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 默认 `docker compose up` 只把 frontend 绑定到宿主机 `127.0.0.1:5173`；database 与 backend 不发布宿主机端口（frontend 通过 compose 网络代理 `/api`）。需要数据库工具直连或 LAN 访问时使用 `make dev-expose`（= `docker/compose.expose.yml`：database/backend 发布到回环，frontend 开放全部网卡），或通过 `BIND_IP` / `EXPOSE_BIND_IP` 环境变量自定义绑定地址。CI 与 Playwright E2E 不依赖 compose 端口发布，不受该默认值影响。

@@ -13,7 +13,7 @@
 - **查询状态**：Assets / Tasks 的搜索、过滤、排序进入 URL search params（刷新/前进后退/收藏/深链），搜索带 250ms debounce；排序字段走显式 allowlist，禁止任意 SQL 插值
 - **工程化**：单元/集成/前端测试、E2E（Playwright）、备份脚本、App 模板与生成脚本、`scripts/verify.sh` 验收脚本、GitHub Actions（含 PostgreSQL service）
 
-## 启动
+## 开发启动
 
 前置条件：Node.js 22+；本地或 Docker 的 PostgreSQL 17。
 
@@ -29,6 +29,21 @@ make dev                   # 等价于 docker compose up --build
 默认网络拓扑（见下方"网络安全默认值"）：database 与 backend 只在 Docker 网络内可达，不对宿主机发布端口；因此 Backend 的 8000 与 PostgreSQL 的 5432 默认无法从宿主机直接访问。
 
 停止：`make down`。
+
+### 生产部署
+
+开发与生产使用独立 Compose 文件。生产运行编译后的 Node 后端和 Nginx 静态前端，不挂载开发源码。
+
+```bash
+cp .env.production.example .env.production
+# 填写数据库和管理员密码；正式使用配置 HTTPS 反向代理。
+make prod
+make prod-ps
+```
+
+生产默认项目与开发数据分离，数据库和附件使用命名卷；`make prod-down` 停止服务并保留数据。现有部署须先备份、停写并迁移数据，不能直接把全新生产卷当成旧数据。完整操作、HTTP 验证和迁移步骤见 [Docker 部署指南](doc/DEPLOYMENT.md)。
+
+镜像构建和真实启动验收：`npm run verify:docker`（需要 Docker daemon，自动使用并清理独立临时项目）。
 
 ### 网络安全默认值
 
