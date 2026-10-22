@@ -31,7 +31,7 @@ npm run migration:status
 
 ```bash
 # 1. 发布前必须备份（生产发布约定）
-npm run backup            # 写入 backups/personal_platform_<时间戳>.sql
+npm run backup            # 写入 backups/personal_platform_<时间戳>/
 
 # 2. 应用迁移
 npm run migration:up
@@ -49,6 +49,21 @@ npm run verify
 - 单个 scope 失败：启动中止，日志包含 `migration failed for scope '<id>'`。修复 SQL 后重启即可（单事务保证无半迁移状态）。
 - 迁移卡住（advisory lock 被占）：查 `SELECT pid, query FROM pg_stat_activity WHERE wait_event_type = 'Lock';`，确认后终止持锁会话。
 - 需要回退数据结构时：编写新的前向迁移纠正，不编辑已应用的历史文件。
+
+## 恢复失败处理
+
+恢复前停止后端、调度和其他写入者，并保存操作前完整的数据库、storage 和 config 备份。本工具导入的是可信 pg_dump plain SQL/tar，支持平台规范的 schema 名（字母/下划线开头，其后字母、数字、下划线）；不用于导入任意不可信 SQL 或归档。
+
+| 失败阶段 | 数据状态与动作 |
+|---|---|
+| 格式、解包或预复制失败 | 数据库尚未变更，原文件未安装修改；修复备份/权限/空间后重试 |
+| SQL 执行错误 | 所有 DROP 与 SQL 导入由同一个 psql 单事务回滚；原 storage/config 保留 |
+| 数据库连接中断 | 文件安装尚未开始；尤其在 COMMIT 附近中断时需核对数据库结果，不能仅凭客户端报错判断是否提交 |
+| 数据库已提交、文件安装失败 | 明确报告部分完成；`.restore-stage-*` 保留 `previous-storage`、`previous-config`、`incoming/storage`、`incoming/config` 及导入 SQL（原目录不存在时没有对应 previous 副本） |
+
+最后一种情况保持服务停止，先保全日志报告的 staging 路径。修复存储故障后，可依据已提交的数据库和 `incoming/` 完成文件安装；如需整体回退，使用操作前的完整备份，不能仅回退旧文件后恢复服务。确认数据库、附件和配置一致才启动。成功及普通失败会清理 staging；部分完成的 staging 不会自动删除，应在确认恢复后由操作者处理。
+
+预暂存会同时保存待安装文件与原文件，需预留相应磁盘空间。目录内容复制兼容 storage 根为卷挂载点；已有 storage/config 根若为符号链接或普通文件会在数据库变更前拒绝，避免产生仍指向活目录的伪快照。数据库和文件系统不提供共同的原子提交或崩溃自动恢复。
 
 ## 禁用 / 启用 App 与迁移的关系
 

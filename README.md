@@ -119,7 +119,9 @@ npm run restore -- backups/<timestamp> --yes      # 恢复（必须显式 --yes�
 
 备份目录包含：`database.sql`（pg_dump 逻辑备份）、`storage.tar.gz`（全部本地存储）、`config/`（非敏感配置）、`metadata.json`（格式版本、创建时间、平台版本、App 列表）。`.env` 密钥、`node_modules`、构建产物永不打包。
 
-**恢复会覆盖当前数据**：restore 会删除并重建数据库中备份所含的 schema（在单事务中执行，失败自动回滚）、整体替换 `storage/` 并覆盖 `config/`。因此 restore 不带 `--yes` 时直接拒绝执行。格式版本不匹配（`formatVersion`）的备份会被拒绝。端到端往返（备份→破坏→恢复→校验数据库与附件）由 `backend/test/integration/backup-restore.test.ts` 自动化覆盖，需要 `pg_dump`/`psql`（本地可用 Homebrew PostgreSQL 自带；CI 安装 postgresql-client-17）。
+**恢复会覆盖当前数据**：先停止后端和调度并保存操作前的完整备份。restore 先检查并暂存附件、配置及原文件副本，再在同一数据库事务内删除并重建备份中的 schema；SQL 执行错误会整体回滚，文件尚未安装。数据库提交后才替换 `storage/` 与 `config/`，两种存储没有共同事务；若文件安装失败，命令非零退出并报告保留旧、新文件树的 `.restore-stage-*` 路径。保持停机并按[恢复失败处理](doc/MIGRATION_RUNBOOK.md#恢复失败处理)完成恢复，不能把部分完成当成整体回滚。
+
+恢复必须显式 `--yes`，仅接受本工具可信的备份及平台规范的 schema 标识符；格式版本不匹配、归档损坏或预复制失败会在数据库变更前拒绝。往返、SQL 回滚、归档预检及文件安装失败由 `backend/test/integration/backup-restore.test.ts` 覆盖，需要 PostgreSQL 17 的 `pg_dump`/`psql`。
 
 ## 目录
 

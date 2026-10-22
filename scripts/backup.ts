@@ -16,9 +16,9 @@
  * storage/ and config/ — it refuses to run without --yes.
  */
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { extractRestoreSchemas } from "./backup-schemas.js";
 
 const DEFAULT_DATABASE_URL =
   process.env.DATABASE_URL ??
@@ -93,13 +93,11 @@ function parseArgs(argv: string[]): Args {
 function run(command: string, args: string[], what: string): string {
   const result = spawnSync(command, args, { encoding: "utf8" });
   if (result.error) {
-    console.error(`error: ${what}: cannot run '${command}' (${result.error.message})`);
-    process.exit(1);
+    throw new Error(`${what}: cannot run '${command}' (${result.error.message})`);
   }
   if (result.status !== 0) {
-    console.error(`error: ${what}: '${command} ${args.join(" ")}' failed with exit ${result.status}`);
-    if (result.stderr) console.error(result.stderr.trim());
-    process.exit(1);
+    // Arguments contain database credentials; never include them in logs.
+    throw new Error(`${what}: '${command}' failed with exit ${result.status}\n${result.stderr?.trim() ?? ""}`);
   }
   return result.stdout;
 }
@@ -166,9 +164,17 @@ function createBackup(args: Args): void {
   console.log(`backup written to ${dir}`);
 }
 
-/** Never drop system schemas, no matter what the dump claims to create. */
-function isDroppableSchema(name: string): boolean {
-  return !name.startsWith("pg_") && name !== "information_schema";
+function snapshotIfPresent(source: string, destination: string): void {
+  try {
+    const entry = lstatSync(source);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new Error(`restore target must be a real directory, not a symlink or file: ${source} (database not changed)`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  cpSync(source, destination, { recursive: true });
 }
 
 function restoreBackup(args: Args): void {
@@ -211,47 +217,59 @@ function restoreBackup(args: Args): void {
     process.exit(3);
   }
 
-  // 1. Drop the schemas the dump recreates (platform schemas only), then load
-  //    the dump in ONE transaction: a failure rolls back and leaves the
-  //    database exactly as it was.
+  // Preflight all incoming files and retain the old trees before touching DB.
+  // A stopped backend/scheduler is required: DB and files have no shared tx.
   const dump = readFileSync(databaseFile, "utf8");
-  const schemas = [...new Set([...dump.matchAll(/^CREATE SCHEMA (?:IF NOT EXISTS )?"?([a-z_][a-z0-9_]*)"?\;/gim)].map((m) => m[1]!))]
-    .filter(isDroppableSchema);
-  if (schemas.length > 0) {
-    const dropSql = schemas.map((schema) => `DROP SCHEMA IF EXISTS "${schema}" CASCADE;`).join("\n");
-    run("psql", [args.database, "--no-password", "-v", "ON_ERROR_STOP=1", "-c", dropSql], "schema drop failed");
-    console.log(`dropped schemas: ${schemas.join(", ")}`);
-  }
-  run(
-    "psql",
-    [args.database, "--no-password", "-v", "ON_ERROR_STOP=1", "--single-transaction", "-f", databaseFile],
-    "database restore failed (rolled back; database unchanged)",
-  );
-
-  // 2. Storage: extract to a temp dir first, then swap, so a broken archive
-  //    never destroys the current files.
-  const staging = mkdtempSync(join(tmpdir(), "pp-restore-"));
+  const schemas = extractRestoreSchemas(dump);
+  const staging = mkdtempSync(join(args.root, ".restore-stage-"));
+  let preserveStaging = false;
   try {
-    run("tar", ["-xzf", storageFile, "-C", staging], "storage extract failed");
-    if (!existsSync(join(staging, "storage"))) {
-      console.error("error: backup storage archive has no storage/ root");
-      process.exit(2);
+    const incoming = join(staging, "incoming");
+    mkdirSync(incoming);
+    run("tar", ["-xzf", storageFile, "-C", incoming], "storage extract failed (database not changed)");
+    const incomingStorage = join(incoming, "storage");
+    if (!existsSync(incomingStorage) || !lstatSync(incomingStorage).isDirectory() || lstatSync(incomingStorage).isSymbolicLink()) {
+      throw new Error("backup storage archive has no regular storage/ directory (database not changed)");
     }
-    rmSync(join(args.root, "storage"), { recursive: true, force: true });
-    cpSync(join(staging, "storage"), join(args.root, "storage"), { recursive: true });
-  } finally {
-    rmSync(staging, { recursive: true, force: true });
-  }
+    const backupConfig = join(dir, "config");
+    if (!lstatSync(backupConfig).isDirectory() || !lstatSync(join(backupConfig, "platform.yaml")).isFile()) {
+      throw new Error("backup config/platform.yaml is missing (database not changed)");
+    }
+    cpSync(backupConfig, join(incoming, "config"), { recursive: true });
+    snapshotIfPresent(join(args.root, "storage"), join(staging, "previous-storage"));
+    snapshotIfPresent(join(args.root, "config"), join(staging, "previous-config"));
+    const stagedSql = join(staging, "database.sql");
+    writeFileSync(stagedSql, dump);
 
-  // 3. Config files ride along with the backup.
-  const backupConfig = join(dir, "config");
-  if (existsSync(backupConfig)) {
-    cpSync(backupConfig, join(args.root, "config"), { recursive: true });
+    const dropSql = schemas.map((schema) => `DROP SCHEMA IF EXISTS "${schema}" CASCADE;`).join("\n");
+    run("psql", [args.database, "--no-psqlrc", "--no-password", "-v", "ON_ERROR_STOP=1", "--single-transaction",
+      ...(dropSql ? ["-c", dropSql] : []), "-f", stagedSql], "database restore failed; file installation not started");
+
+    try {
+      // Copy into the existing roots: a Docker volume's mountpoint cannot be
+      // renamed. Its children may be replaced after the old tree is retained.
+      for (const tree of ["storage", "config"]) {
+        const destination = join(args.root, tree);
+        mkdirSync(destination, { recursive: true });
+        for (const entry of readdirSync(destination)) rmSync(join(destination, entry), { recursive: true, force: true });
+        cpSync(join(incoming, tree), destination, { recursive: true });
+      }
+    } catch (error) {
+      preserveStaging = true;
+      throw new Error(`database restored (committed), file installation incomplete; old and incoming trees retained at ${staging}: ${(error as Error).message}`);
+    }
+  } finally {
+    if (!preserveStaging) rmSync(staging, { recursive: true, force: true });
   }
 
   console.log(`restored backup ${dir} (created ${metadata.createdAt}) into ${args.root}`);
 }
 
-const args = parseArgs(process.argv.slice(2));
-if (args.command === "create") createBackup(args);
-else restoreBackup(args);
+try {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.command === "create") createBackup(args);
+  else restoreBackup(args);
+} catch (error) {
+  console.error(`error: ${(error as Error).message}`);
+  process.exitCode = 1;
+}

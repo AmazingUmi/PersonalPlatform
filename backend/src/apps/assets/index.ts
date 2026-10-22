@@ -3,6 +3,7 @@ import multipart from "@fastify/multipart";
 import { AppError } from "../../core/api/errors.js";
 import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-registry/types.js";
 import type { JobHandle } from "../../core/scheduler/index.js";
+import { StorageError } from "../../core/storage/index.js";
 
 /** Database surface derived from AppContext (never from core internals — notes precedent). */
 type Db = AppContext["database"];
@@ -455,26 +456,57 @@ async function processCleanupQueue(ctx: AppContext): Promise<{ processed: number
 }
 
 /**
- * Full reconciliation: work the queue, then drop metadata whose backing file
- * vanished (manual deletion, disk loss, crash between steps). Every
- * attachment is checked inside its OWNER's storage root (AUTH-4).
+ * Full reconciliation: work the queue, then drop metadata only after an
+ * owner's storage read explicitly confirms not_found. exists=false alone
+ * also covers I/O/path faults, so an inconclusive probe retains metadata.
+ * Healthy attachments keep the cheap exists=true path without reading bytes.
  */
 async function reconcileStorage(ctx: AppContext): Promise<{
   queue: { processed: number; failed: number };
   danglingDropped: number;
+  probeFailed: number;
 }> {
   const queue = await processCleanupQueue(ctx);
   const { rows } = await ctx.database.query<{ id: string; storage_key: string; user_id: string }>(
     "SELECT id, storage_key, user_id FROM assets.attachments",
   );
   let danglingDropped = 0;
+  let probeFailed = 0;
   for (const attachment of rows) {
-    if (await ctx.storage.forUser(attachment.user_id).exists(attachment.storage_key)) continue;
-    await ctx.database.query("DELETE FROM assets.attachments WHERE id = $1", [attachment.id]);
-    danglingDropped += 1;
-    ctx.log.warn({ attachmentId: attachment.id }, "dropped attachment metadata with missing file");
+    let confirmedMissing = false;
+    try {
+      const storage = ctx.storage.forUser(attachment.user_id);
+      if (await storage.exists(attachment.storage_key)) continue;
+      try {
+        await storage.read(attachment.storage_key);
+      } catch (error) {
+        // Only read's typed not_found is evidence of absence. An exception
+        // from forUser/exists, even not_found, remains a failed probe.
+        if (error instanceof StorageError && error.code === "not_found") confirmedMissing = true;
+        else throw error;
+      }
+    } catch (error) {
+      probeFailed += 1;
+      ctx.log.warn({
+        attachmentId: attachment.id,
+        userId: attachment.user_id,
+        code: error instanceof StorageError ? error.code : "unknown",
+        error,
+      }, "attachment storage probe failed; metadata retained");
+      continue;
+    }
+    if (!confirmedMissing) continue;
+    const deleted = await ctx.database.query(
+      "DELETE FROM assets.attachments WHERE id = $1 AND user_id = $2 AND storage_key = $3",
+      [attachment.id, attachment.user_id, attachment.storage_key],
+    );
+    const dropped = deleted.rowCount ?? 0;
+    danglingDropped += dropped;
+    if (dropped > 0) {
+      ctx.log.warn({ attachmentId: attachment.id, userId: attachment.user_id }, "dropped attachment metadata with missing file");
+    }
   }
-  return { queue, danglingDropped };
+  return { queue, danglingDropped, probeFailed };
 }
 
 /** Enqueue and immediately try to drain: most compensations succeed inline. */
@@ -1032,7 +1064,7 @@ async function registerJobs(ctx: AppContext): Promise<JobHandle[]> {
   // operation resolves the scope through forUser(user_id).
   const reconcile = async () => {
     const result = await reconcileStorage(ctx);
-    if (result.queue.processed > 0 || result.danglingDropped > 0) {
+    if (result.queue.processed > 0 || result.danglingDropped > 0 || result.probeFailed > 0) {
       ctx.log.info(result, "storage reconciliation ran");
     }
   };

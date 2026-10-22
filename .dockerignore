@@ -19,6 +19,7 @@ storage
 postgres-data
 backups
 **/backups
+**/.restore-stage-*
 **/*.dump
 **/*.backup
 **/*.sql.gz

@@ -68,6 +68,15 @@ test("production rejects missing database and bootstrap credentials", () => {
   }
 });
 
+test("production waits for PostgreSQL TCP readiness after the socket-only initialization server", () => {
+  const result = config(["docker/docker-compose.prod.yml"]);
+  assert.equal(result.status, 0, result.stderr);
+  const { services } = JSON.parse(result.stdout);
+  const probe = services.database.healthcheck.test.join(" ");
+  assert.match(probe, /pg_isready\s+-h\s+127\.0\.0\.1\b/, "a Unix socket can become ready before the backend can connect over TCP");
+  assert.equal(services.backend.depends_on.database.condition, "service_healthy");
+});
+
 test("development retains live source mounts and private backend/database networking", () => {
   const result = config(["docker-compose.yml"]);
   assert.equal(result.status, 0, result.stderr);
