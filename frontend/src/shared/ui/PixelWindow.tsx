@@ -20,6 +20,8 @@ interface PixelWindowProps extends Omit<HTMLAttributes<HTMLElement>, "title"> {
   actions?: ReactNode;
   /** Rendered before the icon — e.g. the dashboard drag handle in edit mode. */
   headerPrefix?: ReactNode;
+  /** Help trigger beside the title. Stays outside the heading element. */
+  titleHelp?: ReactNode;
   children: ReactNode;
 }
 
@@ -32,6 +34,7 @@ export function PixelWindow({
   headingLevel = 2,
   actions,
   headerPrefix,
+  titleHelp,
   children,
   className = "",
   ...rest
@@ -45,7 +48,14 @@ export function PixelWindow({
       <header className="px-window__header">
         {headerPrefix}
         {icon ? <PixelIcon name={icon} /> : null}
-        <Heading className="px-window__title">{title}</Heading>
+        {titleHelp ? (
+          <div className="px-inline-help px-window__heading">
+            <Heading className="px-window__title">{title}</Heading>
+            {titleHelp}
+          </div>
+        ) : (
+          <Heading className="px-window__title">{title}</Heading>
+        )}
         {actions ? <div className="px-window__actions">{actions}</div> : null}
       </header>
       <div className="px-window__body">{children}</div>

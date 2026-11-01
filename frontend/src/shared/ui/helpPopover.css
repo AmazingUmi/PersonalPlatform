@@ -6,6 +6,10 @@
 .px-help-panel__close { flex: 0 0 auto; border: 0; background: transparent; color: inherit; font: inherit; font-size: 22px; min-width: 32px; min-height: 32px; cursor: pointer; }
 .px-help-panel__body { padding: 12px; }
 .px-help-panel__body p + p { margin-top: 10px; }
-.page-header__title .px-help { font-size: 16px; }
-
-.page-header:has(> .px-help) { flex-direction: row; align-items: center; flex-wrap: wrap; }
+/* Title/field + question stay on one row. The text box may wrap internally. */
+.px-inline-help { display: inline-flex; flex-flow: row nowrap; align-items: center; gap: 4px; max-width: 100%; min-width: 0; vertical-align: middle; }
+.px-inline-help > .px-help { flex: none; margin-inline: 0; }
+.px-inline-help > :not(.px-help) { min-width: 0; overflow-wrap: anywhere; }
+.px-inline-help > .page-header__title { flex: 0 1 auto; min-width: 0; }
+.px-window__heading { flex: 1; min-width: 0; }
+.px-window__heading > .px-window__title { flex: 0 1 auto; }

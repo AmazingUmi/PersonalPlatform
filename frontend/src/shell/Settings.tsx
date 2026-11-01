@@ -30,8 +30,10 @@ export function Settings({ apps = [] }: { apps?: AppInfo[] }) {
   return (
     <div className="page page--detail settings-page" data-app="settings">
       <header className="page-header">
-        <h1 className="page-header__title">{t("Settings", "设置")}</h1>
-        <HelpPopover label={t("Settings", "设置")}>{t("Manage your platform, data and backups", "管理平台、数据与备份。")}</HelpPopover>
+        <div className="px-inline-help">
+          <h1 className="page-header__title">{t("Settings", "设置")}</h1>
+          <HelpPopover label={t("Settings", "设置")}>{t("Manage your platform, data and backups", "管理平台、数据与备份。")}</HelpPopover>
+        </div>
       </header>
       <div className="settings-layout">
         <nav className="settings-nav" aria-label={t("Settings sections", "设置分区")}>
@@ -45,19 +47,20 @@ export function Settings({ apps = [] }: { apps?: AppInfo[] }) {
               <dl className="px-deflist">
                 <div><dt>{t("Platform", "平台")}</dt><dd>PersonalPlatform</dd></div>
                 <div><dt>{t("Frontend", "前端")}</dt><dd>v{pkg.version}</dd></div>
-                <div><dt>{t("Apps", "应用")}</dt><dd>{apps.length} {t("installed ·", "个已安装 ·")} {enabled} {t("enabled", "已启用")}</dd></div>
+                <div><dt><span className="px-inline-help"><span>{t("Apps", "应用")}</span><HelpPopover label={t("App management", "应用管理")}>{t("Manage installed apps in the", "管理已安装应用：")} <Link to="/apps">{t("App Center", "应用中心")}</Link>.</HelpPopover></span></dt><dd>{apps.length} {t("installed ·", "个已安装 ·")} {enabled} {t("enabled", "已启用")}</dd></div>
                 <div><dt>{t("Theme", "主题")}</dt><dd>{t("Light (Pixel)", "浅色（像素）")}</dd></div>
               </dl>
-              <HelpPopover label={t("App management", "应用管理")}>{t("Manage installed apps in the", "管理已安装应用：")} <Link to="/apps">{t("App Center", "应用中心")}</Link>.</HelpPopover>
             </PixelWindow>
-            <PixelWindow title="Language / 语言" icon="settings" actions={<HelpPopover label={t("Language", "语言")}>
-              {t("The language is saved in this browser. Switching languages keeps your unsaved work and does not change the platform time zone.", "语言选择保存在当前浏览器。切换语言保留未保存内容，不改变平台时区。")}
-            </HelpPopover>}>
-              <label className="data-management__field" htmlFor="interface-language">{t("Interface language", "界面语言")}
+            <PixelWindow title="Language / 语言" icon="settings">
+              <div className="data-management__field">
+                <span className="px-inline-help">
+                  <label htmlFor="interface-language">{t("Interface language", "界面语言")}</label>
+                  <HelpPopover label={t("Language", "语言")}>{t("The language is saved in this browser. Switching languages keeps your unsaved work and does not change the platform time zone.", "语言选择保存在当前浏览器。切换语言保留未保存内容，不改变平台时区。")}</HelpPopover>
+                </span>
                 <select id="interface-language" className="px-input" aria-label="Language / 语言" value={language} onChange={event => setLanguage(event.target.value as "en" | "zh")}>
                   <option value="en">English</option><option value="zh">简体中文</option>
                 </select>
-              </label>
+              </div>
             </PixelWindow>
           </div>
           {(visited.has("data") || visited.has("webdav") || section === "data" || section === "webdav") && <DataManagementPanel section={section === "data" || section === "webdav" ? section : null} />}

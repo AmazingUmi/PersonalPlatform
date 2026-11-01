@@ -573,7 +573,13 @@ it("switches asset UI language without translating user content or resetting a d
   fireEvent.change(screen.getByLabelText("物品名称"), { target: { value: "Draft 台灯" } });
   fireEvent.click(screen.getByRole("button", { name: "切换分类 Books" }));
   expect(screen.queryByText(/获取日期可选/)).toBeNull();
-  fireEvent.click(screen.getByRole("button", { name: "帮助：获取日期" }));
+  const acquiredHelp = screen.getByRole("button", { name: "帮助：获取日期" });
+  expect(acquiredHelp.closest("label, h1, h2, h3, a")).toBeNull();
+  expect(acquiredHelp.parentElement?.textContent).toContain("获取日期");
+  const assetsTitle = document.querySelector(".page-header h1");
+  expect(assetsTitle?.textContent).toContain("资产");
+  expect(assetsTitle?.querySelector(".px-help")).toBeNull();
+  fireEvent.click(acquiredHelp);
   expect(screen.getByRole("dialog", { name: "获取日期" }).textContent).toContain("添加时间会自动记录");
   fireEvent.click(screen.getByRole("button", { name: "关闭帮助" }));
   fireEvent.click(screen.getByRole("button", { name: "Switch to English" }));

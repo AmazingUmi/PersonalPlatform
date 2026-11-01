@@ -222,6 +222,7 @@ it("switches a paused timer, history, settings and alert statuses without resett
   const minutes = await screen.findByRole("spinbutton", { name: "Focus minutes" });
   fireEvent.change(minutes, { target: { value: "42" } });
   expect(screen.getByRole("timer")).toHaveTextContent("20:00");
+  expect(await screen.findByText("Short Break")).toBeVisible();
   const requests = fetchMock.mock.calls.length;
   fireEvent.click(screen.getByRole("button", { name: "Switch language" }));
   expect(screen.getByRole("timer", { name: "剩余时间" })).toHaveTextContent("20:00");

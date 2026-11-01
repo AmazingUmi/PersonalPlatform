@@ -94,7 +94,7 @@ export function WorldClockSection({ now }: { now: Date }) {
         <EmptyState
           icon="clock"
           title={t("No world clocks", "暂无世界时钟")}
-          description={<HelpPopover label={t("World clocks", "世界时钟")}>{t(`Add a city to compare its local time with ${homeZone}.`, `添加城市，将当地时间与 ${homeZone} 比较。`)}</HelpPopover>}
+          help={<HelpPopover label={t("World clocks", "世界时钟")}>{t(`Add a city to compare its local time with ${homeZone}.`, `添加城市，将当地时间与 ${homeZone} 比较。`)}</HelpPopover>}
         />
       ) : null}
 
@@ -159,9 +159,13 @@ export function WorldClockSection({ now }: { now: Date }) {
           clocks.reload();
         }}
       >
-        <label className="px-form__row">
-          <span className="px-form__label">{t("City (timezone bound)", "城市（对应时区）")}</span>
+        <div className="px-form__row">
+          <span className="px-inline-help">
+            <label className="px-form__label" htmlFor="world-city">{t("City (timezone bound)", "城市（对应时区）")}</label>
+            {preset ? <HelpPopover label={t("City timezone", "城市时区")}>{t(`Binds ${preset.city} to ${preset.timezone}.`, `${worldCityLabel(preset, language)} 对应时区 ${preset.timezone}。`)}</HelpPopover> : null}
+          </span>
           <select
+            id="world-city"
             className="px-select"
             value={presetValue}
             onChange={(event) => setPresetValue(event.target.value)}
@@ -174,8 +178,7 @@ export function WorldClockSection({ now }: { now: Date }) {
               </option>
             ))}
           </select>
-        </label>
-        {preset ? <HelpPopover label={t("City timezone", "城市时区")}>{t(`Binds ${preset.city} to ${preset.timezone}.`, `${worldCityLabel(preset, language)} 对应时区 ${preset.timezone}。`)}</HelpPopover> : null}
+        </div>
         {alreadyAdded ? (
           <p className="clock-world__add-hint">{preset ? worldCityLabel(preset, language) : ""} {t("is already on the list.", "已在列表中。")}</p>
         ) : null}

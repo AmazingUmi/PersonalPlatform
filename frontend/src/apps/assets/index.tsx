@@ -277,15 +277,19 @@ function ItemEditor({
             )}
           </div>
           <div className="px-form__grid">
-            <label className="px-form__row">
-              <span className="px-form__label">{t("Acquired date", "获取日期")}</span>
+            <div className="px-form__row">
+              <span className="px-inline-help">
+                <label className="px-form__label" htmlFor="asset-acquired-at">{t("Acquired date", "获取日期")}</label>
+                <HelpPopover label={t("Acquired date", "获取日期")}><p>{t("Acquired date is optional — fill it in when you got the item (purchase, gift, …). The intake time is recorded automatically.", "获取日期可选，填写购入、获赠等实际取得物品的日期。添加时间会自动记录。")}</p></HelpPopover>
+              </span>
               <PixelInput
+                id="asset-acquired-at"
                 type="date"
                 value={form.acquiredAt}
                 onChange={(e) => set("acquiredAt", e.target.value)}
                 aria-label={t("Acquired date", "获取日期")}
               />
-            </label>
+            </div>
             <label className="px-form__row">
               <span className="px-form__label">{t("Location", "位置")}</span>
               <PixelInput
@@ -296,7 +300,6 @@ function ItemEditor({
               />
             </label>
           </div>
-          <HelpPopover label={t("Acquired date", "获取日期")}><p>{t("Acquired date is optional — fill it in when you got the item (purchase, gift, …). The intake time is recorded automatically.", "获取日期可选，填写购入、获赠等实际取得物品的日期。添加时间会自动记录。")}</p></HelpPopover>
           {save.error ? (
             <StatusMessage tone="error">
               <p>{save.error}</p>
@@ -477,10 +480,12 @@ function AssetsPage() {
   return (
     <div className="page" data-app="assets">
       <header className="page-header">
-        <h1 className="page-header__title">
-          <PixelIcon name={appIconName("assets")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
-        </h1>
-        <HelpPopover label={t("About assets", "关于资产")}><p>{t("Personal inventory", "管理个人物品、分类、位置与附件。")}</p></HelpPopover>
+        <div className="px-inline-help">
+          <h1 className="page-header__title">
+            <PixelIcon name={appIconName("assets")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
+          </h1>
+          <HelpPopover label={t("About assets", "关于资产")}><p>{t("Personal inventory", "管理个人物品、分类、位置与附件。")}</p></HelpPopover>
+        </div>
         <div className="page-header__actions">
           <PixelButton
             size="sm"

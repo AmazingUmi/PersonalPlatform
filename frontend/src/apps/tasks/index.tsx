@@ -345,10 +345,12 @@ function TasksPage() {
   return (
     <div className="page" data-app="tasks">
       <header className="page-header">
-        <h1 className="page-header__title">
-          <PixelIcon name={appIconName("tasks")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
-        </h1>
-        <HelpPopover label={t("About tasks", "关于任务")}><p>{t("Personal task manager", "管理个人任务、优先级与截止时间。")}</p></HelpPopover>
+        <div className="px-inline-help">
+          <h1 className="page-header__title">
+            <PixelIcon name={appIconName("tasks")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
+          </h1>
+          <HelpPopover label={t("About tasks", "关于任务")}><p>{t("Personal task manager", "管理个人任务、优先级与截止时间。")}</p></HelpPopover>
+        </div>
         <div className="page-header__actions">
           <PixelButton
             size="sm"
@@ -620,7 +622,7 @@ function TaskDetailPage() {
   return (
     <div className="page page--detail" data-app="tasks">
       <header className="page-header">
-        <div>
+        <div className="px-inline-help">
           <h1 className="page-header__title">{current.title}</h1>
           <HelpPopover label={t("Task detail", "任务详情")}><p>{t("Review the task schedule and status, edit its details or mark it complete.", "查看任务计划和状态，编辑详情或标记完成。")}</p></HelpPopover>
         </div>

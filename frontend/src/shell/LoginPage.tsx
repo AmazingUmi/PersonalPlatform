@@ -56,7 +56,7 @@ export function LoginPage() {
 
   return (
     <div className="page page--boot">
-      <PixelWindow title={t("System Login", "登录平台")} icon="logo">
+      <PixelWindow title={t("System Login", "登录平台")} icon="logo" titleHelp={<HelpPopover label={t("Signing in", "登录说明")}>{t("HttpOnly session cookie · your password is not stored by this app in the browser", "登录凭据使用 HttpOnly 会话 Cookie；密码不会保存在浏览器中。")}</HelpPopover>}>
         <p className="login-brand">
           <PixelIcon name="logo" size={20} className="login-brand__icon" />
           <span>
@@ -105,7 +105,6 @@ export function LoginPage() {
             )}
           </div>
         </form>
-        <HelpPopover label={t("Signing in", "登录说明")}>{t("HttpOnly session cookie · your password is not stored by this app in the browser", "登录凭据使用 HttpOnly 会话 Cookie；密码不会保存在浏览器中。")}</HelpPopover>
       </PixelWindow>
     </div>
   );

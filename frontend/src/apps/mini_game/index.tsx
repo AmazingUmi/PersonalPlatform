@@ -173,9 +173,12 @@ export function Game2048() {
   return (
     <div className="page game" data-app="mini_game">
       <header className="page-header">
-        <h1 className="game__title page-header__title">
-          <img src={logo} alt="" width={36} height={36} className="game__logo" /> 2048
-        </h1>
+        <div className="px-inline-help">
+          <h1 className="game__title page-header__title">
+            <img src={logo} alt="" width={36} height={36} className="game__logo" /> 2048
+          </h1>
+          <HelpPopover label={t("How to play", "游戏说明")}>{t("Arrow keys (or WASD) to move tiles.", "使用方向键或 WASD 移动方块。")}</HelpPopover>
+        </div>
         <p className="page-header__subtitle">{displayName}</p>
       </header>
       <div className="game__bar">
@@ -242,7 +245,6 @@ export function Game2048() {
           <p>{t("Game over — press New Game.", "游戏结束，点击“新游戏”。")}</p>
         </StatusMessage>
       )}
-      <HelpPopover label={t("How to play", "游戏说明")}>{t("Arrow keys (or WASD) to move tiles.", "使用方向键或 WASD 移动方块。")}</HelpPopover>
     </div>
   );
 }
@@ -284,7 +286,10 @@ function HighScoreWidget() {
   return (
     <div className="game-widget">
       <div className="game-widget__best">
-        <span className="game-widget__label">{t("HIGH SCORE", "最高分")}</span>
+        <span className="px-inline-help">
+          <span className="game-widget__label">{t("HIGH SCORE", "最高分")}</span>
+          <HelpPopover label={t("2048 high score", "2048 最高分")}>{t("Beat it on the board.", "在棋盘上刷新纪录。")}</HelpPopover>
+        </span>
         <span className="game-widget__best-value" ref={scorePulse}>
           {summary.data?.highScore ?? 0}
         </span>
@@ -315,7 +320,6 @@ function HighScoreWidget() {
         })}
       </div>
       {hasRun ? <p className="game-widget__hint">{t("Run in progress", "游戏进行中")}</p> : null}
-      <HelpPopover label={t("2048 high score", "2048 最高分")}>{t("Beat it on the board.", "在棋盘上刷新纪录。")}</HelpPopover>
     </div>
   );
 }

@@ -644,8 +644,10 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
     return (
       <div className="page">
         <header className="page-header">
-          <h1 className="page-header__title">{t("Dashboard", "仪表盘")}</h1>
-          <HelpPopover label={t("Dashboard", "仪表盘")}>{t("System overview", "查看各应用概况，可编辑组件的位置和大小。")}</HelpPopover>
+          <div className="px-inline-help">
+            <h1 className="page-header__title">{t("Dashboard", "仪表盘")}</h1>
+            <HelpPopover label={t("Dashboard", "仪表盘")}>{t("System overview", "查看各应用概况，可编辑组件的位置和大小。")}</HelpPopover>
+          </div>
         </header>
         <LoadingState label={t("Loading widgets…", "正在加载组件…")} />
       </div>
@@ -672,15 +674,21 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
     <div className="page">
       <header className="page-header page-header--dashboard">
         <div className="page-header__heading">
-          <h1 className="page-header__title">{t("Dashboard", "仪表盘")} {/* Modular-apps glyph: three pixel squares standing for the app
+          <div className="px-inline-help">
+            <h1 className="page-header__title">{t("Dashboard", "仪表盘")} {/* Modular-apps glyph: three pixel squares standing for the app
              * modules this dashboard composes (purely decorative). */}
-            <span className="page-header__glyph" aria-hidden="true" />
-          </h1>
-          <div className="page-header__subtitle">{editMode && <span>{t("Edit mode", "编辑模式")}</span>}<HelpPopover label={t("Dashboard layout", "仪表盘布局")}>{t("Edit mode · drag, resize, hide", "进入编辑模式后，可拖动、调整大小或隐藏组件。")}</HelpPopover></div>
+              <span className="page-header__glyph" aria-hidden="true" />
+            </h1>
+            <HelpPopover label={t("Dashboard", "仪表盘")}>{t("System overview", "查看各应用概况，可编辑组件的位置和大小。")}</HelpPopover>
+          </div>
         </div>
         <div className="page-header__actions">
           {editMode ? (
             <>
+              <span className="px-inline-help">
+                <span>{t("Edit mode", "编辑模式")}</span>
+                <HelpPopover label={t("Dashboard layout", "仪表盘布局")}>{t("Edit mode · drag, resize, hide", "进入编辑模式后，可拖动、调整大小或隐藏组件。")}</HelpPopover>
+              </span>
               {/* Reset is a low-frequency destructive action: it lives only in
                * edit mode, next to Done — never in the browsing header. */}
               <PixelButton
@@ -693,8 +701,11 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
               <PixelButton size="sm" onClick={() => void finishEditing()}>{t("Done", "完成")} </PixelButton>
             </>
           ) : (
-            <PixelButton size="sm" onClick={startEditing} disabled={available.length === 0}>
-              <PixelIcon name="grip" /> {t("Edit Layout", "编辑布局")} </PixelButton>
+            <span className="px-inline-help">
+              <PixelButton size="sm" onClick={startEditing} disabled={available.length === 0}>
+                <PixelIcon name="grip" /> {t("Edit Layout", "编辑布局")} </PixelButton>
+              <HelpPopover label={t("Dashboard layout", "仪表盘布局")}>{t("Edit mode · drag, resize, hide", "进入编辑模式后，可拖动、调整大小或隐藏组件。")}</HelpPopover>
+            </span>
           )}
         </div>
       </header>
@@ -716,7 +727,7 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
         <EmptyState
           icon="apps"
           title={t("No widgets available", "暂无组件")}
-          description={<HelpPopover label={t("Dashboard widgets", "仪表盘组件")}>{t("Enable apps in the App Center to populate the dashboard.", "在应用中心启用应用后，即可在仪表盘查看组件。")}</HelpPopover>}
+          help={<HelpPopover label={t("Dashboard widgets", "仪表盘组件")}>{t("Enable apps in the App Center to populate the dashboard.", "在应用中心启用应用后，即可在仪表盘查看组件。")}</HelpPopover>}
           action={
             <Link to="/apps" className="px-button px-button--primary px-button--md">{t("Open App Center", "打开应用中心")} </Link>
           }

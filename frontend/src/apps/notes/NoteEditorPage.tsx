@@ -208,7 +208,10 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
             </label>
           </div>
           <div className="px-form__row">
-            <span className="px-form__label">{t("Tags", "标签")}</span>
+            <span className="px-inline-help">
+              <span className="px-form__label">{t("Tags", "标签")}</span>
+              <HelpPopover label={t("Tags", "标签")}>{t("Type a name below and press Enter.", "在下方输入名称并按回车创建。")}</HelpPopover>
+            </span>
             {tagList.loading ? (
               <p className="px-form__hint">{t("Loading tags…", "正在加载标签…")}</p>
             ) : allTags.length > 0 ? (
@@ -227,7 +230,7 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
                 ))}
               </div>
             ) : (
-              <div>{t("No tags yet", "暂无标签")} <HelpPopover label={t("Tags", "标签")}>{t("Type a name below and press Enter.", "在下方输入名称并按回车创建。")}</HelpPopover></div>
+              <div>{t("No tags yet", "暂无标签")}</div>
             )}
             <div className="notes-editor__new-tag">
               <PixelInput

@@ -84,9 +84,9 @@ function PresentationEditor({
         accent={ACCENT_OPTIONS.includes(accent as never) ? (accent as PixelAccent) : resolved.accent}
         className="px-dialog px-dialog--form"
         data-testid="presentation-editor"
+        titleHelp={<HelpPopover label={t("App identity", "应用标识")}>{t("Identity (id, route, version, capabilities) comes from the manifest and cannot change.", "应用标识、路由、版本和能力由应用定义，不能在此修改。")}</HelpPopover>}
       >
         <form className="px-form" onSubmit={submit} aria-label={t(`Customize ${app.name}`, `自定义${appName(app.id, app.name, language)}`)}>
-          <HelpPopover label={t("App identity", "应用标识")}>{t("Identity (id, route, version, capabilities) comes from the manifest and cannot change.", "应用标识、路由、版本和能力由应用定义，不能在此修改。")}</HelpPopover>
           <label className="px-form__row">
             <span className="px-form__label">{t("Nickname", "昵称")}</span>
             <PixelInput
@@ -216,8 +216,10 @@ export function AppCenter({
   return (
     <div className="page">
       <header className="page-header">
-        <h1 className="page-header__title">{t("App Center", "应用中心")}</h1>
-        <HelpPopover label={t("App Center", "应用中心")}>{t("Install, enable and disable platform apps", "管理平台应用的启用和停用。")}</HelpPopover>
+        <div className="px-inline-help">
+          <h1 className="page-header__title">{t("App Center", "应用中心")}</h1>
+          <HelpPopover label={t("App Center", "应用中心")}>{t("Install, enable and disable platform apps", "管理平台应用的启用和停用。")}</HelpPopover>
+        </div>
       </header>
       <p className="app-shelf-summary">
         {enabledCount} {t("of", "/")} {apps.length} {t("apps active on the shelf", "个应用已启用")} </p>
@@ -246,14 +248,18 @@ export function AppCenter({
                   <PixelIcon name={appIconName(app.id)} size={20} />
                 </span>
                 <div className="app-card__meta">
-                  <h2 className="app-card__name">{resolved.displayName}</h2>
+                  {app.description ? (
+                    <div className="px-inline-help">
+                      <h2 className="app-card__name">{resolved.displayName}</h2>
+                      <HelpPopover label={resolved.displayName}>{appDescription(app.id, app.description, language)}</HelpPopover>
+                    </div>
+                  ) : <h2 className="app-card__name">{resolved.displayName}</h2>}
                   <span className="app-card__version">
                     v{app.version}
                     {resolved.isCustomized ? t(" · customized", " · 已自定义") : ""}
                   </span>
                 </div>
               </div>
-              {app.description ? <HelpPopover label={resolved.displayName}>{appDescription(app.id, app.description, language)}</HelpPopover> : null}
               {app.status === "error" && app.enabled ? (
                 <p className="app-card__intent">{t("Enable requested — activation failed.", "已请求启用，但启动失败。")}</p>
               ) : null}

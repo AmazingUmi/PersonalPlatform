@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { HelpPopover } from "../shared/ui/HelpPopover";
 import { Dashboard } from "./Dashboard";
 import { getSetting, putSetting, type AppInfo } from "../shared/api";
 import type { FrontendAppModule } from "../shared/appTypes";
@@ -246,6 +247,32 @@ describe("Dashboard interaction (FP-5.2 / FP-5.3 / FP-5.4)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /open alpha widget/i }));
     await waitFor(() => expect(screen.getByTestId("location").textContent).toBe("/alpha"));
+  });
+
+  it("a help trigger inside a card does not navigate", async () => {
+    frontendAppModules.beta = {
+      ...twoAppModules.beta,
+      widgets: [{
+        id: "w2",
+        title: "Beta Widget",
+        href: "/beta/deep-link",
+        render: () => (
+          <span className="px-inline-help">
+            <span>High score</span>
+            <HelpPopover label="2048 high score">Beat it on the board.</HelpPopover>
+          </span>
+        ),
+      }],
+    };
+    renderDashboard([app("alpha"), app("beta")]);
+    await screen.findByText("High score");
+    const help = screen.getByRole("button", { name: "Help: 2048 high score" });
+    expect(help.closest("h1, h2, h3, label, a")).toBeNull();
+    expect(help.parentElement?.textContent).toContain("High score");
+    fireEvent.click(help);
+    fireEvent.keyDown(help, { key: "Enter" });
+    expect(screen.getByTestId("location").textContent).toBe("/");
+    expect(screen.getByRole("dialog", { name: "2048 high score" })).toBeTruthy();
   });
 
   it("keyboard activation opens the widget", async () => {

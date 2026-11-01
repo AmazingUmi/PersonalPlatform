@@ -26,10 +26,12 @@ export function FocusPage() {
   return (
     <div className="page" data-app="focus">
       <header className="page-header">
-        <h1 className="page-header__title">
-          <PixelIcon name={appIconName("focus")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
-        </h1>
-        <HelpPopover label={t("About Focus", "关于专注")}>{t("Pomodoro timer with daily summary and history", "番茄计时、每日统计与历史记录")}</HelpPopover>
+        <div className="px-inline-help">
+          <h1 className="page-header__title">
+            <PixelIcon name={appIconName("focus")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
+          </h1>
+          <HelpPopover label={t("About Focus", "关于专注")}>{t("Pomodoro timer with daily summary and history", "番茄计时、每日统计与历史记录")}</HelpPopover>
+        </div>
         <div className="page-header__actions">
           <PixelButton size="sm" variant="secondary" onClick={reload}>
             <PixelIcon name="refresh" /> {t("Refresh", "刷新")}

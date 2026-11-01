@@ -51,7 +51,7 @@ export function ClockPage() {
   return (
     <div className="page" data-app="clock">
       <header className="page-header">
-        <div>
+        <div className="px-inline-help">
           <h1 className="page-header__title">
             <PixelIcon name={appIconName("clock")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
           </h1>

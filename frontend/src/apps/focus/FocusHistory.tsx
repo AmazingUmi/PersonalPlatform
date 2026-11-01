@@ -115,7 +115,7 @@ export function FocusHistory() {
             <EmptyState
               icon="tasks"
               title={t("No sessions yet", "暂无专注记录")}
-              description={<HelpPopover label={t("Focus history", "专注历史")}>{t("Start the timer to record your first focus session.", "启动计时器，记录第一次专注。")}</HelpPopover>}
+              help={<HelpPopover label={t("Focus history", "专注历史")}>{t("Start the timer to record your first focus session.", "启动计时器，记录第一次专注。")}</HelpPopover>}
             />
           ) : (
             <>

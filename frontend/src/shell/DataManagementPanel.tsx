@@ -100,7 +100,7 @@ export function DataManagementPanel({ section }: { section: "data" | "webdav" | 
   return <>
     <div hidden={section !== "data"}>
     <div ref={dataRef} tabIndex={-1} className="settings-focus-target" aria-label={t("Data management", "数据管理")}>
-    <PixelWindow title={t("Data management", "数据管理")} icon="file" className="data-management">
+    <PixelWindow title={t("Data management", "数据管理")} icon="file" className="data-management" titleHelp={<HelpPopover label={t("About data backups", "关于数据备份")}><p>{t("Export a full JSON backup of your app data and attachments, or merge a previous full backup into this installation.", "导出包含应用数据和附件的完整 JSON 备份，或将历史全量备份合并到当前平台。")}</p><p className="muted">{t("Settings backups use JSON (up to 32 MiB, including attachments). Sessions, WebDAV passwords and server configuration are excluded. Old SQL/archive backups require offline conversion.", "备份为 JSON 格式，含附件最大 32 MiB。不包含登录会话、WebDAV 密码和服务器配置。旧 SQL 或归档备份需要先离线转换。")}</p></HelpPopover>}>
       <div className="data-management__actions">
         <label className="data-management__field" htmlFor="data-scope">{t("Data scope", "数据范围")} <select id="data-scope" className="px-input" value={scope} disabled={busy} onChange={(event) => {
             setScope(event.target.value as DataScope); resetSelection();
@@ -112,10 +112,8 @@ export function DataManagementPanel({ section }: { section: "data" | "webdav" | 
         <PixelButton disabled={busy} onClick={() => void perform(async () => saveDownload(await exportData(scope)))}>{t("Export backup", "导出备份")}</PixelButton>
       </div>
       {scope === "all" && <StatusMessage tone="warning">{t("This backup includes all users' app data and account password hashes. Store it privately.", "此备份包含所有用户的应用数据和账号密码散列，请妥善保密。")}</StatusMessage>}
-      <HelpPopover label={t("About data backups", "关于数据备份")}><p>{t("Export a full JSON backup of your app data and attachments, or merge a previous full backup into this installation.", "导出包含应用数据和附件的完整 JSON 备份，或将历史全量备份合并到当前平台。")}</p><p className="muted">{t("Settings backups use JSON (up to 32 MiB, including attachments). Sessions, WebDAV passwords and server configuration are excluded. Old SQL/archive backups require offline conversion.", "备份为 JSON 格式，含附件最大 32 MiB。不包含登录会话、WebDAV 密码和服务器配置。旧 SQL 或归档备份需要先离线转换。")}</p></HelpPopover>
       <div className="data-management__section">
-        <h3>{t("Merge a previous backup", "合并历史备份")}</h3>
-        <HelpPopover label={t("About merging backups", "关于备份合并")}><p>{t("Current records are kept. Missing records and relationships are added. A conflict that cannot be merged safely stops the entire import.", "保留当前记录，补入缺失的数据和关联。遇到无法安全合并的冲突时，会停止整批导入。")}</p></HelpPopover>
+        <div className="px-inline-help"><h3>{t("Merge a previous backup", "合并历史备份")}</h3><HelpPopover label={t("About merging backups", "关于备份合并")}><p>{t("Current records are kept. Missing records and relationships are added. A conflict that cannot be merged safely stops the entire import.", "保留当前记录，补入缺失的数据和关联。遇到无法安全合并的冲突时，会停止整批导入。")}</p></HelpPopover></div>
         <input ref={fileRef} id="backup-file" aria-label={t("Backup file", "备份文件")} type="file" hidden accept=".json,application/json" disabled={busy} onChange={(event) => {
           const file = event.target.files?.[0];
           if (file) void readSelection(file);
@@ -230,8 +228,7 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
     applyConfig(next); setHistory(list.items);
   }
 
-  return <PixelWindow title={t("WebDAV backup", "WebDAV 备份")} icon="file" className="data-management">
-    <HelpPopover label={t("About WebDAV backup", "关于 WebDAV 备份")}><p>{t("Save backups to your WebDAV drive.", "将备份保存到支持 WebDAV 的网盘。")}</p></HelpPopover>
+  return <PixelWindow title={t("WebDAV backup", "WebDAV 备份")} icon="file" className="data-management" titleHelp={<HelpPopover label={t("About WebDAV backup", "关于 WebDAV 备份")}><p>{t("Save backups to your WebDAV drive.", "将备份保存到支持 WebDAV 的网盘。")}</p></HelpPopover>}>
     <nav className="settings-subnav" aria-label={t("WebDAV sections", "WebDAV 分区")}>
       {["connection", "backup", "history"].map((item) => <Link key={item} to={viewUrl(item)} aria-current={view === item ? "page" : undefined} className={`px-button px-button--${view === item ? "primary" : "secondary"} px-button--md`}>{item === "connection" ? t("Connection", "连接") : item === "backup" ? t("Backup", "备份") : t("History", "历史")}</Link>)}
     </nav>
@@ -243,8 +240,18 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
         applyConfig(await saveWebDav({ endpoint: endpoint.trim(), username, ...(password ? { password } : {}), scope, intervalHours }));
         setHistory((await getBackupHistory()).items); setNotice({ kind: "saved" }); setConfirmDelete(false);
       }); }}>
-        <label className="data-management__field" htmlFor="webdav-endpoint">{t("WebDAV folder URL", "WebDAV 目录地址")} <PixelInput id="webdav-endpoint" type="url" required value={endpoint} disabled={disabled} onChange={(event) => { setEndpoint(event.target.value); clearConnectionFeedback(); }} placeholder="https://drive.example.com/backups/" autoComplete="off" />
-        </label>
+        <div className="data-management__field">
+          <span className="px-inline-help">
+            <label htmlFor="webdav-endpoint">{t("WebDAV folder URL", "WebDAV 目录地址")}</label>
+            <HelpPopover label={t("Connection setup", "连接设置")}>
+              <p className="muted">{t("Test the entered connection before saving. Testing does not save settings or enable automatic backups.", "可先测试当前输入再保存。测试不会保存设置或开启自动备份。")}</p>
+              <h4>{t("Nutstore (坚果云) setup", "坚果云设置方法")}</h4>
+              <p>{t("Use", "使用")} <code>https://dav.jianguoyun.com/dav/</code> {t("or an existing folder under it, your account email, and an app password from Account information → Security → Third-party applications. Use the app password rather than your sign-in password.", "或其下已有目录，填写账号邮箱和在“账号信息 → 安全选项 → 第三方应用管理”生成的应用密码，而非登录密码。")} <a href="https://help.jianguoyun.com/?p=3234" target="_blank" rel="noreferrer">{t("Nutstore instructions", "坚果云官方说明")}</a></p>
+              <p className="muted">{t("Use an existing WebDAV folder. Passwords are encrypted on the server and are never displayed here. Public HTTPS works by default; private or HTTP servers require the administrator's server allowlist.", "请使用已存在的 WebDAV 目录。密码加密存储且不回显。默认允许公网 HTTPS，内网或 HTTP 服务需要由管理员配置精确地址例外。")}</p>
+            </HelpPopover>
+          </span>
+          <PixelInput id="webdav-endpoint" type="url" required value={endpoint} disabled={disabled} onChange={(event) => { setEndpoint(event.target.value); clearConnectionFeedback(); }} placeholder="https://drive.example.com/backups/" autoComplete="off" />
+        </div>
         <label className="data-management__field" htmlFor="webdav-username">{t("WebDAV username", "WebDAV 用户名")} <PixelInput id="webdav-username" required value={username} disabled={disabled} onChange={(event) => { setUsername(event.target.value); clearConnectionFeedback(); }} autoComplete="off" />
         </label>
         <label className="data-management__field" htmlFor="webdav-password">{t("WebDAV password or app token", "WebDAV 密码或应用授权密码")} <PixelInput id="webdav-password" type="password" value={password} disabled={disabled} required={!canReusePassword} onChange={(event) => { setPassword(event.target.value); clearConnectionFeedback(); }} autoComplete="new-password" placeholder={config?.hasPassword ? t("Saved — leave blank to keep", "已保存，留空以保留") : t("Enter password or app token", "输入密码或应用授权密码")} />
@@ -253,11 +260,16 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
             <option value="own">{t("My data", "我的数据")}</option>{admin && <option value="all">{t("All users (administrator)", "所有用户（管理员）")}</option>}
           </select>
         </label>
-        <label className="data-management__field" htmlFor="webdav-interval">{t("Automatic backup", "自动备份")} <select id="webdav-interval" className="px-input" value={intervalHours} disabled={disabled} onChange={(event) => setIntervalHours(Number(event.target.value))}>
+        <div className="data-management__field">
+          <span className="px-inline-help">
+            <label htmlFor="webdav-interval">{t("Automatic backup", "自动备份")}</label>
+            <HelpPopover label={t("About automatic backups", "关于自动备份")}><p className="muted">{t("Automatic backups are incremental. The first backup establishes a baseline; later backups upload changed data blocks and new attachments. Unchanged data creates no new backup. After downtime, one overdue backup runs when the server resumes. Existing remote files are not deleted automatically.", "自动备份采用增量方式：首次建立基线，之后上传变化的数据块和新增附件；无变化不新增备份。服务恢复后会补做一次到期备份，不会自动删除网盘现有文件。")}</p></HelpPopover>
+          </span>
+          <select id="webdav-interval" className="px-input" value={intervalHours} disabled={disabled} onChange={(event) => setIntervalHours(Number(event.target.value))}>
             <option value={0}>{t("Off — manual only", "关闭——仅手动备份")}</option>
             {[1, 6, 12, 24, 168].map((hours) => <option key={hours} value={hours}>{t(`Every ${hours.toLocaleString(locale)} hour${hours === 1 ? "" : "s"}`, `每 ${hours.toLocaleString(locale)} 小时`)}</option>)}
           </select>
-        </label>
+        </div>
         <div className="data-management__actions">
           <PixelButton variant="secondary" disabled={disabled || !canTest} onClick={() => void perform(async () => {
             await testWebDav({ endpoint: endpoint.trim(), username, ...(password ? { password } : {}) });
@@ -266,15 +278,8 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
           <PixelButton type="submit" disabled={disabled || !dirty}>{t("Save backup settings", "保存备份设置")}</PixelButton>
         </div>
       </form>
-      <HelpPopover label={t("Connection setup", "连接设置")}>
-<p className="muted">{t("Test the entered connection before saving. Testing does not save settings or enable automatic backups.", "可先测试当前输入再保存。测试不会保存设置或开启自动备份。")}</p>
-        <h4>{t("Nutstore (坚果云) setup", "坚果云设置方法")}</h4>
-        <p>{t("Use", "使用")} <code>https://dav.jianguoyun.com/dav/</code> {t("or an existing folder under it, your account email, and an app password from Account information → Security → Third-party applications. Use the app password rather than your sign-in password.", "或其下已有目录，填写账号邮箱和在“账号信息 → 安全选项 → 第三方应用管理”生成的应用密码，而非登录密码。")} <a href="https://help.jianguoyun.com/?p=3234" target="_blank" rel="noreferrer">{t("Nutstore instructions", "坚果云官方说明")}</a></p>
-      <p className="muted">{t("Use an existing WebDAV folder. Passwords are encrypted on the server and are never displayed here. Public HTTPS works by default; private or HTTP servers require the administrator's server allowlist.", "请使用已存在的 WebDAV 目录。密码加密存储且不回显。默认允许公网 HTTPS，内网或 HTTP 服务需要由管理员配置精确地址例外。")}</p>
-      </HelpPopover>
       {endpoint.trim().startsWith("http:") && <StatusMessage tone="warning">{t("HTTP sends your credentials and backup without transport encryption.", "HTTP 会以未加密的方式传输凭据和备份。")}</StatusMessage>}
       {scope === "all" && <StatusMessage tone="warning">{t("All-users backups include account password hashes and everyone's app data. Only administrators can use this scope.", "所有用户备份包含账号密码散列及每个人的应用数据，仅管理员可使用。")}</StatusMessage>}
-      <HelpPopover label={t("About automatic backups", "关于自动备份")}><p className="muted">{t("Automatic backups are incremental. The first backup establishes a baseline; later backups upload changed data blocks and new attachments. Unchanged data creates no new backup. After downtime, one overdue backup runs when the server resumes. Existing remote files are not deleted automatically.", "自动备份采用增量方式：首次建立基线，之后上传变化的数据块和新增附件；无变化不新增备份。服务恢复后会补做一次到期备份，不会自动删除网盘现有文件。")}</p></HelpPopover>
       {config?.configured && <div className="data-management__actions">
         <PixelButton variant="danger" disabled={disabled} onClick={() => setConfirmDelete(true)}>{t("Remove connection", "移除连接")}</PixelButton>
       </div>}
@@ -287,12 +292,16 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
       {!config?.configured && <p>{t("Set up a connection to start backing up your data.", "请先配置连接以开始备份。")}</p>}
       {config?.configured && <>
         {dirty && <p className="muted">{t("Save your changes before creating a backup.", "请先保存修改，再创建备份。")}</p>}
-        <label className="data-management__field" htmlFor="webdav-mode">{t("Manual backup mode", "手动备份方式")} <select id="webdav-mode" className="px-input" value={backupMode} disabled={disabled} onChange={(event) => setBackupMode(event.target.value as BackupMode)}>
+        <div className="data-management__field">
+          <span className="px-inline-help">
+            <label htmlFor="webdav-mode">{t("Manual backup mode", "手动备份方式")}</label>
+            <HelpPopover label={t("About backup modes", "关于备份方式")}><p className="muted">{t("Full mode uploads an independent complete file. It does not change the automatic incremental schedule.", "全量方式上传独立的完整备份文件，不改变自动增量备份计划。")}</p></HelpPopover>
+          </span>
+          <select id="webdav-mode" className="px-input" value={backupMode} disabled={disabled} onChange={(event) => setBackupMode(event.target.value as BackupMode)}>
             <option value="incremental">{t("Incremental — changed data only", "增量——仅变化的数据")}</option>
             <option value="full">{t("Full — independent JSON file", "全量——独立 JSON 文件")}</option>
           </select>
-        </label>
-        <HelpPopover label={t("About backup modes", "关于备份方式")}><p className="muted">{t("Full mode uploads an independent complete file. It does not change the automatic incremental schedule.", "全量方式上传独立的完整备份文件，不改变自动增量备份计划。")}</p></HelpPopover>
+        </div>
         <div className="data-management__actions">
           <PixelButton disabled={disabled || dirty} onClick={() => void perform(async () => {
             try {
@@ -312,10 +321,9 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
       </>}
       </div>
       <div hidden={view !== "history"}>
-        <h3>{t("Backup history", "备份历史")}</h3>
+        <div className="px-inline-help"><h3>{t("Backup history", "备份历史")}</h3><HelpPopover label={t("About backup history", "关于备份历史")}><p className="muted">{t("Download and Review reconstruct an incremental backup as a full JSON file. Keep its remote manifest and all referenced objects together. For backups outside this history, a full JSON file can be imported in Data; incremental manifests need the offline reconstruction tool.", "下载和预览会将增量备份重组为完整 JSON，请保留网盘上的清单及其引用对象。不在此历史中的完整 JSON 可在“数据”中导入；增量清单需先离线重组。")}</p></HelpPopover></div>
         <p className="muted">{t("Showing the latest", "当前显示最近")} {history.length.toLocaleString(locale)} {t("recorded backups (up to 100).", "条备份记录（最多 100 条）。")}</p>
         <PixelButton variant="secondary" disabled={disabled || dirty} onClick={() => void perform(refreshStatus)}>{t("Refresh history", "刷新历史")}</PixelButton>
-        <HelpPopover label={t("About backup history", "关于备份历史")}><p className="muted">{t("Download and Review reconstruct an incremental backup as a full JSON file. Keep its remote manifest and all referenced objects together. For backups outside this history, a full JSON file can be imported in Data; incremental manifests need the offline reconstruction tool.", "下载和预览会将增量备份重组为完整 JSON，请保留网盘上的清单及其引用对象。不在此历史中的完整 JSON 可在“数据”中导入；增量清单需先离线重组。")}</p></HelpPopover>
         {history.length === 0 ? <p>{t("No backups recorded yet.", "暂无备份记录。")}</p> : <ul className="data-management__history">{history.slice((page - 1) * 10, page * 10).map((record) => <li key={record.id}>
           <div><strong className="data-management__filename">{record.filename}</strong><p className="muted">{record.kind === "incremental" ? t("Incremental", "增量") : t("Full", "全量")} · {scopeLabel(record.scope, t)} · {dateLabel(record.createdAt, locale)} {t("· Full data", "· 完整数据")} {kibLabel(record.size, locale)} {t("KiB · Uploaded", "KiB · 已上传")} {kibLabel(record.uploadedBytes, locale)} KiB</p></div>
           {record.available ? <div className="data-management__actions">

@@ -1,6 +1,6 @@
 import { HelpPopover } from "../../shared/ui/HelpPopover";
 import { useI18n } from "../../shared/i18n";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { api } from "../../shared/api";
 import { useAsync } from "../../shared/useAsync";
 import { useMutation } from "../../shared/useMutation";
@@ -181,7 +181,7 @@ export function AlarmSection() {
         <EmptyState
           icon="clock"
           title={t("No alarms", "暂无闹钟")}
-          description={<HelpPopover label={t("Alarms", "闹钟")}>{t("Add an alarm to get an in-app (and, if permitted, browser) alert.", "添加闹钟以接收应用内提醒；授权后也可接收浏览器通知。")}</HelpPopover>}
+          help={<HelpPopover label={t("Alarms", "闹钟")}>{t("Add an alarm to get an in-app (and, if permitted, browser) alert.", "添加闹钟以接收应用内提醒；授权后也可接收浏览器通知。")}</HelpPopover>}
         />
       ) : null}
 
@@ -273,6 +273,7 @@ interface AlarmEditorProps {
 
 function AlarmEditor({ alarm, onClose, onSaved }: AlarmEditorProps) {
   const { t, language } = useI18n();
+  const repeatLabelId = useId();
   const [time, setTime] = useState(alarm?.time ?? "07:30");
   const [label, setLabel] = useState(alarm?.label ?? "");
   const [repeatDays, setRepeatDays] = useState<number[]>(alarm?.repeatDays ?? [1, 2, 3, 4, 5]);
@@ -342,8 +343,13 @@ function AlarmEditor({ alarm, onClose, onSaved }: AlarmEditorProps) {
               />
             </label>
           </div>
-          <fieldset className="px-form__row">
-            <legend className="px-form__label">{t("Repeat", "重复")}</legend>
+          <fieldset className="px-form__row" aria-labelledby={repeatLabelId}>
+            <legend className="px-form__label">
+              <span className="px-inline-help">
+                <span id={repeatLabelId}>{t("Repeat", "重复")}</span>
+                <HelpPopover label={t("Repeat days", "重复日期")}>{t("No days selected = a one-shot alarm (disables itself after ringing).", "不选择重复日期时，闹钟只响一次，响铃后自动停用。")}</HelpPopover>
+              </span>
+            </legend>
             <div className="clock-alarms__days" role="group" aria-label={t("Repeat days", "重复日期")}>
               {(language === "zh" ? WEEKDAY_LABELS_ZH : WEEKDAY_LABELS).map((dayLabel, day) => (
                 <button
@@ -357,7 +363,6 @@ function AlarmEditor({ alarm, onClose, onSaved }: AlarmEditorProps) {
                 </button>
               ))}
             </div>
-            <HelpPopover label={t("Repeat days", "重复日期")}>{t("No days selected = a one-shot alarm (disables itself after ringing).", "不选择重复日期时，闹钟只响一次，响铃后自动停用。")}</HelpPopover>
           </fieldset>
           {save.error ? (
             <StatusMessage tone="error">

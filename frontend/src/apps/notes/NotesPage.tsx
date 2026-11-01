@@ -206,10 +206,12 @@ export function NotesPage() {
   return (
     <div className="page" data-app="notes">
       <header className="page-header">
-        <h1 className="page-header__title">
-          <PixelIcon name={appIconName("notes")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
-        </h1>
-        <HelpPopover label={t("About Notes", "关于笔记")}>{t("Capture first, organize later", "先记录，再整理")}</HelpPopover>
+        <div className="px-inline-help">
+          <h1 className="page-header__title">
+            <PixelIcon name={appIconName("notes")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
+          </h1>
+          <HelpPopover label={t("About Notes", "关于笔记")}>{t("Capture first, organize later", "先记录，再整理")}</HelpPopover>
+        </div>
         <div className="page-header__actions">
           <PixelButton
             size="sm"
@@ -360,7 +362,7 @@ export function NotesPage() {
         <EmptyState
           icon="file"
           title={t("No notes yet", "暂无笔记")}
-          description={<HelpPopover label={t("Notes", "笔记")}>{t("Capture your first thought — you can organize it later.", "记录第一个想法，稍后再整理。")}</HelpPopover>}
+          help={<HelpPopover label={t("Notes", "笔记")}>{t("Capture your first thought — you can organize it later.", "记录第一个想法，稍后再整理。")}</HelpPopover>}
           action={
             <Link to="/notes/new" className="px-button px-button--primary px-button--sm">
               <PixelIcon name="plus" /> {t("New Note", "新笔记")}
@@ -368,7 +370,7 @@ export function NotesPage() {
           }
         />
       ) : items.length === 0 ? (
-        <EmptyState icon="search" title={t("No matching notes", "没有匹配的笔记")} description={<HelpPopover label={t("Notes", "笔记")}>{t("Switch the filters to see other notes.", "调整筛选条件以查看其他笔记。")}</HelpPopover>} />
+        <EmptyState icon="search" title={t("No matching notes", "没有匹配的笔记")} help={<HelpPopover label={t("Notes", "笔记")}>{t("Switch the filters to see other notes.", "调整筛选条件以查看其他笔记。")}</HelpPopover>} />
       ) : (
         <PixelWindow title={t("Timeline", "时间线")} icon="file" className="notes-window">
           {data && data.total > data.items.length ? (

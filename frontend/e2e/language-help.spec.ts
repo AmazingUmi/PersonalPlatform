@@ -88,6 +88,137 @@ test("touch opens help and outside tap closes it", async ({ browser }) => {
 });
 
 
+/** Visible help triggers must share a row with real anchor text, and the page must not scroll sideways. */
+async function helpLayoutIssues(page: import("@playwright/test").Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const shown = (element: Element) => {
+      const style = getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      if (element.closest("[hidden]")) return false;
+      const box = element.getBoundingClientRect();
+      return box.width > 0 && box.height > 0;
+    };
+    const issues: string[] = [];
+    const helps = [...document.querySelectorAll(".px-help")].filter(shown);
+    if (helps.length === 0) issues.push("no visible help");
+    if (document.documentElement.scrollWidth > document.documentElement.clientWidth + 1) issues.push("page overflows horizontally");
+    for (const help of helps) {
+      const name = help.getAttribute("aria-label") ?? "?";
+      const parent = help.parentElement;
+      if (!parent) { issues.push(`detached ${name}`); continue; }
+      if (help.closest("h1, h2, h3, label, a")) issues.push(`nested ${name}`);
+      if (parent.closest("button, a, label")) issues.push(`interactive host ${name}`);
+      const triggers = [...parent.children].filter((element) => element.classList.contains("px-help"));
+      if (triggers.length !== 1) issues.push(`cluster ${name}`);
+      const anchor = [...parent.children].find((element) => element !== help && !element.classList.contains("px-help") && (element.textContent ?? "").trim());
+      if (!anchor) { issues.push(`orphan ${name}`); continue; }
+      const anchorBox = anchor.getBoundingClientRect();
+      const helpBox = help.getBoundingClientRect();
+      const overlap = Math.min(anchorBox.bottom, helpBox.bottom) - Math.max(anchorBox.top, helpBox.top);
+      if (overlap < Math.min(helpBox.height, 16) * 0.5) issues.push(`separate row ${name}`);
+      if (helpBox.left + 2 < anchorBox.left) issues.push(`before anchor ${name}`);
+      if (helpBox.left - anchorBox.right > 20) issues.push(`far ${name}`);
+    }
+    for (const heading of document.querySelectorAll("h1, h2, h3")) {
+      if (heading.querySelector(".px-help")) issues.push(`heading contains help ${heading.textContent}`);
+    }
+    return issues;
+  });
+}
+
+async function expectSettledHelp(page: import("@playwright/test").Page) {
+  await expect.poll(() => helpLayoutIssues(page), { timeout: 5000 }).toEqual([]);
+}
+
+test("help stays beside its anchor in English and Chinese at desktop and 320px", async ({ page }) => {
+  test.setTimeout(180_000);
+  const routes: Array<{ path: string; en: string; zh: string }> = [
+    { path: "/", en: "Dashboard", zh: "仪表盘" },
+    { path: "/apps", en: "App Center", zh: "应用中心" },
+    { path: "/tasks", en: "Tasks", zh: "任务" },
+    { path: "/notes", en: "Notes", zh: "笔记" },
+    { path: "/assets", en: "Assets", zh: "资产" },
+    { path: "/clock", en: "Clock", zh: "时钟" },
+    { path: "/focus", en: "Focus", zh: "专注" },
+    { path: "/mini_game", en: "2048", zh: "2048" },
+    { path: "/settings", en: "Settings", zh: "设置" },
+    { path: "/settings?section=data", en: "Data management", zh: "数据管理" },
+    { path: "/settings?section=webdav", en: "WebDAV backup", zh: "WebDAV 备份" },
+    { path: "/settings?section=webdav&view=backup", en: "WebDAV backup", zh: "WebDAV 备份" },
+    { path: "/settings?section=webdav&view=history", en: "WebDAV backup", zh: "WebDAV 备份" },
+  ];
+  for (const language of ["en", "zh"] as const) {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto("/settings");
+    await expect(page.getByRole("heading", { name: "Settings", exact: true }).or(page.getByRole("heading", { name: "设置", exact: true }))).toBeVisible();
+    await page.getByLabel("Language / 语言").selectOption(language);
+    for (const viewport of [{ width: 1280, height: 900 }, { width: 320, height: 740 }]) {
+      await page.setViewportSize(viewport);
+      for (const route of routes) {
+        await page.goto(route.path);
+        await expect(page.getByRole("heading", { name: language === "zh" ? route.zh : route.en, exact: true })).toBeVisible();
+        await expect.poll(() => page.locator(".px-help").count()).toBeGreaterThan(0);
+        await expectSettledHelp(page);
+      }
+      await page.goto("/clock");
+      await page.getByRole("button", { name: language === "zh" ? "+ 添加闹钟" : "+ Add Alarm", exact: true }).click();
+      await expect(page.getByRole("heading", { name: language === "zh" ? "新闹钟" : "New Alarm", exact: true })).toBeVisible();
+      const repeatText = page.getByText(language === "zh" ? "重复" : "Repeat", { exact: true });
+      const repeatHelp = page.getByRole("button", { name: language === "zh" ? "帮助：重复日期" : "Help: Repeat days", exact: true });
+      await expect(repeatText).toBeVisible();
+      await expect(repeatHelp).toBeVisible();
+      await expect.poll(async () => {
+        const textBox = await repeatText.boundingBox();
+        const helpBox = await repeatHelp.boundingBox();
+        if (!textBox || !helpBox) return "missing box";
+        const overlap = Math.min(textBox.y + textBox.height, helpBox.y + helpBox.height) - Math.max(textBox.y, helpBox.y);
+        if (overlap < 12) return `separate row ${textBox.y}/${helpBox.y}`;
+        if (helpBox.x + 2 < textBox.x) return "before text";
+        if (helpBox.x - (textBox.x + textBox.width) > 20) return `far ${helpBox.x - textBox.x - textBox.width}`;
+        return "ok";
+      }).toBe("ok");
+      await expectSettledHelp(page);
+      await page.getByRole("button", { name: language === "zh" ? "取消" : "Cancel", exact: true }).click();
+      await expect(page.getByRole("heading", { name: language === "zh" ? "新闹钟" : "New Alarm", exact: true })).toHaveCount(0);
+    }
+  }
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/settings");
+  await page.getByLabel("Language / 语言").selectOption("en");
+  await page.goto("/settings?section=webdav");
+  await expect(page.getByRole("heading", { name: "WebDAV backup", exact: true })).toBeVisible();
+  const connection = page.getByRole("button", { name: "Help: Connection setup", exact: true });
+  await expect(connection.locator("xpath=..")).toContainText("WebDAV folder URL");
+  await expect(page.getByRole("navigation", { name: "WebDAV sections" }).locator(".px-help")).toHaveCount(0);
+  await connection.click();
+  const dialog = page.getByRole("dialog", { name: "Connection setup", exact: true });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("link", { name: "Nutstore instructions" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Help: 2048 high score", exact: true }).click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("dialog", { name: "2048 high score", exact: true })).toBeVisible();
+
+  const longTitle = `Long task title ${"Overflow".repeat(12)}`;
+  const created = await page.request.post("/api/apps/tasks/tasks", { data: { title: longTitle, priority: 2 } });
+  expect(created.status()).toBe(201);
+  const task = await created.json() as { id: string };
+  try {
+    for (const viewport of [{ width: 1280, height: 900 }, { width: 320, height: 740 }]) {
+      await page.setViewportSize(viewport);
+      await page.goto(`/tasks/${task.id}`);
+      await expect(page.getByRole("heading", { name: longTitle, exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Help: Task detail", exact: true })).toBeVisible();
+      await expectSettledHelp(page);
+    }
+  } finally {
+    await page.request.delete(`/api/apps/tasks/tasks/${task.id}`);
+  }
+});
+
 test("first visit follows browser Chinese and translates login feedback", async ({ browser }) => {
   const context = await browser.newContext({ locale: "zh-CN", storageState: { cookies: [], origins: [] } });
   try {
