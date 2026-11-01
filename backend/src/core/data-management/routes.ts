@@ -3,10 +3,9 @@ import type { Database } from "../database/index.js";
 import type { CoreRouteHook } from "../api/routes.js";
 import { AppError } from "../api/errors.js";
 import { exportSnapshot, importSnapshot, previewSnapshot, MAX_SNAPSHOT_BYTES } from "./snapshot.js";
-import { WebdavBackups, checkScope, type BackupScope, type WebdavInput, type BackupMode } from "./webdav.js";
+import { WebdavBackups, checkScope, type BackupScope, type WebdavInput, type BackupMode, type WebdavTestInput } from "./webdav.js";
 
 const scopeSchema = { type: "string", enum: ["own", "all"] };
-const emptyBody = { type: "object", additionalProperties: false };
 
 export function registerDataManagementRoutes(app: FastifyInstance, deps: {
   database: Database | null; storageRoot: string; installedApps: () => string[];
@@ -49,7 +48,13 @@ export function registerDataManagementRoutes(app: FastifyInstance, deps: {
   app.delete("/api/core/data/webdav", hooks, async (request, reply) => {
     await backups().remove(request.user!); return reply.code(204).send();
   });
-  app.post("/api/core/data/webdav/test", { ...hooks, schema: { body: emptyBody } }, request => backups().test(request.user!));
+  app.post<{ Body: Partial<WebdavTestInput> }>("/api/core/data/webdav/test", {
+    ...hooks, schema: { body: { type: "object", additionalProperties: true, properties: {
+      endpoint: { type: "string", minLength: 1, maxLength: 2048 },
+      username: { type: "string", minLength: 1, maxLength: 512 },
+      password: { type: "string", minLength: 1, maxLength: 4096 },
+    } } },
+  }, request => backups().test(request.user!, request.body));
   app.post<{Body: {mode?: BackupMode}}>("/api/core/data/webdav/backup", {
     ...hooks, schema: { body: { type: "object", additionalProperties: false, properties: { mode: { type: "string", enum: ["incremental", "full"] } } } },
   }, request => backups().run(request.user!, false, request.body.mode ?? "incremental"));

@@ -20,7 +20,11 @@ Settings 分为 General、Data、WebDAV 和仅管理员可见的 Users。分区�
 
 ## WebDAV
 
-WebDAV 分为 Connection（连接与定时配置）、Backup（立即备份及状态）、History（历史记录）。在 Connection 填写已有 WebDAV 目录 URL、用户名和应用密码，保存后可测试连接，在 Backup 立即备份，或设置每 1/6/12/24/168 小时自动备份。间隔为经过的小时数，不是本地每天固定时间；0 表示关闭自动。服务每分钟检查到期任务，停机后最多补做一次，失败后等下一间隔。配置、下次执行和最近状态保存在数据库中，重启保留。
+WebDAV 分为 Connection（连接与定时配置）、Backup（立即备份及状态）、History（历史记录）。在 Connection 填写已有 WebDAV 目录 URL、用户名和应用密码，填写后即可点击 **Test connection** 测试当前输入，无需先保存；测试成功不保存配置，也不启用定时备份。在 **Save backup settings** 保存后，可在 Backup 立即备份，或设置每 1/6/12/24/168 小时自动备份。间隔为经过的小时数，不是本地每天固定时间；0 表示关闭自动。服务每分钟检查到期任务，停机后最多补做一次，失败后等下一间隔。配置、下次执行和最近状态保存在数据库中，重启保留。
+
+连接测试只验证 WebDAV 连接和目录访问，不验证备份写入权限。编辑地址、用户名或密码后，旧测试结果失效。已有连接不改地址和用户名时可留空密码复用保存值；新连接或更换目标/账号必须重新输入密码，测试失败保留草稿。
+
+坚果云地址为 `https://dav.jianguoyun.com/dav/`（或其下已存在目录），用户名为账号邮箱，密码使用第三方应用密码。[坚果云官方配置说明](https://help.jianguoyun.com/?p=3234)。
 
 | 操作 | 格式与行为 |
 |---|---|
@@ -46,6 +50,18 @@ DATA_BACKUP_ALLOWED_ORIGINS=https://nas.example:5006,http://192.168.1.20:5005
 ```
 
 不要填路径、尾斜线或通配符。修改环境后重启后端。允许 HTTP 意味着凭据和备份在传输中未加密。后端按解析后的 IP 校验并固定连接地址，防止普通用户通过 DNS 重绑定访问内网。WebDAV 使用 PROPFIND/PUT/GET/HEAD；连接测试验证目录响应，实际写权限以备份上传结果为准。[协议参考：RFC 4918](https://www.rfc-editor.org/rfc/rfc4918)。
+
+### DNS / Fake-IP 导致公网网盘被拦截
+
+如果出现 `webdav_origin_blocked`，请求在认证前被拦截，不能由此判断账号密码错误。代理的 Fake-IP 模式可能把公网域名解析到 `198.18.0.0/15` 等保留网段；应在**后端所在容器或服务器**检查解析，宿主和容器的结果可能不同。
+
+优先调整代理/DNS，使该网盘域名获得真实公网解析；如果部署明确依赖可信的 Fake-IP 路由，可在部署环境中追加对应的精确 origin，例如：
+
+```dotenv
+DATA_BACKUP_ALLOWED_ORIGINS=https://dav.jianguoyun.com
+```
+
+已有项目用逗号追加并保留原值。这里不含 `/dav/` 路径，不能填写 `*` 或放行整个保留网段。生产 Docker 修改 `.env.production` 后必须重建后端容器才能载入环境变量（单纯 `docker restart` 不会载入新环境）；例如 `docker compose --env-file .env.production -f docker/docker-compose.prod.yml up -d --no-deps --wait backend`。此设置仅允许指定 origin，TLS 证书验证和禁止重定向仍然启用。不要把凭据写入 origin，也不要提交环境文件。
 
 Docker Compose 已透传上述变量，默认密钥位于持久化 storage 卷。该文件和加密配置是配对的；完整 CLI 备份包含 storage，应同样私密保管。JSON 备份可独立恢复业务数据，无需 WebDAV 密钥。
 

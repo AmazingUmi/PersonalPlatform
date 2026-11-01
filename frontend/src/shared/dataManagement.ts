@@ -30,6 +30,7 @@ export interface WebDavInput {
   scope: DataScope;
   intervalHours: number;
 }
+export type WebDavTestInput = Pick<WebDavInput, "endpoint" | "username" | "password">;
 export interface BackupRecord {
   id: string;
   filename: string;
@@ -58,7 +59,7 @@ export const importSnapshot = (scope: DataScope, snapshot: unknown) =>
 export const getWebDav = () => api<WebDavConfig>(`${BASE}/webdav`);
 export const saveWebDav = (input: WebDavInput) => api<WebDavConfig>(`${BASE}/webdav`, json("PUT", input));
 export const deleteWebDav = () => api<unknown>(`${BASE}/webdav`, { method: "DELETE" });
-export const testWebDav = () => api<{ ok: boolean }>(`${BASE}/webdav/test`, json("POST", {}));
+export const testWebDav = (input?: WebDavTestInput) => api<{ ok: boolean }>(`${BASE}/webdav/test`, json("POST", input ?? {}));
 export const backupWebDav = (mode: BackupMode = "incremental") => api<BackupResult>(`${BASE}/webdav/backup`, json("POST", { mode }));
 export const getBackupHistory = () => api<{ items: BackupRecord[] }>(`${BASE}/webdav/history`);
 

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import http from "node:http";
 import { randomBytes } from "node:crypto";
 import { Database } from "../../src/core/database/index.js";
 import { AppError } from "../../src/core/api/errors.js";
@@ -16,6 +17,7 @@ let admin: BackupActor, alice: BackupActor, bob: BackupActor;
 let root: string;
 let clock = new Date("2026-11-01T12:00:00Z");
 const originalKey = process.env.DATA_BACKUP_ENCRYPTION_KEY;
+const originalOrigins = process.env.DATA_BACKUP_ALLOWED_ORIGINS;
 const services: WebdavBackups[] = [];
 const objects = new Map<string, Buffer>();
 let requests: DavRequest[] = [];
@@ -36,6 +38,7 @@ beforeEach(async () => {
   await db.query("UPDATE core.users SET status='active',role=CASE WHEN id=$1 THEN 'admin' ELSE 'user' END", [admin.id]);
 });
 afterEach(async () => {
+  if (originalOrigins === undefined) delete process.env.DATA_BACKUP_ALLOWED_ORIGINS; else process.env.DATA_BACKUP_ALLOWED_ORIGINS = originalOrigins;
   await Promise.all(services.splice(0).map(service => service.stop()));
   await rm(root, { recursive: true, force: true });
 });
@@ -126,6 +129,58 @@ describe("WebDAV persistence and private configuration", () => {
       assert.equal(requests.length, 1);
       assert(!JSON.stringify(await manager.config(alice)).includes(config.password!));
     } finally { delete process.env.DATA_BACKUP_ENCRYPTION_KEY; }
+  });
+});
+
+describe("WebDAV draft connection tests", () => {
+  it("tests an unsaved connection without creating targets, history or encryption keys", async () => {
+    const manager = service();
+    const draft = { endpoint: "https://cloud.example/backups", username: config.username, password: config.password };
+    assert.deepEqual(await manager.test(alice, draft), { ok: true });
+    assert.deepEqual(requests, [{ endpoint: config.endpoint, username: config.username, password: config.password, method: "PROPFIND" }]);
+    assert.equal((await manager.config(alice)).configured, false);
+    assert.equal((await db.query("SELECT * FROM core.backup_targets")).rowCount, 0);
+    assert.equal((await db.query("SELECT * FROM core.backup_history")).rowCount, 0);
+    await assert.rejects(stat(join(root, ".core")), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+  });
+
+  it("uses a draft password without changing saved configuration, schedule, status or key", async () => {
+    const manager = service(); await manager.save(alice, config);
+    const before = (await db.query("SELECT * FROM core.backup_targets WHERE user_id=$1", [alice.id])).rows;
+    const key = await readFile(join(root, ".core", "backup.key"));
+    const draft = { endpoint: "https://other.example/new/", username: "new-user", password: "new-secret" };
+    const testing = service(async input => { requests.push(input); throw new AppError(502, "webdav_failed", "WebDAV returned HTTP 401."); });
+    await assert.rejects(testing.test(alice, draft), /401/);
+    assert.deepEqual(requests.at(-1), { ...draft, method: "PROPFIND" });
+    assert.deepEqual((await db.query("SELECT * FROM core.backup_targets WHERE user_id=$1", [alice.id])).rows, before);
+    assert.deepEqual(await readFile(join(root, ".core", "backup.key")), key);
+    assert.equal((await db.query("SELECT * FROM core.backup_history")).rowCount, 0);
+  });
+
+  it("reuses only the same owner's password at the same normalized URL and username", async () => {
+    const manager = service(); await manager.save(alice, config);
+    await manager.test(alice, { endpoint: "https://CLOUD.example/backups", username: config.username });
+    assert.equal(requests.at(-1)!.password, config.password);
+    const count = requests.length;
+    await assert.rejects(manager.test(bob, { endpoint: config.endpoint, username: config.username }), /password/);
+    await assert.rejects(manager.test(alice, { endpoint: "https://other.example/backups/", username: config.username }), /password/);
+    await assert.rejects(manager.test(alice, { endpoint: config.endpoint, username: "new-user" }), /password/);
+    assert.equal(requests.length, count);
+    await manager.test(alice, {});
+    assert.equal(requests.length, count + 1);
+  });
+
+  it("rejects incomplete inputs and inactive accounts before sending credentials", async () => {
+    const manager = service();
+    for (const draft of [{ endpoint: config.endpoint }, { username: config.username }, { password: "secret" }]) {
+      await assert.rejects(manager.test(alice, draft), /endpoint and username/);
+    }
+    await assert.rejects(manager.test(alice, { endpoint: config.endpoint, username: "bad:user", password: "secret" }), /username/);
+    await assert.rejects(manager.test(alice, { endpoint: config.endpoint, username: config.username, password: "" }), /password/);
+    await db.query("UPDATE core.users SET status='disabled' WHERE id=$1", [alice.id]);
+    await assert.rejects(manager.test(alice, { endpoint: config.endpoint, username: config.username, password: config.password }), /not active/);
+    assert.equal(requests.length, 0);
+    assert.equal((await db.query("SELECT * FROM core.backup_targets")).rowCount, 0);
   });
 });
 
@@ -225,6 +280,46 @@ describe("WebDAV backups and durable schedule", () => {
 });
 
 describe("Settings data API authorization", () => {
+  it("accepts draft and legacy tests while rejecting partial or extra fields without persisting drafts", async () => {
+    const authHeaders: string[] = [];
+    const server = http.createServer((req, res) => {
+      assert.equal(req.method, "PROPFIND");
+      authHeaders.push(req.headers.authorization ?? "");
+      res.writeHead(207).end('<d:multistatus xmlns:d="DAV:"/>');
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    process.env.DATA_BACKUP_ALLOWED_ORIGINS = origin;
+    try {
+      await withFixturePlatform({ database: db, manifests: [] }, async platform => {
+        const draft = { endpoint: `${origin}/dav/`, username: "draft-user", password: "draft-secret" };
+        const url = "/api/core/data/webdav/test";
+        assert.equal((await platform.app.inject({ method: "POST", url, payload: draft })).statusCode, 401);
+        const cookie = await loginCookie(platform, "dav-alice", "test-password-dav-alice");
+        const test = (payload: Record<string, unknown>) => platform.app.inject({ method: "POST", url, headers: { cookie }, payload });
+        const result = await test(draft);
+        assert.equal(result.statusCode, 200, result.body);
+        assert.deepEqual(result.json(), { ok: true });
+        assert.equal(authHeaders[0], `Basic ${Buffer.from("draft-user:draft-secret").toString("base64")}`);
+        assert.equal((await db.query("SELECT * FROM core.backup_targets")).rowCount, 0);
+        assert.equal((await db.query("SELECT * FROM core.backup_history")).rowCount, 0);
+        for (const payload of [{ endpoint: draft.endpoint }, { username: draft.username }, { password: draft.password }, { ...draft, scope: "all" }, { ...draft, extra: true }, { ...draft, intervalHours: 1 }, { ...draft, password: "" }]) {
+          const invalid = await test(payload);
+          assert.equal(invalid.statusCode, 400, invalid.body);
+        }
+        assert.equal(authHeaders.length, 1);
+        assert.equal((await test({})).statusCode, 422);
+        const saved = await platform.app.inject({ method: "PUT", url: "/api/core/data/webdav", headers: { cookie }, payload: { ...draft, scope: "own", intervalHours: 24 } });
+        assert.equal(saved.statusCode, 200, saved.body);
+        const before = (await db.query("SELECT * FROM core.backup_targets")).rows;
+        assert.equal((await test({})).statusCode, 200);
+        assert.equal((await test({ endpoint: `${origin}/dav`, username: draft.username })).statusCode, 200);
+        assert.equal(authHeaders.length, 3);
+        assert.deepEqual((await db.query("SELECT * FROM core.backup_targets")).rows, before);
+      });
+    } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+  });
+
   it("guards every data endpoint and scopes configuration and history to the signed-in user", async () => {
     await withFixturePlatform({ database: db, manifests: [] }, async platform => {
       for (const url of ["/api/core/data/webdav", "/api/core/data/webdav/history", "/api/core/data/export?scope=own"]) {

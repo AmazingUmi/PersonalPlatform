@@ -116,6 +116,62 @@ describe("Settings data management", () => {
     expect(data.previewMerge).not.toHaveBeenCalled();
   });
 
+  it("tests a new unsaved connection without saving it and clears stale success on edits", async () => {
+    vi.mocked(data.getWebDav).mockResolvedValue({ ...config, configured: false, endpoint: "", username: "", hasPassword: false, intervalHours: 0 });
+    vi.mocked(data.testWebDav).mockResolvedValue({ ok: true });
+    await ready(); goSection("WebDAV");
+    const test = await screen.findByRole("button", { name: "Test connection" });
+    expect(test).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("WebDAV folder URL"), { target: { value: "https://dav.jianguoyun.com/dav/" } });
+    fireEvent.change(screen.getByLabelText("WebDAV username"), { target: { value: "person@example.com" } });
+    expect(test).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("WebDAV password or app token"), { target: { value: "app-password" } });
+    expect(test).toBeEnabled();
+    fireEvent.click(test);
+    await screen.findByText(/Connection successful. WebDAV directory is reachable/);
+    expect(data.testWebDav).toHaveBeenCalledWith({ endpoint: "https://dav.jianguoyun.com/dav/", username: "person@example.com", password: "app-password" });
+    expect(data.saveWebDav).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("WebDAV password or app token")).toHaveValue("app-password");
+    fireEvent.change(screen.getByLabelText("WebDAV username"), { target: { value: "someone-else@example.com" } });
+    expect(screen.queryByText(/Connection successful/)).not.toBeInTheDocument();
+    goView("Backup");
+    expect(screen.queryByRole("button", { name: "Back up now" })).not.toBeInTheDocument();
+  });
+
+  it("tests edited settings with the saved password only for the same normalized destination and username", async () => {
+    vi.mocked(data.testWebDav).mockResolvedValue({ ok: true });
+    await ready("webdav");
+    fireEvent.change(screen.getByLabelText("WebDAV folder URL"), { target: { value: config.endpoint.slice(0, -1) } });
+    fireEvent.change(screen.getByLabelText("Automatic backup"), { target: { value: "6" } });
+    const test = screen.getByRole("button", { name: "Test connection" });
+    expect(test).toBeEnabled(); fireEvent.click(test);
+    await screen.findByText(/Connection successful/);
+    expect(data.testWebDav).toHaveBeenCalledWith({ endpoint: config.endpoint.slice(0, -1), username: config.username });
+    fireEvent.change(screen.getByLabelText("WebDAV username"), { target: { value: "new-user" } });
+    expect(test).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("WebDAV username"), { target: { value: config.username } });
+    fireEvent.change(screen.getByLabelText("WebDAV folder URL"), { target: { value: "https://another.example/" } });
+    expect(test).toBeDisabled();
+    expect(data.saveWebDav).not.toHaveBeenCalled();
+  });
+
+  it("disables repeat connection tests and preserves the draft after a network error", async () => {
+    let reject!: (error: Error) => void;
+    vi.mocked(data.testWebDav).mockImplementation(() => new Promise((_, fail) => { reject = fail; }));
+    await ready("webdav");
+    fireEvent.change(screen.getByLabelText("WebDAV password or app token"), { target: { value: "replacement-token" } });
+    const test = screen.getByRole("button", { name: "Test connection" });
+    fireEvent.click(test);
+    expect(test).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save backup settings" })).toBeDisabled();
+    reject(new Error("DNS returned a reserved address; check Fake-IP settings."));
+    await screen.findByText(/DNS returned a reserved address/);
+    expect(screen.getByLabelText("WebDAV password or app token")).toHaveValue("replacement-token");
+    expect(test).toBeEnabled();
+    expect(data.testWebDav).toHaveBeenCalledTimes(1);
+    expect(data.saveWebDav).not.toHaveBeenCalled();
+  });
+
   it("preserves a saved password when changing the automatic interval and blocks unsaved actions", async () => {
     vi.mocked(data.saveWebDav).mockResolvedValue({ ...config, intervalHours: 6 });
     await ready("webdav", "connection");

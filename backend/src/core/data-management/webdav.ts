@@ -8,6 +8,7 @@ import { buildIncremental, parseManifest, getObjectRefs, reconstructManifest, fi
 
 export interface BackupActor { id: string; role: "admin" | "user" }
 export type BackupScope = "own" | "all";
+export interface WebdavTestInput { endpoint: string; username: string; password?: string }
 export interface WebdavInput { endpoint: string; username: string; password?: string; scope: BackupScope; intervalHours: number }
 interface Target {
   user_id: string; endpoint: string; username: string; password_ciphertext: string;
@@ -133,11 +134,35 @@ export class WebdavBackups {
       },
     };
   }
-  async test(actor: BackupActor) {
-    const row = await this.target(actor.id);
-    if (!row) throw new AppError(422, "webdav_not_configured", "Save WebDAV configuration first.");
-    checkScope(await this.activeActor(actor.id), row.scope);
-    await this.request(row, "PROPFIND");
+  async test(actor: BackupActor, input: Partial<WebdavTestInput> = {}) {
+    const current = await this.activeActor(actor.id);
+    const keys = Object.keys(input);
+    if (keys.length === 0) {
+      const row = await this.target(actor.id);
+      if (!row) throw new AppError(422, "webdav_not_configured", "Enter WebDAV connection details to test, or save a connection first.");
+      checkScope(current, row.scope);
+      await this.request(row, "PROPFIND");
+    } else {
+      // Validate the shape explicitly: Fastify's default AJV removes additional
+      // properties, so this route deliberately retains them for rejection here.
+      if (keys.some(key => !["endpoint", "username", "password"].includes(key)) || typeof input.endpoint !== "string" || !input.endpoint || input.endpoint.length > 2048 || typeof input.username !== "string") {
+        throw new AppError(400, "invalid_webdav_test", "Provide endpoint and username, with an optional password, to test a connection.");
+      }
+      const endpoint = normalizeEndpoint(input.endpoint);
+      if (!input.username || input.username.includes(":") || /[\r\n]/.test(input.username) || input.username.length > 512) throw new AppError(422, "invalid_webdav_username", "Enter a valid WebDAV username without a colon or newline.");
+      let password = input.password;
+      if (password === undefined) {
+        const existing = await this.target(actor.id);
+        if (!existing || endpoint !== existing.endpoint || input.username !== existing.username) {
+          throw new AppError(422, "password_required", "Enter the password when testing a new WebDAV destination or username.");
+        }
+        password = decryptPassword(existing.password_ciphertext, await backupKey(this.deps.storageRoot), actor.id);
+      } else if (typeof password !== "string" || !password || password.length > 4096) {
+        throw new AppError(422, "invalid_password", "Enter a non-empty WebDAV password (up to 4096 characters).");
+      }
+      // Explicit draft credentials are used only for this request, without saving them.
+      await (this.deps.request ?? davRequest)({ endpoint, username: input.username, password, method: "PROPFIND" });
+    }
     return { ok: true };
   }
   async history(actor: BackupActor) {

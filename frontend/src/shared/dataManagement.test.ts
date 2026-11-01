@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { backupWebDav, exportData, MAX_SNAPSHOT_BYTES, parseBackup } from "./dataManagement";
+import { backupWebDav, testWebDav, exportData, MAX_SNAPSHOT_BYTES, parseBackup } from "./dataManagement";
 import { UNAUTHORIZED_EVENT } from "./api";
 
 describe("backup download boundaries", () => {
@@ -11,6 +11,15 @@ describe("backup download boundaries", () => {
     expect(fetch).toHaveBeenLastCalledWith("/api/core/data/webdav/backup", expect.objectContaining({ method: "POST", body: '{"mode":"incremental"}' }));
     await backupWebDav("full");
     expect(fetch).toHaveBeenLastCalledWith("/api/core/data/webdav/backup", expect.objectContaining({ body: '{"mode":"full"}' }));
+  });
+
+  it("sends a draft connection separately from saving and retains legacy saved tests", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }))));
+    const draft = { endpoint: "https://dav.jianguoyun.com/dav/", username: "user@example.com", password: "app-token" };
+    await testWebDav(draft);
+    expect(fetch).toHaveBeenLastCalledWith("/api/core/data/webdav/test", expect.objectContaining({ method: "POST", body: JSON.stringify(draft) }));
+    await testWebDav();
+    expect(fetch).toHaveBeenLastCalledWith("/api/core/data/webdav/test", expect.objectContaining({ body: "{}" }));
   });
 
   it("signals expired sessions and preserves the server error", async () => {

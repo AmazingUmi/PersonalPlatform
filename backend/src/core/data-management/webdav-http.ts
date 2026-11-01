@@ -45,6 +45,15 @@ export function publicAddress(address: string): boolean {
     || (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) || (a === 203 && b === 0 && c === 113));
 }
 
+/** Check every DNS answer before pinning a socket; an exception is origin-specific. */
+export function validateResolvedDestination(origin: string, addresses: { address: string; family: number }[]): void {
+  if (!addresses.length) throw new AppError(502, "webdav_unreachable", "WebDAV host returned no DNS addresses.");
+  if (!allowedOrigins().has(origin) && addresses.some(({ address }) => !publicAddress(address))) {
+    const resolved = addresses.slice(0, 8).map(({ address }) => address).join(", ");
+    throw new AppError(422, "webdav_origin_blocked", `WebDAV server DNS resolved ${origin} to a private or reserved address (${resolved}). A proxy using Fake-IP DNS can cause this for a public service. Check the server's DNS/proxy, or have the operator add the trusted exact origin ${origin} to DATA_BACKUP_ALLOWED_ORIGINS. This request was blocked before authentication.`);
+  }
+}
+
 export interface DavRequest {
   endpoint: string;
   username: string;
@@ -93,9 +102,7 @@ async function davTransfer(input: DavRequest): Promise<{body: Buffer; status: nu
   const timeoutMs = input.timeoutMs ?? 30_000;
   const started = Date.now();
   const addresses = await resolveWithTimeout(host, timeoutMs);
-  if (!addresses.length || (!allowedOrigins().has(url.origin) && addresses.some(({ address }) => !publicAddress(address)))) {
-    throw new AppError(422, "webdav_origin_blocked", "Private WebDAV destinations require an operator-configured exact origin allowlist.");
-  }
+  validateResolvedDestination(url.origin, addresses);
   const pinned = addresses[0]!;
   return new Promise((resolve, reject) => {
     const request = (url.protocol === "https:" ? https : http).request(url, {
@@ -117,7 +124,14 @@ async function davTransfer(input: DavRequest): Promise<{body: Buffer; status: nu
       const status = response.statusCode ?? 0;
       const ok = input.method === "PROPFIND" ? status === 207 : input.method === "PUT" ? [200,201,204].includes(status) : input.method === "HEAD" ? [200,404].includes(status) : status === 200;
       if (!ok) {
-        fail(new AppError(502, "webdav_failed", `WebDAV returned HTTP ${status}. Check credentials, directory and permissions; redirects are not followed.`, { status }));
+        const hint = status === 401 ? "Check the account and WebDAV application password (some providers require an app password instead of the login password)."
+          : status === 403 ? "The server denied access. Check this account's WebDAV and directory permissions."
+          : status === 404 ? "The directory or backup was not found. Check the WebDAV URL and existing folder."
+          : status === 405 ? "The server does not allow this WebDAV method. Check that the URL is a WebDAV endpoint."
+          : status === 429 ? "The service is rate limiting requests. Wait before trying again."
+          : status >= 300 && status < 400 ? "Redirects are not followed. Enter the final WebDAV directory URL."
+          : "Check the service, directory and permissions.";
+        fail(new AppError(502, "webdav_failed", `WebDAV returned HTTP ${status}. ${hint}`, { status }));
         response.destroy(); return;
       }
       let size = 0;

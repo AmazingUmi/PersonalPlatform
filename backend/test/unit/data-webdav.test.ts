@@ -6,7 +6,7 @@ import { join } from "node:path";
 import http from "node:http";
 import { afterEach, describe, it } from "node:test";
 import { backupKey, decryptPassword, encryptPassword } from "../../src/core/data-management/credentials.js";
-import { davRequest, davHead, DAV_MAX_BYTES, normalizeEndpoint, publicAddress, resolveWithTimeout } from "../../src/core/data-management/webdav-http.js";
+import { davRequest, davHead, DAV_MAX_BYTES, normalizeEndpoint, publicAddress, resolveWithTimeout, validateResolvedDestination } from "../../src/core/data-management/webdav-http.js";
 
 const originalKey = process.env.DATA_BACKUP_ENCRYPTION_KEY;
 const originalOrigins = process.env.DATA_BACKUP_ALLOWED_ORIGINS;
@@ -76,7 +76,7 @@ describe("WebDAV credential storage", () => {
 describe("WebDAV network boundary", () => {
   it("permits global addresses and rejects private, mapped, metadata and reserved destinations", () => {
     for (const address of ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111", "2001:4860:4860::8888"]) assert.equal(publicAddress(address), true, address);
-    for (const address of ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "224.0.0.1", "198.18.0.1", "192.0.2.3", "::1", "::", "fd00::1", "fe80::1", "::ffff:127.0.0.1", "::ffff:7f00:1", "2001:db8::1", "2002:7f00:1::"]) assert.equal(publicAddress(address), false, address);
+    for (const address of ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1", "0.0.0.0", "224.0.0.1", "198.18.0.1", "198.19.255.254", "192.0.2.3", "::1", "::", "fd00::1", "fe80::1", "::ffff:127.0.0.1", "::ffff:7f00:1", "2001:db8::1", "2002:7f00:1::"]) assert.equal(publicAddress(address), false, address);
   });
 
   it("normalizes collection URLs but does not accept credentials, arbitrary protocols or non-allowlisted HTTP", () => {
@@ -90,7 +90,27 @@ describe("WebDAV network boundary", () => {
 
   it("blocks resolved private HTTPS addresses before attempting the connection", async () => {
     delete process.env.DATA_BACKUP_ALLOWED_ORIGINS;
-    await assert.rejects(davRequest({ endpoint: "https://127.0.0.1:1/dav/", username: "u", password: "secret", method: "PROPFIND" }), /Private WebDAV/);
+    await assert.rejects(davRequest({ endpoint: "https://127.0.0.1:1/dav/", username: "u", password: "secret", method: "PROPFIND" }), /private or reserved address/);
+  });
+
+  it("explains Fake-IP DNS and permits only an explicitly allowed exact origin", () => {
+    delete process.env.DATA_BACKUP_ALLOWED_ORIGINS;
+    const origin = "https://dav.jianguoyun.com";
+    const fake = [{ address: "198.18.0.237", family: 4 }];
+    assert.throws(() => validateResolvedDestination(origin, fake), (error: Error) => {
+      assert.match(error.message, /198\.18\.0\.237/);
+      assert.match(error.message, /Fake-IP DNS/);
+      assert.match(error.message, /DATA_BACKUP_ALLOWED_ORIGINS/);
+      assert.match(error.message, /blocked before authentication/);
+      return true;
+    });
+    process.env.DATA_BACKUP_ALLOWED_ORIGINS = origin;
+    assert.doesNotThrow(() => validateResolvedDestination(origin, fake));
+    for (const other of ["http://dav.jianguoyun.com", "https://dav.jianguoyun.com:444", "https://other.example"]) {
+      assert.throws(() => validateResolvedDestination(other, fake), /private or reserved address/);
+    }
+    assert.throws(() => validateResolvedDestination(origin, []), /no DNS addresses/);
+    assert.doesNotThrow(() => validateResolvedDestination("https://public.example", [{ address: "1.1.1.1", family: 4 }]));
   });
 
   it("round-trips bytes through an authenticated local DAV server with non-overwriting PUT", async () => {
@@ -129,6 +149,26 @@ describe("WebDAV network boundary", () => {
       assert.equal(puts, 2);
       await assert.rejects(davRequest({ ...base, method: "GET", filename: "../secrets" }), /filename/);
       await assert.rejects(davRequest({ ...base, password: "wrong", method: "PROPFIND" }), (error: Error) => error.message.includes("401") && !error.message.includes("private diagnostic"));
+    } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+  });
+
+  it("distinguishes actionable HTTP failures without exposing credentials or remote diagnostics", async () => {
+    const server = http.createServer((req, res) => {
+      res.writeHead(Number(req.url!.split("/")[1])).end("remote-private-token-and-path");
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      process.env.DATA_BACKUP_ALLOWED_ORIGINS = origin;
+      for (const [status, hint] of [[401, /application password/], [403, /denied access/], [404, /not found/], [405, /WebDAV endpoint/], [429, /rate limiting/]] as const) {
+        await assert.rejects(davRequest({ endpoint: `${origin}/${status}/`, username: "u", password: "private-secret", method: "PROPFIND" }), (error: Error) => {
+          assert.match(error.message, new RegExp(`HTTP ${status}`));
+          assert.match(error.message, hint);
+          assert(!error.message.includes("remote-private"));
+          assert(!error.message.includes("private-secret"));
+          return true;
+        });
+      }
     } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
   });
 

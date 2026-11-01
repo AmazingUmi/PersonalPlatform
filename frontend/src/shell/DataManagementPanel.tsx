@@ -16,6 +16,16 @@ const message = (error: unknown) => error instanceof Error ? error.message : "Th
 const dateLabel = (value: string | null) => value ? new Date(value).toLocaleString() : "—";
 const scopeLabel = (scope: DataScope) => scope === "all" ? "All users" : "My data";
 
+// UI readiness only; the server independently validates the destination and credentials.
+function connectionUrl(value: string): string | null {
+  try {
+    const url = new URL(value.trim());
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) return null;
+    if (!url.pathname.endsWith("/")) url.pathname += "/";
+    return url.href;
+  } catch { return null; }
+}
+
 export function DataManagementPanel({ section }: { section: "data" | "webdav" | null }) {
   const [, setParams] = useSearchParams();
   const [webDavVisited, setWebDavVisited] = useState(section === "webdav");
@@ -170,6 +180,10 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
   }
   useEffect(() => { mounted.current = true; void load(); return () => { mounted.current = false; }; }, []);
 
+  const normalizedEndpoint = connectionUrl(endpoint);
+  const canReusePassword = Boolean(config?.hasPassword && normalizedEndpoint === config.endpoint && username === config.username);
+  const canTest = Boolean(normalizedEndpoint && username.trim() && (password || canReusePassword));
+  function clearConnectionFeedback() { setNotice(null); setError(null); }
   const dirty = !config || endpoint !== config.endpoint || username !== config.username || scope !== config.scope || intervalHours !== config.intervalHours || password !== "";
   const disabled = busy || importBusy || loading;
   const pageCount = Math.max(1, Math.ceil(history.length / 10));
@@ -206,13 +220,13 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
         setHistory((await getBackupHistory()).items); setNotice("Backup settings saved."); setConfirmDelete(false);
       }); }}>
         <label className="data-management__field" htmlFor="webdav-endpoint">WebDAV folder URL
-          <PixelInput id="webdav-endpoint" type="url" required value={endpoint} disabled={disabled} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://drive.example.com/backups/" autoComplete="off" />
+          <PixelInput id="webdav-endpoint" type="url" required value={endpoint} disabled={disabled} onChange={(event) => { setEndpoint(event.target.value); clearConnectionFeedback(); }} placeholder="https://drive.example.com/backups/" autoComplete="off" />
         </label>
         <label className="data-management__field" htmlFor="webdav-username">WebDAV username
-          <PixelInput id="webdav-username" required value={username} disabled={disabled} onChange={(event) => setUsername(event.target.value)} autoComplete="off" />
+          <PixelInput id="webdav-username" required value={username} disabled={disabled} onChange={(event) => { setUsername(event.target.value); clearConnectionFeedback(); }} autoComplete="off" />
         </label>
         <label className="data-management__field" htmlFor="webdav-password">WebDAV password or app token
-          <PixelInput id="webdav-password" type="password" value={password} disabled={disabled} required={!config?.hasPassword || endpoint !== config.endpoint || username !== config.username} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" placeholder={config?.hasPassword ? "Saved — leave blank to keep" : "Enter password or app token"} />
+          <PixelInput id="webdav-password" type="password" value={password} disabled={disabled} required={!canReusePassword} onChange={(event) => { setPassword(event.target.value); clearConnectionFeedback(); }} autoComplete="new-password" placeholder={config?.hasPassword ? "Saved — leave blank to keep" : "Enter password or app token"} />
         </label>
         <label className="data-management__field" htmlFor="webdav-scope">Backup scope
           <select id="webdav-scope" className="px-input" value={scope} disabled={disabled} onChange={(event) => setScope(event.target.value as DataScope)}>
@@ -225,14 +239,24 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
             {[1, 6, 12, 24, 168].map((hours) => <option key={hours} value={hours}>Every {hours} hour{hours === 1 ? "" : "s"}</option>)}
           </select>
         </label>
-        <div className="data-management__actions"><PixelButton type="submit" disabled={disabled || !dirty}>Save backup settings</PixelButton></div>
+        <div className="data-management__actions">
+          <PixelButton variant="secondary" disabled={disabled || !canTest} onClick={() => void perform(async () => {
+            await testWebDav({ endpoint: endpoint.trim(), username, ...(password ? { password } : {}) });
+            setNotice("Connection successful. WebDAV directory is reachable. This test did not save settings or verify backup writes.");
+          })}>Test connection</PixelButton>
+          <PixelButton type="submit" disabled={disabled || !dirty}>Save backup settings</PixelButton>
+        </div>
       </form>
+      <p className="muted">Test the entered connection before saving. Testing does not save settings or enable automatic backups.</p>
+      <details>
+        <summary>Nutstore (坚果云) setup</summary>
+        <p>Use <code>https://dav.jianguoyun.com/dav/</code> or an existing folder under it, your account email, and an app password from Account information → Security → Third-party applications. Use the app password rather than your sign-in password. <a href="https://help.jianguoyun.com/?p=3234" target="_blank" rel="noreferrer">Nutstore instructions</a></p>
+      </details>
       <p className="muted">Use an existing WebDAV folder. Passwords are encrypted on the server and are never displayed here. Public HTTPS works by default; private or HTTP servers require the administrator's server allowlist.</p>
       {endpoint.trim().startsWith("http:") && <StatusMessage tone="warning">HTTP sends your credentials and backup without transport encryption.</StatusMessage>}
       {scope === "all" && <StatusMessage tone="warning">All-users backups include account password hashes and everyone's app data. Only administrators can use this scope.</StatusMessage>}
       <p className="muted">Automatic backups are incremental. The first backup establishes a baseline; later backups upload changed data blocks and new attachments. Unchanged data creates no new backup. After downtime, one overdue backup runs when the server resumes. Existing remote files are not deleted automatically.</p>
       {config?.configured && <div className="data-management__actions">
-        <PixelButton variant="secondary" disabled={disabled || dirty} onClick={() => void perform(async () => { await testWebDav(); setNotice("WebDAV connection successful."); })}>Test connection</PixelButton>
         <PixelButton variant="danger" disabled={disabled} onClick={() => setConfirmDelete(true)}>Remove connection</PixelButton>
       </div>}
       {confirmDelete && <StatusMessage tone="warning"><p>Remove the saved connection and stop automatic backups? Files already on your drive remain there.</p>
@@ -243,7 +267,7 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
       <div hidden={view !== "backup"}>
       {!config?.configured && <p>Set up a connection to start backing up your data.</p>}
       {config?.configured && <>
-        {dirty && <p className="muted">Save your changes before testing the connection or creating a backup.</p>}
+        {dirty && <p className="muted">Save your changes before creating a backup.</p>}
         <label className="data-management__field" htmlFor="webdav-mode">Manual backup mode
           <select id="webdav-mode" className="px-input" value={backupMode} disabled={disabled} onChange={(event) => setBackupMode(event.target.value as BackupMode)}>
             <option value="incremental">Incremental — changed data only</option>

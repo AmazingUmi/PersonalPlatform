@@ -209,3 +209,43 @@ test("Settings history paginates and reviews into Data without losing a draft on
   await expect(page.getByRole("button", { name: `Download ${filenames[0]}`, exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Next page", exact: true })).toBeDisabled();
 });
+
+test("WebDAV tests the entered connection before saving and preserves a failed draft", async ({ page }, testInfo) => {
+  const drafts: unknown[] = [];
+  let saves = 0;
+  await page.route("**/api/core/data/webdav", route => {
+    if (route.request().method() === "PUT") saves++;
+    return route.fulfill({ json: { configured: false, endpoint: "", username: "", hasPassword: false,
+      scope: "own", intervalHours: 0, nextRunAt: null, lastRunAt: null, lastStatus: null, lastError: null } });
+  });
+  await page.route("**/api/core/data/webdav/history", route => route.fulfill({ json: { items: [] } }));
+  await page.route("**/api/core/data/webdav/test", route => {
+    drafts.push(route.request().postDataJSON());
+    return drafts.length === 1
+      ? route.fulfill({ status: 422, json: { error: { message: "DNS returned a reserved address. Check Fake-IP or the exact origin allowlist." } } })
+      : route.fulfill({ json: { ok: true } });
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/settings?section=webdav");
+  const testConnection = page.getByRole("button", { name: "Test connection", exact: true });
+  await expect(testConnection).toBeVisible();
+  await expect(testConnection).toBeDisabled();
+  await page.getByLabel("WebDAV folder URL").fill("https://dav.jianguoyun.com/dav/");
+  await page.getByLabel("WebDAV username").fill("test@example.com");
+  await expect(testConnection).toBeDisabled();
+  await page.getByLabel("WebDAV password or app token").fill("example-app-password");
+  await testConnection.click();
+  await expect(page.getByText(/DNS returned a reserved address/)).toBeVisible();
+  await expect(page.getByLabel("WebDAV password or app token")).toHaveValue("example-app-password");
+  await testConnection.click();
+  await expect(page.getByText(/Connection successful. WebDAV directory is reachable/)).toBeVisible();
+  expect(drafts).toEqual(Array(2).fill({ endpoint: "https://dav.jianguoyun.com/dav/", username: "test@example.com", password: "example-app-password" }));
+  expect(saves).toBe(0);
+  await page.getByLabel("WebDAV username").fill("edited@example.com");
+  await expect(page.getByText(/Connection successful/)).toHaveCount(0);
+  await testConnection.evaluate(element => element.scrollIntoView({ block: "center", behavior: "instant" }));
+  await expect.poll(async () => (await testConnection.boundingBox())!.y).toBeLessThan(650);
+  await page.screenshot({ path: testInfo.outputPath("webdav-test-before-save-mobile.png"), animations: "disabled" });
+  await page.getByRole("link", { name: "Backup", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Back up now", exact: true })).toHaveCount(0);
+});
