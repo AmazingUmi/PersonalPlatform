@@ -19,6 +19,10 @@ const report: data.MergeReport = {
   scope: "own", createdAt: "2026-11-01T12:00:00.000Z", files: 1, inserted: 2, skipped: 3,
   tables: [{ table: "tasks.tasks", inserted: 2, skipped: 3, conflicts: 0 }],
 };
+const backup: data.BackupRecord = {
+  id: "backup-id", filename: "historical.json", scope: "own", createdAt: report.createdAt,
+  size: 4096, available: true, kind: "incremental", uploadedBytes: 256, uploadedObjects: 2,
+};
 function chooseFile(payload: unknown = { type: "personal-platform-data", scope: "own" }) {
   const file = new File([JSON.stringify(payload)], "previous-backup.json", { type: "application/json" });
   Object.defineProperty(file, "text", { value: () => Promise.resolve(JSON.stringify(payload)) });
@@ -134,6 +138,43 @@ describe("Settings data management", () => {
     expect(screen.queryByText(/Backup saved:/)).not.toBeInTheDocument();
   });
 
+  it("defaults manual WebDAV to incremental and shows the actual uploaded amount", async () => {
+    vi.mocked(data.backupWebDav).mockResolvedValue({ status: "created", backup, uploadedBytes: 256, uploadedObjects: 2 });
+    await ready();
+    expect(screen.getByLabelText("Manual backup mode")).toHaveValue("incremental");
+    fireEvent.click(screen.getByRole("button", { name: "Back up now" }));
+    await screen.findByText(/Backup saved: historical.json. Uploaded 0.3 KiB in 2 object/);
+    expect(data.backupWebDav).toHaveBeenCalledWith("incremental");
+  });
+
+  it("lets a user choose a full WebDAV backup without changing the automatic schedule", async () => {
+    vi.mocked(data.backupWebDav).mockResolvedValue({ status: "created", backup: { ...backup, kind: "full" }, uploadedBytes: 4096, uploadedObjects: 1 });
+    await ready();
+    fireEvent.change(screen.getByLabelText("Manual backup mode"), { target: { value: "full" } });
+    fireEvent.click(screen.getByRole("button", { name: "Back up now" }));
+    await screen.findByText(/Uploaded 4.0 KiB in 1 object/);
+    expect(data.backupWebDav).toHaveBeenCalledWith("full");
+    expect(data.saveWebDav).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Automatic backup")).toHaveValue("24");
+  });
+
+  it("reports no changes without inventing another backup entry", async () => {
+    vi.mocked(data.backupWebDav).mockResolvedValue({ status: "unchanged", backup: null, uploadedBytes: 0, uploadedObjects: 0 });
+    await ready();
+    fireEvent.click(screen.getByRole("button", { name: "Back up now" }));
+    await screen.findByText("Data is unchanged. Nothing was uploaded and no new backup was created.");
+    expect(screen.getByText("No backups recorded yet.")).toBeInTheDocument();
+    expect(screen.queryByText(/Backup saved:/)).not.toBeInTheDocument();
+  });
+
+  it("distinguishes repaired remote objects from a zero-upload unchanged result", async () => {
+    vi.mocked(data.backupWebDav).mockResolvedValue({ status: "unchanged", backup: null, uploadedBytes: 2048, uploadedObjects: 1 });
+    await ready();
+    fireEvent.click(screen.getByRole("button", { name: "Back up now" }));
+    await screen.findByText("Data is unchanged. Repaired 1 missing object(s), uploading 2.0 KiB. No new backup was created.");
+    expect(screen.queryByText(/Nothing was uploaded/)).not.toBeInTheDocument();
+  });
+
   it("requires confirmation to remove a connection and disables subsequent backups", async () => {
     vi.mocked(data.deleteWebDav).mockResolvedValue(undefined);
     await ready();
@@ -147,12 +188,13 @@ describe("Settings data management", () => {
   });
 
   it("loads a recorded remote backup into the same preview flow", async () => {
-    const record: data.BackupRecord = { id: "backup-id", filename: "historical.json", scope: "own", createdAt: report.createdAt, size: 256, available: true };
+    const record: data.BackupRecord = backup;
     vi.mocked(data.getBackupHistory).mockResolvedValue({ items: [record] });
     const blob = new Blob(["{}"]);
     Object.defineProperty(blob, "text", { value: async () => "{}" });
     vi.mocked(data.downloadBackup).mockResolvedValue({ blob, filename: record.filename });
     await ready();
+    expect(screen.getByText(/Incremental · My data.*Full data 4.0 KiB · Uploaded 0.3 KiB/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Review historical.json for import" }));
     await screen.findByTestId("merge-preview");
     expect(screen.getByText("Selected: historical.json")).toBeInTheDocument();

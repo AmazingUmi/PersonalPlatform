@@ -66,6 +66,14 @@ describe("WebDAV persistence and private configuration", () => {
     await db.withTransaction(async tx => {
       await tx.query("DROP TABLE core.backup_history,core.backup_targets");
       await tx.query(migration);
+      await tx.query("INSERT INTO core.backup_history(id,user_id,endpoint,filename,scope,size_bytes,sha256) VALUES(gen_random_uuid(),$1,'https://old.example/','legacy.json','own',123,'old-hash')", [alice.id]);
+      await tx.query(await readFile(resolve(import.meta.dirname, "../../..", "migrations/core/20261101000002-incremental-backups.sql"), "utf8"));
+      const legacy = (await tx.query("SELECT * FROM core.backup_history WHERE filename='legacy.json'")).rows[0]!;
+      assert.equal(legacy.kind, "full"); assert.equal(legacy.logical_size_bytes, 123);
+      assert.equal(Number(legacy.uploaded_bytes), 123); assert.equal(legacy.uploaded_objects, 1);
+      assert.equal(legacy.namespace, null); assert.equal(legacy.destination_username, null);
+      assert(legacy.sequence);
+
       assert.deepEqual((await tx.query("SELECT * FROM core.users ORDER BY id")).rows, beforeUsers);
       assert.deepEqual((await tx.query("SELECT value FROM core.settings WHERE key='dav.migration-sentinel'")).rows[0]!.value, { preserve: true });
     });
@@ -125,7 +133,7 @@ describe("WebDAV backups and durable schedule", () => {
   it("uploads unique snapshots, downloads exact bytes and isolates history by owner and destination", async () => {
     const manager = service();
     await manager.save(alice, config); await manager.save(bob, config);
-    const first = await manager.run(alice), second = await manager.run(alice);
+    const first = (await manager.run(alice, false, "full")).backup!, second = (await manager.run(alice, false, "full")).backup!;
     assert.notEqual(first.filename, second.filename);
     const result = await manager.download(alice, first.id);
     const snapshot = JSON.parse(result.data.toString()) as { scope: string; source: { id: string } };
@@ -141,7 +149,7 @@ describe("WebDAV backups and durable schedule", () => {
 
   it("detects a changed remote backup before returning it to the browser", async () => {
     const manager = service(); await manager.save(alice, config);
-    const uploaded = await manager.run(alice);
+    const uploaded = (await manager.run(alice, false, "full")).backup!;
     objects.set(config.endpoint + uploaded.filename, Buffer.from("tampered"));
     await assert.rejects(manager.download(alice, uploaded.id), /differs/);
   });
@@ -208,7 +216,7 @@ describe("WebDAV backups and durable schedule", () => {
 
   it("marks all-scope history unavailable and refuses download after its owner's demotion", async () => {
     const manager = service(); await manager.save(admin, { ...config, scope: "all" });
-    const uploaded = await manager.run(admin);
+    const uploaded = (await manager.run(admin, false, "full")).backup!;
     await db.query("UPDATE core.users SET role='user' WHERE id=$1", [admin.id]);
     const current = { ...admin, role: "user" as const };
     assert.equal((await manager.history(current)).items[0]!.available, false);

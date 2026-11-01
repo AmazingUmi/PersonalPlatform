@@ -65,6 +65,39 @@ test("ordinary users only see their own backup scope and cannot export the site"
   }
 });
 
+/** Browser interaction contract; DAV transport/storage are covered by backend integration tests. */
+test("WebDAV defaults to incremental, explains unchanged data and offers manual full backup", async ({ page }) => {
+  const requestedModes: string[] = [];
+  await page.route("**/api/core/data/webdav", route => route.fulfill({ json: {
+    configured: true, endpoint: "https://drive.example.com/backups/", username: "backup-user", hasPassword: true,
+    scope: "own", intervalHours: 24, nextRunAt: null, lastRunAt: null, lastStatus: null, lastError: null,
+  } }));
+  await page.route("**/api/core/data/webdav/history", route => route.fulfill({ json: { items: [] } }));
+  await page.route("**/api/core/data/webdav/backup", route => {
+    const mode = route.request().postDataJSON().mode as string;
+    requestedModes.push(mode);
+    if (requestedModes.length === 2) return route.fulfill({ json: { status: "unchanged", backup: null, uploadedBytes: 0, uploadedObjects: 0 } });
+    return route.fulfill({ json: {
+      status: "created", uploadedBytes: 1024, uploadedObjects: 1,
+      backup: { id: `backup-${requestedModes.length}`, filename: `${mode}.json`, kind: mode, scope: "own", createdAt: "2026-11-01T12:00:00Z", size: 4096, available: true, uploadedBytes: 1024, uploadedObjects: 1 },
+    } });
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/settings");
+  await expect(page.getByLabel("Manual backup mode")).toHaveValue("incremental");
+  await page.getByRole("button", { name: "Back up now", exact: true }).click();
+  await expect(page.getByText(/Backup saved: incremental.json/)).toBeVisible();
+  await page.getByRole("button", { name: "Back up now", exact: true }).click();
+  await expect(page.getByText("Data is unchanged. Nothing was uploaded and no new backup was created.")).toBeVisible();
+  await page.getByLabel("Manual backup mode").selectOption("full");
+  await page.getByRole("button", { name: "Back up now", exact: true }).click();
+  await expect(page.getByText(/Backup saved: full.json/)).toBeVisible();
+  expect(requestedModes).toEqual(["incremental", "incremental", "full"]);
+  await expect(page.getByLabel("Automatic backup")).toHaveValue("24");
+  const bounds = await page.getByLabel("Manual backup mode").boundingBox();
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
+});
+
 test("Settings data panels remain usable on desktop and mobile", async ({ page }, testInfo) => {
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/settings");

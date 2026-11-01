@@ -17,7 +17,7 @@ test("production proxy admits a maximum Settings snapshot envelope without raisi
   const dataLocation = nginx.match(/location \^~ \/api\/core\/data\/ \{([^}]+)\}/)?.[1];
   assert.ok(dataLocation, "Settings needs an explicit proxy upload budget");
   assert.match(dataLocation, /client_max_body_size 33m;/);
-  assert.match(dataLocation, /proxy_read_timeout 180s;/);
+  assert.match(dataLocation, /proxy_read_timeout 360s;/);
   assert.match(dataLocation, /proxy_pass \$backend\$request_uri;/);
   assert.match(nginx, /client_max_body_size 12m;/);
 });

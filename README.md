@@ -112,7 +112,7 @@ npm run create:app -- assets "Asset Manager"
 
 ### 备份与恢复（FP-11）
 
-Settings 已提供本人数据导出、历史备份预览/合并，以及 WebDAV 手动和定时备份；管理员还能选择全站数据。JSON 包含附件，合并保留当前记录。使用说明、32 MiB 限制及旧 SQL 备份转换步骤见 [数据管理](doc/DATA_MANAGEMENT.md)。下面的 CLI 用于完整停机备份/覆盖恢复。
+Settings 已提供本人数据全量导出、历史备份预览/合并；管理员还能选择全站数据。WebDAV 默认及定时使用增量备份，手动也可选择独立全量备份。JSON 包含附件，合并保留当前记录。使用说明、32 MiB 限制、增量离线重组及旧 SQL 备份转换步骤见 [数据管理](doc/DATA_MANAGEMENT.md)。下面的 CLI 用于完整停机备份/覆盖恢复。
 
 ```bash
 npm run backup                                    # 备份到 backups/<timestamp>/

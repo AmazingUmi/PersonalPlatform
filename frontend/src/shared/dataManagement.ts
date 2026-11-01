@@ -37,6 +37,16 @@ export interface BackupRecord {
   createdAt: string;
   size: number;
   available: boolean;
+  kind: "full" | "incremental";
+  uploadedBytes: number;
+  uploadedObjects: number;
+}
+export type BackupMode = "incremental" | "full";
+export interface BackupResult {
+  status: "created" | "unchanged";
+  backup: BackupRecord | null;
+  uploadedBytes: number;
+  uploadedObjects: number;
 }
 const json = (method: string, body: unknown): RequestInit => ({
   method, headers: { "content-type": "application/json" }, body: JSON.stringify(body),
@@ -49,7 +59,7 @@ export const getWebDav = () => api<WebDavConfig>(`${BASE}/webdav`);
 export const saveWebDav = (input: WebDavInput) => api<WebDavConfig>(`${BASE}/webdav`, json("PUT", input));
 export const deleteWebDav = () => api<unknown>(`${BASE}/webdav`, { method: "DELETE" });
 export const testWebDav = () => api<{ ok: boolean }>(`${BASE}/webdav/test`, json("POST", {}));
-export const backupWebDav = () => api<BackupRecord>(`${BASE}/webdav/backup`, json("POST", {}));
+export const backupWebDav = (mode: BackupMode = "incremental") => api<BackupResult>(`${BASE}/webdav/backup`, json("POST", { mode }));
 export const getBackupHistory = () => api<{ items: BackupRecord[] }>(`${BASE}/webdav/history`);
 
 /** Bound the download before retaining it in browser memory, including chunked responses. */

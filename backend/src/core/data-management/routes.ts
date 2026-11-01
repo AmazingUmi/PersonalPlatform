@@ -3,7 +3,7 @@ import type { Database } from "../database/index.js";
 import type { CoreRouteHook } from "../api/routes.js";
 import { AppError } from "../api/errors.js";
 import { exportSnapshot, importSnapshot, previewSnapshot, MAX_SNAPSHOT_BYTES } from "./snapshot.js";
-import { WebdavBackups, checkScope, type BackupScope, type WebdavInput } from "./webdav.js";
+import { WebdavBackups, checkScope, type BackupScope, type WebdavInput, type BackupMode } from "./webdav.js";
 
 const scopeSchema = { type: "string", enum: ["own", "all"] };
 const emptyBody = { type: "object", additionalProperties: false };
@@ -50,7 +50,9 @@ export function registerDataManagementRoutes(app: FastifyInstance, deps: {
     await backups().remove(request.user!); return reply.code(204).send();
   });
   app.post("/api/core/data/webdav/test", { ...hooks, schema: { body: emptyBody } }, request => backups().test(request.user!));
-  app.post("/api/core/data/webdav/backup", { ...hooks, schema: { body: emptyBody } }, request => backups().run(request.user!));
+  app.post<{Body: {mode?: BackupMode}}>("/api/core/data/webdav/backup", {
+    ...hooks, schema: { body: { type: "object", additionalProperties: false, properties: { mode: { type: "string", enum: ["incremental", "full"] } } } },
+  }, request => backups().run(request.user!, false, request.body.mode ?? "incremental"));
   app.get("/api/core/data/webdav/history", hooks, request => backups().history(request.user!));
   app.get<{ Params: { id: string } }>("/api/core/data/webdav/files/:id", {
     ...hooks, schema: { params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } } },

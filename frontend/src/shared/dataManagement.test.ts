@@ -1,9 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { exportData, MAX_SNAPSHOT_BYTES, parseBackup } from "./dataManagement";
+import { backupWebDav, exportData, MAX_SNAPSHOT_BYTES, parseBackup } from "./dataManagement";
 import { UNAUTHORIZED_EVENT } from "./api";
 
 describe("backup download boundaries", () => {
   afterEach(() => { vi.unstubAllGlobals(); });
+
+  it("sends explicit incremental or full mode without changing local exports", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => new Response(JSON.stringify({ status: "unchanged", backup: null, uploadedBytes: 0, uploadedObjects: 0 }))));
+    await backupWebDav();
+    expect(fetch).toHaveBeenLastCalledWith("/api/core/data/webdav/backup", expect.objectContaining({ method: "POST", body: '{"mode":"incremental"}' }));
+    await backupWebDav("full");
+    expect(fetch).toHaveBeenLastCalledWith("/api/core/data/webdav/backup", expect.objectContaining({ body: '{"mode":"full"}' }));
+  });
 
   it("signals expired sessions and preserves the server error", async () => {
     const unauthorized = vi.fn();

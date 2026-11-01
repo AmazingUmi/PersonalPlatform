@@ -6,7 +6,7 @@ import { join } from "node:path";
 import http from "node:http";
 import { afterEach, describe, it } from "node:test";
 import { backupKey, decryptPassword, encryptPassword } from "../../src/core/data-management/credentials.js";
-import { davRequest, DAV_MAX_BYTES, normalizeEndpoint, publicAddress, resolveWithTimeout } from "../../src/core/data-management/webdav-http.js";
+import { davRequest, davHead, DAV_MAX_BYTES, normalizeEndpoint, publicAddress, resolveWithTimeout } from "../../src/core/data-management/webdav-http.js";
 
 const originalKey = process.env.DATA_BACKUP_ENCRYPTION_KEY;
 const originalOrigins = process.env.DATA_BACKUP_ALLOWED_ORIGINS;
@@ -105,7 +105,9 @@ describe("WebDAV network boundary", () => {
         const chunks = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
         objects.set(req.url!, Buffer.concat(chunks)); puts++; res.writeHead(201).end(); return;
       }
-      const data = objects.get(req.url!); res.writeHead(data ? 200 : 404).end(data);
+      const data = objects.get(req.url!);
+      if (data) res.setHeader("content-length", data.length);
+      res.writeHead(data ? 200 : 404).end(req.method === "HEAD" ? undefined : data);
     });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     try {
@@ -117,8 +119,14 @@ describe("WebDAV network boundary", () => {
       const bytes = Buffer.from('{"content":"测试"}');
       await davRequest({ ...base, method: "PUT", filename, body: bytes });
       assert.deepEqual(await davRequest({ ...base, method: "GET", filename }), bytes);
-      await assert.rejects(davRequest({ ...base, method: "PUT", filename, body: Buffer.from("overwrite") }), /412/);
-      assert.equal(puts, 1);
+      await assert.rejects(davRequest({ ...base, method: "PUT", filename, body: Buffer.from("overwrite") }), (error: Error & {details?: {status?: number}}) => error.details?.status === 412);
+      assert.equal(await davHead({ ...base, method: "HEAD", filename }), bytes.length);
+      assert.equal(await davHead({ ...base, method: "HEAD", filename: `pp-${randomUUID()}-own-${randomUUID()}.json` }), null);
+      const contentName = `ppc-${"a".repeat(64)}-${"b".repeat(64)}.bin`;
+      await davRequest({ ...base, method: "PUT", filename: contentName, body: bytes });
+      assert.equal(await davHead({ ...base, method: "HEAD", filename: contentName }), bytes.length);
+      await assert.rejects(davHead({ ...base, method: "HEAD", filename: "ppc-../secret.bin" }), /filename/);
+      assert.equal(puts, 2);
       await assert.rejects(davRequest({ ...base, method: "GET", filename: "../secrets" }), /filename/);
       await assert.rejects(davRequest({ ...base, password: "wrong", method: "PROPFIND" }), (error: Error) => error.message.includes("401") && !error.message.includes("private diagnostic"));
     } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
@@ -129,6 +137,7 @@ describe("WebDAV network boundary", () => {
     const server = http.createServer((req, res) => {
       if (req.url?.startsWith("/redirect/")) { res.writeHead(302, { location: "/stolen/" }).end(); return; }
       if (req.url?.startsWith("/stolen/")) { redirected++; res.writeHead(200).end(); return; }
+      if (req.url?.startsWith("/missing-head-length/")) { res.writeHead(200).end(); return; }
       if (req.url?.startsWith("/oversized/")) { res.writeHead(200).end(Buffer.alloc(DAV_MAX_BYTES + 1)); return; }
       // /hang deliberately never responds; the client deadline must abort it.
     });
@@ -139,6 +148,8 @@ describe("WebDAV network boundary", () => {
       const base = { username: "u", password: "secret", method: "GET" as const };
       await assert.rejects(davRequest({ ...base, endpoint: `${origin}/redirect/` }), /302/);
       assert.equal(redirected, 0);
+      await assert.rejects(davHead({ ...base, endpoint: `${origin}/missing-head-length/` }), /Content-Length/);
+      await assert.rejects(davHead({ ...base, endpoint: `${origin}/redirect/` }), /302/);
       await assert.rejects(davRequest({ ...base, endpoint: `${origin}/hang/`, timeoutMs: 30 }), /timed out/);
       await assert.rejects(davRequest({ ...base, endpoint: `${origin}/oversized/` }), /allowed size/);
     } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }

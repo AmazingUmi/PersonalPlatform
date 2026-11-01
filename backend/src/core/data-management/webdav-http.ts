@@ -49,7 +49,7 @@ export interface DavRequest {
   endpoint: string;
   username: string;
   password: string;
-  method: "PROPFIND" | "PUT" | "GET";
+  method: "PROPFIND" | "PUT" | "GET" | "HEAD";
   filename?: string;
   body?: Buffer;
   timeoutMs?: number;
@@ -73,8 +73,19 @@ export async function resolveWithTimeout(
 
 /** DNS is checked once then pinned on the socket; redirects are never followed. */
 export async function davRequest(input: DavRequest): Promise<Buffer> {
+  return (await davTransfer(input)).body;
+}
+
+export async function davHead(input: DavRequest): Promise<number | null> {
+  const response = await davTransfer({ ...input, method: "HEAD", body: undefined });
+  if (response.status === 404) return null;
+  if (response.length === undefined) throw new AppError(502, "webdav_head_unsupported", "WebDAV HEAD must return a valid Content-Length. Use a full backup if this server does not support it.");
+  return response.length;
+}
+
+async function davTransfer(input: DavRequest): Promise<{body: Buffer; status: number; length?: number}> {
   const endpoint = normalizeEndpoint(input.endpoint);
-  if (input.filename && !/^pp-[a-f0-9-]+-(?:own|all)-[a-f0-9-]+\.json$/.test(input.filename)) {
+  if (input.filename && !/^(?:ppm?-[a-f0-9-]+-(?:own|all)-[a-f0-9-]+\.json|ppc-[a-f0-9]{64}-[a-f0-9]{64}\.(?:json|bin))$/.test(input.filename)) {
     throw new AppError(422, "invalid_backup_name", "Invalid backup filename.");
   }
   const url = new URL(input.filename ?? "", endpoint);
@@ -86,7 +97,7 @@ export async function davRequest(input: DavRequest): Promise<Buffer> {
     throw new AppError(422, "webdav_origin_blocked", "Private WebDAV destinations require an operator-configured exact origin allowlist.");
   }
   const pinned = addresses[0]!;
-  return new Promise<Buffer>((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     const request = (url.protocol === "https:" ? https : http).request(url, {
       method: input.method,
       agent: false,
@@ -95,7 +106,7 @@ export async function davRequest(input: DavRequest): Promise<Buffer> {
       headers: {
         authorization: `Basic ${Buffer.from(`${input.username}:${input.password}`).toString("base64")}`,
         ...(input.method === "PROPFIND" ? { depth: "0", "content-type": "application/xml" } : {}),
-        ...(input.method === "PUT" ? { "content-type": "application/json", "if-none-match": "*", "content-length": input.body?.length ?? 0 } : {}),
+        ...(input.method === "PUT" ? { "content-type": input.filename?.endsWith(".bin") ? "application/octet-stream" : "application/json", "if-none-match": "*", "content-length": input.body?.length ?? 0 } : {}),
       },
     });
     const timer = setTimeout(() => request.destroy(new Error("timeout")), Math.max(1, timeoutMs - (Date.now() - started)));
@@ -104,9 +115,9 @@ export async function davRequest(input: DavRequest): Promise<Buffer> {
     request.on("error", () => fail(new AppError(502, "webdav_unreachable", "WebDAV request failed or timed out. Check the address, TLS certificate and connection.")));
     request.on("response", response => {
       const status = response.statusCode ?? 0;
-      const ok = input.method === "PROPFIND" ? status === 207 : input.method === "PUT" ? [200,201,204].includes(status) : status === 200;
+      const ok = input.method === "PROPFIND" ? status === 207 : input.method === "PUT" ? [200,201,204].includes(status) : input.method === "HEAD" ? [200,404].includes(status) : status === 200;
       if (!ok) {
-        fail(new AppError(502, "webdav_failed", `WebDAV returned HTTP ${status}. Check credentials, directory and permissions; redirects are not followed.`));
+        fail(new AppError(502, "webdav_failed", `WebDAV returned HTTP ${status}. Check credentials, directory and permissions; redirects are not followed.`, { status }));
         response.destroy(); return;
       }
       let size = 0;
@@ -118,7 +129,14 @@ export async function davRequest(input: DavRequest): Promise<Buffer> {
         else chunks.push(chunk);
       });
       response.on("error", () => fail(new AppError(502, "webdav_unreachable", "WebDAV download was interrupted.")));
-      response.on("end", () => { if (!finished) { finished = true; clearTimeout(timer); resolve(Buffer.concat(chunks)); } });
+      response.on("end", () => {
+        if (!finished) {
+          finished = true; clearTimeout(timer);
+          const rawLength = response.headers["content-length"];
+          const length = typeof rawLength === "string" && /^\d+$/.test(rawLength) && Number.isSafeInteger(Number(rawLength)) ? Number(rawLength) : undefined;
+          resolve({ body: Buffer.concat(chunks), status, length });
+        }
+      });
     });
     request.end(input.method === "PROPFIND" ? '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/></d:prop></d:propfind>' : input.body);
   });

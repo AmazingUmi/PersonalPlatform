@@ -7,7 +7,7 @@ import { StatusMessage } from "../shared/ui/StatusMessage";
 import {
   backupWebDav, deleteWebDav, downloadBackup, exportData, getBackupHistory, getWebDav,
   importSnapshot, parseBackup, previewMerge, saveDownload, saveWebDav, testWebDav,
-  type BackupRecord, type DataScope, type MergeReport, type WebDavConfig,
+  type BackupMode, type BackupRecord, type DataScope, type MergeReport, type WebDavConfig,
 } from "../shared/dataManagement";
 import "./dataManagement.css";
 
@@ -53,7 +53,7 @@ export function DataManagementPanel() {
 
   return <>
     <PixelWindow title="Data management" icon="file" className="data-management">
-      <p>Export your app data and attachments, or merge a previous backup into this installation.</p>
+      <p>Export a full JSON backup of your app data and attachments, or merge a previous full backup into this installation.</p>
       <div className="data-management__actions">
         <label className="data-management__field" htmlFor="data-scope">Data scope
           <select id="data-scope" className="px-input" value={scope} disabled={busy} onChange={(event) => {
@@ -128,6 +128,7 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
   const [password, setPassword] = useState("");
   const [scope, setScope] = useState<DataScope>("own");
   const [intervalHours, setIntervalHours] = useState(0);
+  const [backupMode, setBackupMode] = useState<BackupMode>("incremental");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -196,13 +197,29 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
       <p className="muted">Use an existing WebDAV folder. Passwords are encrypted on the server and are never displayed here. Public HTTPS works by default; private or HTTP servers require the administrator's server allowlist.</p>
       {endpoint.trim().startsWith("http:") && <StatusMessage tone="warning">HTTP sends your credentials and backup without transport encryption.</StatusMessage>}
       {scope === "all" && <StatusMessage tone="warning">All-users backups include account password hashes and everyone's app data. Only administrators can use this scope.</StatusMessage>}
-      <p className="muted">Automatic backups run every selected number of hours while the server is running. After downtime, one overdue backup runs when the server resumes. Existing remote backups are not deleted automatically.</p>
+      <p className="muted">Automatic backups are incremental. The first backup establishes a baseline; later backups upload changed data blocks and new attachments. Unchanged data creates no new backup. After downtime, one overdue backup runs when the server resumes. Existing remote files are not deleted automatically.</p>
       {config?.configured && <>
         {dirty && <p className="muted">Save your changes before testing the connection or creating a backup.</p>}
+        <label className="data-management__field" htmlFor="webdav-mode">Manual backup mode
+          <select id="webdav-mode" className="px-input" value={backupMode} disabled={disabled} onChange={(event) => setBackupMode(event.target.value as BackupMode)}>
+            <option value="incremental">Incremental — changed data only</option>
+            <option value="full">Full — independent JSON file</option>
+          </select>
+        </label>
+        <p className="muted">Full mode uploads an independent complete file. It does not change the automatic incremental schedule.</p>
         <div className="data-management__actions">
           <PixelButton variant="secondary" disabled={disabled || dirty} onClick={() => void perform(async () => { await testWebDav(); setNotice("WebDAV connection successful."); })}>Test connection</PixelButton>
           <PixelButton disabled={disabled || dirty} onClick={() => void perform(async () => {
-            try { const record = await backupWebDav(); setNotice(`Backup saved: ${record.filename}`); }
+            try {
+              const result = await backupWebDav(backupMode);
+              if (result.status === "unchanged") {
+                setNotice(result.uploadedObjects > 0
+                  ? `Data is unchanged. Repaired ${result.uploadedObjects} missing object(s), uploading ${(result.uploadedBytes / 1024).toFixed(1)} KiB. No new backup was created.`
+                  : "Data is unchanged. Nothing was uploaded and no new backup was created.");
+              } else {
+                setNotice(`Backup saved: ${result.backup?.filename ?? "completed"}. Uploaded ${(result.uploadedBytes / 1024).toFixed(1)} KiB in ${result.uploadedObjects} object(s).`);
+              }
+            }
             finally { await refreshStatus(); }
           })}>Back up now</PixelButton>
           <PixelButton variant="ghost" disabled={disabled || dirty} onClick={() => void perform(refreshStatus)}>Refresh backup status</PixelButton>
@@ -221,9 +238,9 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
       </>}
       <div className="data-management__section">
         <h3>Backup history</h3>
-        <p className="muted">Backups created by this account on this installation. To import other backups, download the JSON file from your drive and select it above.</p>
+        <p className="muted">Download and Review reconstruct an incremental backup as a full JSON file. Keep its remote manifest and all referenced objects together. For backups outside this history, a full JSON file can be imported above; incremental manifests need the offline reconstruction tool.</p>
         {history.length === 0 ? <p>No backups recorded yet.</p> : <ul className="data-management__history">{history.map((record) => <li key={record.id}>
-          <div><strong className="data-management__filename">{record.filename}</strong><p className="muted">{scopeLabel(record.scope)} · {dateLabel(record.createdAt)} · {(record.size / 1024).toFixed(1)} KiB</p></div>
+          <div><strong className="data-management__filename">{record.filename}</strong><p className="muted">{record.kind === "incremental" ? "Incremental" : "Full"} · {scopeLabel(record.scope)} · {dateLabel(record.createdAt)} · Full data {(record.size / 1024).toFixed(1)} KiB · Uploaded {(record.uploadedBytes / 1024).toFixed(1)} KiB</p></div>
           {record.available ? <div className="data-management__actions">
             <PixelButton variant="secondary" size="sm" disabled={disabled || dirty} onClick={() => void perform(async () => saveDownload(await downloadBackup(record.id)))}>Download {record.filename}</PixelButton>
             <PixelButton variant="secondary" size="sm" disabled={disabled || dirty} onClick={() => void perform(async () => { await onPrepare(record); })}>Review {record.filename} for import</PixelButton>
