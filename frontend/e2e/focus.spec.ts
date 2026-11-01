@@ -96,8 +96,8 @@ test.beforeEach(async ({ request }) => {
 });
 
 test("focus: dashboard quick controls run a short session end-to-end", async ({ page, request }) => {
-  // Headroom: natural completion reaches the widget through its visibility
-  // poll (up to 15s), so the test allows more than the default 30s.
+  // The mounted widget reconciles at the deadline and shows a persistent
+  // notice, without waiting for its 15-second safety-net poll.
   test.setTimeout(45_000);
   await putFocusSettings(request, 4);
   await ensureNextKindIsFocus(request);
@@ -116,12 +116,112 @@ test("focus: dashboard quick controls run a short session end-to-end", async ({ 
   // A control press must never trigger the surrounding card's navigation.
   expect(page.url()).toBe(urlBefore);
 
-  // The 4s session expires server-side; the widget flips to READY (and adds
-  // the completed round) on its next refetch — poll the widget text, no sleeps.
-  await expect
-    .poll(async () => widgetState(page).innerText(), { timeout: 20_000 })
-    .toContain("READY");
+  const completion = card.locator(".focus-completion");
+  await expect(completion).toContainText("Focus complete", { timeout: 10_000 });
+  await expect(widgetState(page)).toContainText("READY");
   expect(await widgetRounds(page)).toBe(roundsBefore + 1);
+  await card.getByRole("button", { name: "Dismiss completion", exact: true }).click();
+  await expect(completion).toHaveCount(0);
+  expect(page.url()).toBe(urlBefore);
+});
+
+test("focus: foreground completion is visible without notification permission and stays dismissed", async ({ page, request }) => {
+  // The reported defect: a foreground timer reached zero with no effective
+  // notification. Deny the optional API to verify the visible fallback.
+  await page.addInitScript(() => {
+    Object.defineProperty(window, "Notification", {
+      configurable: true,
+      value: class {
+        static permission = "denied";
+        static requestPermission() { throw new Error("must not request permission automatically"); }
+        constructor() { throw new Error("must not notify without permission"); }
+      },
+    });
+  });
+  await putFocusSettings(request, 4);
+  await ensureNextKindIsFocus(request);
+  await page.goto("/focus");
+  await page.getByRole("button", { name: "START", exact: true }).click();
+  await expect(page.getByText("FOCUSING", { exact: true })).toBeVisible();
+  const completion = page.locator(".focus-completion");
+  await expect(completion).toHaveAttribute("role", "status", { timeout: 10_000 });
+  await expect(completion).toContainText("Focus complete");
+  await expect(page.getByText("READY", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(completion).toContainText("Focus complete");
+  await page.getByRole("button", { name: "Dismiss completion", exact: true }).click();
+  await expect(completion).toHaveCount(0);
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await expect(completion).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText("READY", { exact: true })).toBeVisible();
+  await expect(completion).toHaveCount(0);
+});
+
+test("focus: default and minimum desktop widgets keep timer and completion controls inside the card", async ({ page, request }) => {
+  test.setTimeout(45_000);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const apps = await request.get(`${CORE}/api/core/apps`);
+  expect(apps.status()).toBe(200);
+  const { items } = await apps.json() as { items: Array<{ id: string; widgets: Array<{ id: string }> }> };
+  const hidden = items.flatMap((app) => app.widgets.map((widget) => `${app.id}:${widget.id}`)).filter((key) => key !== "focus:timer");
+  const card = page.locator(FOCUS_CARD);
+  async function insideCard(locator: Locator) {
+    const bounds = await card.boundingBox();
+    const content = await locator.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(content).not.toBeNull();
+    expect(content!.y).toBeGreaterThanOrEqual(bounds!.y);
+    expect(content!.y + content!.height).toBeLessThanOrEqual(bounds!.y + bounds!.height + 1);
+    expect(content!.x).toBeGreaterThanOrEqual(bounds!.x);
+    expect(content!.x + content!.width).toBeLessThanOrEqual(bounds!.x + bounds!.width + 1);
+  }
+  try {
+    for (const [w, h] of [[26, 18], [16, 12]]) {
+      await ensureNextKindIsFocus(request);
+      await putFocusSettings(request, 3);
+      const saved = await request.put(`${CORE}/api/core/settings/dashboard.widgets`, {
+        data: { value: { version: 2, items: { "focus:timer": { x: 0, y: 0, w, h } }, hidden } },
+      });
+      expect(saved.status()).toBe(200);
+      await page.goto("/");
+      const start = card.getByRole("button", { name: "Start", exact: true });
+      await expect(start).toBeVisible();
+      // The initially empty live region must stay in the accessibility tree;
+      // revealing a display:none region only at completion can miss its announcement.
+      expect(await card.locator('.focus-alerts--compact [role="status"]').evaluate((element) => {
+        for (let node: Element | null = element; node; node = node.parentElement) {
+          const style = getComputedStyle(node);
+          if (style.display === "none" || style.visibility === "hidden" || node.getAttribute("aria-hidden") === "true") return false;
+        }
+        return true;
+      })).toBe(true);
+      await insideCard(start);
+      await insideCard(card.locator(".focus-widget__time"));
+      await start.click();
+      await expect(widgetState(page)).toContainText("FOCUSING");
+      await insideCard(card.getByRole("button", { name: "Pause", exact: true }));
+      await insideCard(card.getByRole("button", { name: "Stop", exact: true }));
+      const completion = card.locator(".focus-completion");
+      await expect(completion).toContainText("Focus complete", { timeout: 10_000 });
+      await insideCard(completion);
+      await insideCard(card.locator(".focus-widget__time"));
+      await insideCard(start);
+      const dismiss = card.getByRole("button", { name: "Dismiss completion", exact: true });
+      await insideCard(dismiss);
+      await dismiss.click();
+      const alerts = card.getByRole("button", { name: "Alert settings", exact: true });
+      await alerts.click();
+      await expect(alerts).toHaveAttribute("aria-expanded", "true");
+      await card.getByRole("button", { name: "Enable sound", exact: true }).scrollIntoViewIfNeeded();
+      await expect(card.getByRole("button", { name: "Enable sound", exact: true })).toBeVisible();
+      await alerts.click();
+      await expect(alerts).toHaveAttribute("aria-expanded", "false");
+      await expect(page).toHaveURL(/\/$/);
+    }
+  } finally {
+    await ensureDashboardWidget(request);
+  }
 });
 
 test("focus: dashboard pause and focus page resume stay in sync", async ({ page, request, context }) => {
@@ -177,6 +277,7 @@ test("focus: page flow start-pause-resume-stop creates cancelled history", async
   await expect(page.getByText("FOCUSING", { exact: true })).toBeVisible({ timeout: 10_000 });
   await page.getByRole("button", { name: "PAUSE", exact: true }).click();
   await expect(page.getByText("PAUSED", { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".focus-completion")).toHaveCount(0);
   await page.getByRole("button", { name: "RESUME", exact: true }).click();
   await expect(page.getByText("FOCUSING", { exact: true })).toBeVisible({ timeout: 10_000 });
   // Let ≥2s of real focus time accumulate so the cancelled session's actual
@@ -184,6 +285,7 @@ test("focus: page flow start-pause-resume-stop creates cancelled history", async
   await page.waitForTimeout(2_500);
   await page.getByRole("button", { name: "STOP", exact: true }).click();
   await expect(page.getByText("READY", { exact: true })).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".focus-completion")).toHaveCount(0);
 
   // Server accounting: the really-elapsed focus time counts, a cancelled
   // session does NOT count as a completed round, but it did end a session.

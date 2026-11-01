@@ -55,6 +55,10 @@ export function fetchFocusState(): Promise<FocusState> {
   return api<FocusState>(`${PREFIX}/state`);
 }
 
+export function fetchFocusSession(id: string): Promise<FocusHistoryItem> {
+  return api<FocusHistoryItem>(`${PREFIX}/sessions/${encodeURIComponent(id)}`);
+}
+
 export interface StartFocusSessionInput {
   kind: SessionKind;
   plannedDurationSeconds?: number;

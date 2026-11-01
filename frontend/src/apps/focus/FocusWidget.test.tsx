@@ -1,3 +1,4 @@
+vi.mock("../../shell/AuthContext", () => ({ useAuth: () => ({ user: { id: "focus-test-user" } }) }));
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FocusWidget } from "./FocusWidget";
@@ -180,6 +181,35 @@ describe("FocusWidget", () => {
     expect(interactive.length).toBeGreaterThan(0);
     interactive.forEach((element) => expect(element.tagName).toBe("BUTTON"));
     expect(container.querySelectorAll(":not(button)[role='button']")).toHaveLength(0);
+  });
+});
+
+describe("compact completion alerts", () => {
+  it("discloses optional controls without hiding the completion notice or timer actions", async () => {
+    const end = new Date(Date.now() + 1000).toISOString();
+    let current = focusStateFixture(activeSession({ id: "compact-completion", expectedEndAt: end }));
+    stubFetch((url) => url === "/api/apps/focus/state" ? jsonResponse(current)
+      : jsonResponse({ id: "compact-completion", kind: "focus", status: "completed", endReason: "natural", endedAt: end }));
+    const { container } = await renderLoaded();
+    const toggle = screen.getByRole("button", { name: "Alert settings" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByRole("button", { name: "Enable sound" })).toBeNull();
+    current = focusStateFixture(null);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(screen.getByText("Focus complete")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Start" })).toBeTruthy();
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    const settings = container.querySelector(`[id="${toggle.getAttribute("aria-controls")}"]`);
+    expect(settings?.hasAttribute("hidden")).toBe(false);
+    expect(screen.getByRole("button", { name: "Enable sound" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Enable notifications" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Start" })).toBeTruthy();
+    expect(screen.getByText("Focus complete")).toBeTruthy();
+    fireEvent.click(toggle);
+    expect(screen.queryByRole("button", { name: "Enable sound" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss completion" }));
+    expect(screen.queryByText("Focus complete")).toBeNull();
   });
 });
 

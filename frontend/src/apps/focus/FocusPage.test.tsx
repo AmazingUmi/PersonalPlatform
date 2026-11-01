@@ -1,3 +1,4 @@
+vi.mock("../../shell/AuthContext", () => ({ useAuth: () => ({ user: { id: "focus-test-user" } }) }));
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FocusPage } from "./FocusPage";

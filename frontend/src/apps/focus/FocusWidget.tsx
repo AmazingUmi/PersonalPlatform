@@ -1,3 +1,5 @@
+import { useId, useState } from "react";
+import { FocusAlertControls, FocusCompletion } from "./FocusCompletion";
 import { LoadingState } from "../../shared/ui/LoadingState";
 import { PixelButton } from "../../shared/ui/PixelButton";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
@@ -43,7 +45,9 @@ function defaultSecondsFor(kind: SessionKind, settings: FocusSettings): number {
  * the surrounding card never navigates on a control press.
  */
 export function FocusWidget() {
-  const { state, loading, error, busy, remainingSeconds, dispatch } = useFocusState();
+  const { state, loading, error, busy, remainingSeconds, dispatch, completion, dismissCompletion, alerts } = useFocusState();
+  const [alertsOpen, setAlertsOpen] = useState(false);
+  const alertsId = useId();
   if (loading) return <LoadingState label="Loading…" />;
 
   const active = state?.active ?? null;
@@ -70,6 +74,7 @@ export function FocusWidget() {
 
   return (
     <div className="focus-widget" data-state={stateKey} data-kind={kind}>
+      <FocusCompletion completion={completion} onDismiss={dismissCompletion} alerts={alerts} compact />
       <div className="focus-widget__state">
         {stateLabel} · {kindLabel(kind)}
       </div>
@@ -120,6 +125,11 @@ export function FocusWidget() {
             </PixelButton>
           </>
         )}
+        <PixelButton size="sm" variant="secondary" aria-label="Alert settings" aria-expanded={alertsOpen}
+          aria-controls={alertsId} onClick={() => setAlertsOpen((open) => !open)}>Alerts</PixelButton>
+      </div>
+      <div id={alertsId} hidden={!alertsOpen} className="focus-widget__alert-settings">
+        {alertsOpen && <FocusAlertControls alerts={alerts} />}
       </div>
     </div>
   );

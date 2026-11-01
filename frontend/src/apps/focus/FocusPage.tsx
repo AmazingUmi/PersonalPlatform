@@ -1,3 +1,4 @@
+import { FocusCompletion } from "./FocusCompletion";
 import { useAppDisplayName } from "../../shared/PresentationContext";
 import { LoadingState } from "../../shared/ui/LoadingState";
 import { PixelButton } from "../../shared/ui/PixelButton";
@@ -17,7 +18,7 @@ import { useFocusState } from "./useFocusState";
  */
 export function FocusPage() {
   const displayName = useAppDisplayName({ id: "focus", name: "Focus" });
-  const { state, loading, error, busy, remainingSeconds, dispatch, reload } = useFocusState();
+  const { state, loading, error, busy, remainingSeconds, dispatch, reload, completion, dismissCompletion, alerts } = useFocusState();
 
   return (
     <div className="page" data-app="focus">
@@ -44,6 +45,7 @@ export function FocusPage() {
         </StatusMessage>
       ) : (
         <>
+          <FocusCompletion completion={completion} onDismiss={dismissCompletion} alerts={alerts} />
           <FocusTimer
             state={state}
             remainingSeconds={remainingSeconds}

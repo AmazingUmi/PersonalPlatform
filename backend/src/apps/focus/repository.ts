@@ -272,6 +272,35 @@ type HistoryPgRow = {
   total: string;
 };
 
+function toHistoryRow(r: Omit<HistoryPgRow, "total">): HistoryItemRow {
+  return {
+    id: r.id,
+    kind: r.kind,
+    status: r.status,
+    plannedDurationSeconds: r.planned_duration_seconds,
+    actualDurationSeconds: r.actual_duration_seconds,
+    startedAt: r.started_at,
+    endedAt: r.ended_at,
+    endReason: r.end_reason,
+  };
+}
+
+/** Exact terminal evidence for one user's session; never reconciles a live row. */
+export async function findTerminalSession(
+  db: Db,
+  userId: string,
+  sessionId: string,
+): Promise<HistoryItemRow | null> {
+  const { rows } = await db.query<Omit<HistoryPgRow, "total">>(
+    `SELECT id, kind, status, planned_duration_seconds, actual_duration_seconds,
+            started_at, ended_at, end_reason
+     FROM focus.sessions
+     WHERE user_id = $1 AND id = $2 AND status IN ('completed', 'cancelled')`,
+    [userId, sessionId],
+  );
+  return rows[0] ? toHistoryRow(rows[0]) : null;
+}
+
 /**
  * One user's terminal sessions (completed/cancelled), newest first, with the
  * un-paginated total for the UI page count. limit/offset are validated then
@@ -293,16 +322,7 @@ export async function listSessions(
      LIMIT $2 OFFSET $3`,
     [userId, page.limit, page.offset],
   );
-  const items = rows.map((r) => ({
-    id: r.id,
-    kind: r.kind,
-    status: r.status,
-    plannedDurationSeconds: r.planned_duration_seconds,
-    actualDurationSeconds: r.actual_duration_seconds,
-    startedAt: r.started_at,
-    endedAt: r.ended_at,
-    endReason: r.end_reason,
-  }));
+  const items = rows.map(toHistoryRow);
   return { items, total: rows[0] ? Number(rows[0].total) : 0 };
 }
 

@@ -3324,3 +3324,46 @@
     font-size: 34px;
   }
 }
+
+/* Focus completion remains visible independently of the next READY timer. */
+.focus-alerts { display: grid; gap: 0.5rem; }
+.focus-completion { padding: 0.85rem; border: 2px solid currentColor; background: var(--px-surface-2); }
+.focus-completion p { margin: 0.4rem 0 0.65rem; }
+.focus-alerts__controls { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.focus-alerts__status { margin: 0; font-size: 0.75rem; line-height: 1.5; }
+
+/* Optional widget alerts use a disclosure, keeping the timer actions usable
+ * within the existing dashboard size contract. Expanded options scroll only
+ * inside Focus rather than escaping the fixed-height card. */
+.focus-widget { overflow-y: auto; }
+.focus-widget > * { flex-shrink: 0; }
+/* Keep the initially empty live region in the accessibility tree so filling
+ * it can announce completion, without using scarce card space beforehand. */
+.focus-alerts--compact:has([role="status"]:empty) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.focus-alerts--compact .focus-completion { padding: 3px 6px; font-size: 12px; }
+.focus-alerts--compact .focus-completion > div { display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+.focus-alerts--compact .focus-completion .px-button { padding: 0 6px; min-height: 22px; box-shadow: none; }
+.focus-widget__alert-settings { padding: 4px 0; }
+.focus-widget__alert-settings[hidden] { display: none; }
+@media (min-width: 960px) {
+  .dashboard-canvas .focus-widget { container-type: size; gap: 6px; }
+  .dashboard-canvas .focus-widget__dial { flex: 1 0 auto; min-height: 44px; padding: 8px; }
+  .dashboard-canvas .focus-widget__controls .px-button { min-height: 30px; padding: 3px 6px; }
+  .dashboard-canvas .focus-widget:has(.focus-completion) .focus-widget__rounds,
+  .dashboard-canvas .focus-widget:has(.focus-completion) .focus-widget__rounds-label { display: none; }
+}
+@container (max-height: 180px) {
+  .focus-widget__rounds, .focus-widget__rounds-label, .focus-widget__meta { display: none; }
+  .dashboard-canvas .focus-widget__dial { min-height: 24px; padding: 2px; }
+  .dashboard-canvas .focus-widget__time { font-size: 24px; }
+  .dashboard-canvas .focus-widget__state { font-size: 10px; }
+  .dashboard-canvas .focus-widget__controls .px-button { min-height: 26px; font-size: 11px; padding: 2px 4px; }
+}

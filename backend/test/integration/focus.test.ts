@@ -4,8 +4,9 @@ import { join, resolve } from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { Database } from "../../src/core/database/index.js";
 import focusApp from "../../src/apps/focus/index.js";
+import type { BackendAppModule } from "../../src/core/app-registry/types.js";
 import type { Platform } from "../../src/core/platform.js";
-import { buildFixturePlatform, ensureTestAdmin, loginCookie } from "../helpers/platform.js";
+import { buildFixturePlatform, createTestUser, ensureTestAdmin, loginCookie } from "../helpers/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 import { runMigrations } from "../../src/core/database/migrate.js";
 
@@ -143,14 +144,26 @@ let platform: Platform;
 let cookie: string;
 /** LIFO list of fixture cleanups (each restart adds one; only env restore). */
 const cleanups: Array<() => void> = [];
+const terminalEvents: Array<{ type: string; id: string }> = [];
+const spySubscriber: BackendAppModule = {
+  id: "spy",
+  async registerApi() {},
+  async registerEvents(ctx) {
+    return ["focus.session.completed.v1", "focus.session.cancelled.v1"].map((type) =>
+      ctx.events.subscribe<{ id: string }>(type, (event) => {
+        terminalEvents.push({ type, id: event.payload.id });
+      }),
+    );
+  },
+};
 
 before(async () => {
   db = await resetDatabase();
   await ensureTestAdmin(db);
   const fixture = await buildFixturePlatform({
     database: db,
-    manifests: [{ id: "focus", migrations: focusMigrations }],
-    backendModules: { focus: focusApp },
+    manifests: [{ id: "focus", migrations: focusMigrations }, { id: "spy" }],
+    backendModules: { focus: focusApp, spy: spySubscriber },
     clock,
   });
   platform = fixture.platform;
@@ -182,8 +195,8 @@ async function rebuildPlatform(): Promise<void> {
   await platform.stop();
   const fixture = await buildFixturePlatform({
     database: db,
-    manifests: [{ id: "focus", migrations: focusMigrations }],
-    backendModules: { focus: focusApp },
+    manifests: [{ id: "focus", migrations: focusMigrations }, { id: "spy" }],
+    backendModules: { focus: focusApp, spy: spySubscriber },
     clock,
   });
   platform = fixture.platform;
@@ -905,6 +918,110 @@ describe("sessions history pagination (APP-1 §24.23)", () => {
     for (let i = 1; i < all.length; i++) {
       assert.ok(all[i - 1]!.startedAt > all[i]!.startedAt, "globally newest first");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FOCUS-N1 exact terminal evidence
+// ---------------------------------------------------------------------------
+
+describe("exact terminal session evidence (FOCUS-N1)", () => {
+  beforeEach(async () => {
+    await resetFocusData();
+    now = new Date(T0);
+    terminalEvents.length = 0;
+  });
+
+  it("reads natural completion for each kind without repeating completion events", async () => {
+    for (const kind of ["focus", "short_break", "long_break"] as const) {
+      await runToCompletion(kind, 10);
+      const expected = (await history()).items[0]!;
+      assert.equal(expected.status, "completed");
+      assert.equal(expected.endReason, "natural");
+      assert.equal(expected.kind, kind);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const result = await getBody<HistoryItem>(`/sessions/${expected.id}`);
+        assert.equal(result.status, 200);
+        assert.deepEqual(result.body, expected, "the exact existing history-item shape");
+      }
+      assert.deepEqual(terminalEvents.filter((event) => event.id === expected.id), [
+        { type: "focus.session.completed.v1", id: expected.id },
+      ]);
+    }
+  });
+
+  it("reads manual cancellation without converting it to completion or publishing on reads", async () => {
+    await postBody("/start", { kind: "focus", plannedDurationSeconds: 30 });
+    advance(5);
+    await postBody("/stop");
+    const expected = (await history()).items[0]!;
+    assert.equal(expected.status, "cancelled");
+    assert.equal(expected.endReason, "manual_stop");
+    const result = await getBody<HistoryItem>(`/sessions/${expected.id}`);
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body, expected);
+    assert.deepEqual(terminalEvents, [{ type: "focus.session.cancelled.v1", id: expected.id }]);
+  });
+
+  it("hides running, paused and unknown rows identically and never reconciles expiry", async () => {
+    const started = await postBody<TransitionBody>("/start", { kind: "focus", plannedDurationSeconds: 10 });
+    const sessionId = started.body.state.active!.id;
+    const missing = await getBody<ErrorBody>("/sessions/00000000-0000-0000-0000-000000000000");
+    assert.equal(missing.status, 404);
+    for (const phase of ["running", "paused", "expired"] as const) {
+      if (phase === "paused") await postBody("/pause");
+      if (phase === "expired") {
+        await postBody("/resume");
+        advance(11);
+      }
+      const result = await getBody<ErrorBody>(`/sessions/${sessionId}`);
+      assert.equal(result.status, 404, phase);
+      assert.equal(result.body.error.code, missing.body.error.code);
+      assert.equal(result.body.error.message, missing.body.error.message);
+    }
+    assert.deepEqual(terminalEvents, [], "lookup must not complete the expired running row");
+    const stored = await db.context().query<{ status: string }>(
+      "SELECT status FROM focus.sessions WHERE id = $1", [sessionId],
+    );
+    assert.equal(stored.rows[0]!.status, "running");
+    await getState();
+    assert.equal((await getBody<HistoryItem>(`/sessions/${sessionId}`)).body.status, "completed");
+    assert.deepEqual(terminalEvents, [{ type: "focus.session.completed.v1", id: sessionId }]);
+  });
+
+  it("keeps another user's terminal row indistinguishable from a missing row", async () => {
+    await runToCompletion("focus", 10);
+    const own = (await history()).items[0]!;
+    await createTestUser(db, "focus-terminal-reader");
+    const otherCookie = await loginCookie(platform, "focus-terminal-reader", "test-password-focus-terminal-reader");
+    const result = await platform.app.inject({
+      method: "GET", url: `/api/apps/focus/sessions/${own.id}`, headers: { cookie: otherCookie },
+    });
+    const missing = await getBody<ErrorBody>("/sessions/00000000-0000-0000-0000-000000000000");
+    assert.equal(result.statusCode, 404);
+    assert.equal(result.json().error.code, missing.body.error.code);
+    assert.equal(result.json().error.message, missing.body.error.message);
+    assert.deepEqual((await getBody<HistoryItem>(`/sessions/${own.id}`)).body, own);
+  });
+
+  it("rejects invalid UUIDs and preserves authentication and disabled-app guards", async () => {
+    for (const invalid of ["not-a-uuid", "00000000-0000-0000-0000-00000000000g"]) {
+      const response = await getBody<ErrorBody>(`/sessions/${invalid}`);
+      assert.equal(response.status, 400);
+      assert.equal(response.body.error.code, "validation_error");
+    }
+    await runToCompletion("focus", 10);
+    const own = (await history()).items[0]!;
+    const url = `/api/apps/focus/sessions/${own.id}`;
+    assert.equal((await platform.app.inject({ method: "GET", url })).statusCode, 401);
+    await platform.setAppEnabled("focus", false);
+    try {
+      assert.equal((await api("GET", `/sessions/${own.id}`)).statusCode, 404);
+      assert.equal((await platform.app.inject({ method: "GET", url })).statusCode, 404);
+    } finally {
+      await platform.setAppEnabled("focus", true);
+    }
+    assert.deepEqual((await getBody<HistoryItem>(`/sessions/${own.id}`)).body, own);
   });
 });
 

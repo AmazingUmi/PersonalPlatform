@@ -37,6 +37,7 @@ import {
 } from "./timer.js";
 import {
   completedFocusSinceLongBreak,
+  findTerminalSession,
   getSettings,
   insertSession,
   isUniqueViolation,
@@ -121,8 +122,8 @@ async function assembleState(
 
 /**
  * Close any expired running session of one user in its own transaction,
- * publish the completion event, then assemble the state. Every read path
- * funnels through here so a naturally completed session is committed,
+ * publish the completion event, then assemble the state. State reads
+ * funnel through here so a naturally completed session is committed,
  * published and visible in a single request.
  */
 async function syncState(ctx: AppContext, userId: string, now: Date): Promise<FocusState> {
@@ -485,6 +486,17 @@ async function registerApi(ctx: AppContext): Promise<void> {
       return { items: items.map(toHistoryItem), total };
     },
   );
+
+  ctx.api.get<{ Params: { id: string } }>("/sessions/:id", async (request) => {
+    const user = await ctx.auth.requireUser(request);
+    const sessionId = request.params.id;
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
+      throw new AppError(400, "validation_error", "session id must be a UUID");
+    }
+    const row = await findTerminalSession(db, user.id, sessionId);
+    if (row === null) throw new AppError(404, "not_found", "focus session not found");
+    return toHistoryItem(row);
+  });
 
   ctx.api.get<{ Querystring: { days?: number } }>(
     "/stats",

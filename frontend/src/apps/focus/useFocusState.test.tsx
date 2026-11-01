@@ -1,3 +1,4 @@
+vi.mock("../../shell/AuthContext", () => ({ useAuth: () => ({ user: { id: "focus-test-user" } }) }));
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useFocusState } from "./useFocusState";
@@ -660,6 +661,8 @@ describe("Focus server-time and monotonic clock", () => {
     next = runningAt(serverNow, serverNow + 2000);
     await act(async () => { result.current.reload(); });
     expect(result.current.remainingSeconds).toBe(2);
+    // The deadline now performs a read; the server clock must advance too.
+    next = runningAt(serverNow + 3000, serverNow + 2000);
     await advance(3000);
     expect(result.current.remainingSeconds).toBe(0);
   });
