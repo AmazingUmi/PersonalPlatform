@@ -1,3 +1,4 @@
+import { I18nProvider, useI18n } from "../../shared/i18n";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorldClockSection, type WorldClockView } from "./WorldClockSection";
@@ -69,7 +70,9 @@ describe("WorldClockSection add form", () => {
     fireEvent.change(await screen.findByRole("combobox", { name: "City and timezone" }), {
       target: { value: "Asia/Tokyo" },
     });
-    // The binding hint states the derived pair.
+    // Instructions are available on demand without submitting the form.
+    expect(screen.queryByText("Binds Tokyo to Asia/Tokyo.")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Help: City timezone" }));
     expect(screen.getByText("Binds Tokyo to Asia/Tokyo.")).toBeInTheDocument();
     expect(addButton()).toBeEnabled();
 
@@ -100,3 +103,21 @@ describe("WorldClockSection add form", () => {
 function withinOptions(select: HTMLElement): HTMLOptionElement[] {
   return Array.from(select.querySelectorAll("option"));
 }
+
+function LanguageSwitch() {
+  const { language, setLanguage } = useI18n();
+  return <button onClick={() => setLanguage(language === "en" ? "zh" : "en")}>Switch language</button>;
+}
+
+it("localizes built-in city names and controls while preserving custom names and stored pairs", async () => {
+  const { posts } = stubWorldClockApi([worldClock("Home Tokyo", "Asia/Tokyo")]);
+  render(<I18nProvider initialLanguage="zh"><LanguageSwitch /><WorldClockSection now={new Date("2026-09-09T12:00:00Z")} /></I18nProvider>);
+  expect(await screen.findByText("Home Tokyo")).toBeVisible();
+  expect(screen.getByRole("button", { name: "移除 Home Tokyo" })).toBeVisible();
+  fireEvent.change(screen.getByRole("combobox", { name: "城市与时区" }), { target: { value: "Asia/Shanghai" } });
+  expect(screen.getByRole("option", { name: "上海 · Asia/Shanghai" })).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Switch language" }));
+  expect(screen.getByRole("combobox", { name: "City and timezone" })).toHaveValue("Asia/Shanghai");
+  fireEvent.click(screen.getByRole("button", { name: "+ Add City" }));
+  await waitFor(() => expect(posts).toEqual([{ city: "Shanghai", timezone: "Asia/Shanghai" }]));
+});

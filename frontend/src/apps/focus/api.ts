@@ -120,13 +120,13 @@ export function formatDuration(totalSeconds: number): string {
   return hours >= 1 ? `${hours}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
-export function kindLabel(kind: SessionKind): string {
+export function kindLabel(kind: SessionKind, language = "en"): string {
   switch (kind) {
     case "focus":
-      return "Focus";
+      return language === "zh" ? "专注" : "Focus";
     case "short_break":
-      return "Short Break";
+      return language === "zh" ? "短休息" : "Short Break";
     case "long_break":
-      return "Long Break";
+      return language === "zh" ? "长休息" : "Long Break";
   }
 }

@@ -1,3 +1,4 @@
+import { I18nProvider, useI18n } from "../../shared/i18n";
 vi.mock("../../shell/AuthContext", () => ({ useAuth: () => ({ user: { id: "focus-test-user" } }) }));
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -208,4 +209,29 @@ describe("FocusPage", () => {
     });
     expect(await screen.findByText("Settings saved")).toBeDefined();
   });
+});
+
+function LanguageSwitch() {
+  const { language, setLanguage } = useI18n();
+  return <button onClick={() => setLanguage(language === "en" ? "zh" : "en")}>Switch language</button>;
+}
+
+it("switches a paused timer, history, settings and alert statuses without resetting the timer or draft", async () => {
+  const fetchMock = setupFetch(focusState(activeSession({ status: "paused", remainingSeconds: 1200 }), { today: { focusedSeconds: 300, completedRounds: 1, sessionsEnded: 1 } }));
+  render(<I18nProvider initialLanguage="en"><LanguageSwitch /><FocusPage /></I18nProvider>);
+  const minutes = await screen.findByRole("spinbutton", { name: "Focus minutes" });
+  fireEvent.change(minutes, { target: { value: "42" } });
+  expect(screen.getByRole("timer")).toHaveTextContent("20:00");
+  const requests = fetchMock.mock.calls.length;
+  fireEvent.click(screen.getByRole("button", { name: "Switch language" }));
+  expect(screen.getByRole("timer", { name: "剩余时间" })).toHaveTextContent("20:00");
+  expect(screen.getByRole("spinbutton", { name: "专注时长（分钟）" })).toHaveValue(42);
+  expect(screen.getByRole("button", { name: "继续" })).toBeVisible();
+  expect(screen.getByText(/声音已关闭/)).toBeVisible();
+  expect(screen.getByText("短休息")).toBeVisible();
+  expect(screen.getAllByText("5分").length).toBeGreaterThan(0);
+  expect(fetchMock.mock.calls.length).toBe(requests);
+  expect(screen.queryByText("番茄计时、每日统计与历史记录")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "帮助：关于专注" }));
+  expect(screen.getByText("番茄计时、每日统计与历史记录")).toBeVisible();
 });

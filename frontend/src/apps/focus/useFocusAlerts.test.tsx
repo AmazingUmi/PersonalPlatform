@@ -1,3 +1,4 @@
+import { I18nProvider, useI18n } from "../../shared/i18n";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useFocusAlerts } from "./useFocusAlerts";
@@ -134,4 +135,22 @@ describe("optional Focus alerts", () => {
       expect(result.current.sound).toBe(false); expect(result.current.soundStatus).toContain("unavailable");
     });
   }
+});
+
+it("updates alert language without resetting audio and uses it for subsequent notifications", async () => {
+  MockNotification.permission = "granted";
+  const { result } = renderHook(() => ({ alerts: useFocusAlerts(`localized-${user}`), i18n: useI18n() }), {
+    wrapper: ({ children }) => <I18nProvider initialLanguage="en">{children}</I18nProvider>,
+  });
+  await act(async () => { result.current.alerts.enableNotifications?.(); result.current.alerts.enableSound?.(); });
+  const announce = result.current.alerts.announce;
+  act(() => result.current.i18n.setLanguage("zh"));
+  expect(result.current.alerts.soundStatus).toBe("声音已就绪");
+  expect(result.current.alerts.notificationStatus).toBe("浏览器权限：已允许");
+  expect(result.current.alerts.announce).toBe(announce);
+  expect(result.current.alerts.sound).toBe(true);
+  expect(close).not.toHaveBeenCalled();
+  expect(resume).toHaveBeenCalledTimes(1);
+  act(() => result.current.alerts.announce(session));
+  expect(notification).toHaveBeenCalledWith("专注完成", expect.objectContaining({ body: "计时已完成，准备好后打开专注，开始下一阶段。" }));
 });

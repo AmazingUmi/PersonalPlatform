@@ -1,3 +1,4 @@
+import { I18nProvider, useI18n } from "../../shared/i18n";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -332,7 +333,7 @@ describe("QuickNoteWidget density (Phase 10)", () => {
     expect(screen.queryByText(/recent entry/)).toBeNull();
   });
 
-  it("expanded lists up to three recent entries with their day keys", async () => {
+  it("expanded lists up to three recent entries with their localized day keys", async () => {
     setupRecentFetch();
     renderWidget("expanded");
 
@@ -340,7 +341,7 @@ describe("QuickNoteWidget density (Phase 10)", () => {
     expect(screen.getByText("recent entry 1")).toBeDefined();
     expect(screen.getByText("recent entry 2")).toBeDefined();
     expect(screen.queryByText("recent entry 3")).toBeNull();
-    expect(screen.getByText("2026-09-01")).toBeDefined();
+    expect(screen.getByText(new Date("2026-09-01T00:00:00").toLocaleDateString("en-US"))).toBeDefined();
     expect(screen.getByLabelText("Quick note content")).toHaveAttribute("rows", "3");
   });
 });
@@ -350,4 +351,22 @@ describe("status provider (shell chips)", () => {
     const notesApp = (await import("./index")).default;
     expect(notesApp.status).toBeUndefined();
   });
+});
+
+function LanguageSwitch() {
+  const { language, setLanguage } = useI18n();
+  return <button onClick={() => setLanguage(language === "en" ? "zh" : "en")}>Switch language</button>;
+}
+
+it("preserves the note draft when language changes and submits user text unchanged", async () => {
+  const fetchMock = vi.fn(async (_input: URL | RequestInfo, init?: RequestInit) => jsonResponse({ ...savedNote, content: JSON.parse(String(init?.body)).content }));
+  vi.stubGlobal("fetch", fetchMock);
+  render(<I18nProvider initialLanguage="en"><MemoryRouter><LanguageSwitch /><QuickNoteWidget /></MemoryRouter></I18nProvider>);
+  fireEvent.change(screen.getByLabelText("Quick note content"), { target: { value: "My English 草稿" } });
+  fireEvent.click(screen.getByRole("button", { name: "Switch language" }));
+  expect(screen.getByLabelText("快速笔记内容")).toHaveValue("My English 草稿");
+  fireEvent.click(screen.getByRole("button", { name: "保存" }));
+  expect(await screen.findByText("已保存")).toBeVisible();
+  expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ content: "My English 草稿" });
+  expect(screen.getByRole("link", { name: "打开" })).toHaveAttribute("href", "/notes/note-9");
 });

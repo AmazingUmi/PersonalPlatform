@@ -1,3 +1,5 @@
+import { HelpPopover } from "../../shared/ui/HelpPopover";
+import { useI18n } from "../../shared/i18n";
 import { useEffect, useRef, useState } from "react";
 import { api } from "../../shared/api";
 import { useAsync } from "../../shared/useAsync";
@@ -13,6 +15,7 @@ import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { useClockNow } from "./useClockNow";
 import {
   WEEKDAY_LABELS,
+  WEEKDAY_LABELS_ZH,
   formatRepeatLabel,
   nextAlarmOccurrence,
   parseAlarmTime,
@@ -47,6 +50,7 @@ interface RingingAlarm {
  * disable themselves after ringing. No sounds, no background workers.
  */
 export function AlarmSection() {
+  const { t, language } = useI18n();
   const alarms = useAsync(() => api<{ items: AlarmView[] }>(ALARMS_URL));
   const [editorFor, setEditorFor] = useState<AlarmView | null | undefined>(undefined);
   const [deleting, setDeleting] = useState<AlarmView | null>(null);
@@ -90,7 +94,7 @@ export function AlarmSection() {
       setRinging((current) => [...current, { key: fireKey, alarm }]);
       if (typeof Notification !== "undefined" && Notification.permission === "granted") {
         try {
-          new Notification(`⏰ ${alarm.time} ${alarm.label || "Alarm"}`, {
+          new Notification(`⏰ ${alarm.time} ${alarm.label || t("Alarm", "闹钟")}`, {
             tag: `clock-alarm-${fireKey}`,
           });
         } catch {
@@ -109,7 +113,7 @@ export function AlarmSection() {
           .catch(() => undefined);
       }
     }
-  }, [now, items]);
+  }, [now, items, t]);
 
   const toggle = async (alarm: AlarmView) => {
     try {
@@ -123,7 +127,7 @@ export function AlarmSection() {
     }
   };
 
-  const upcoming = computeNextAlarm(items, now);
+  const upcoming = computeNextAlarm(items, now, language);
 
   return (
     <div className="clock-alarms">
@@ -132,14 +136,14 @@ export function AlarmSection() {
           {ringing.map(({ key, alarm }) => (
             <StatusMessage key={key} tone="warning">
               <p className="clock-alarms__ring-line">
-                <strong>⏰ {alarm.time}</strong> {alarm.label || "Alarm"}
+                <strong>⏰ {alarm.time}</strong> {alarm.label || t("Alarm", "闹钟")}
               </p>
               <PixelButton
                 size="sm"
                 variant="secondary"
                 onClick={() => setRinging((current) => current.filter((entry) => entry.key !== key))}
               >
-                Dismiss
+                {t("Dismiss", "关闭")}
               </PixelButton>
             </StatusMessage>
           ))}
@@ -148,27 +152,27 @@ export function AlarmSection() {
 
       <div className="clock-alarms__meta">
         <span className="clock-alarms__next">
-          {upcoming ? `NEXT · ${upcoming.label}` : "NO ALARMS ARMED"}
+          {upcoming ? `${t("NEXT", "下一个")} · ${upcoming.label}` : t("NO ALARMS ARMED", "未启用闹钟")}
         </span>
         {permission === "default" ? (
           <PixelButton size="sm" variant="secondary" onClick={() => void requestPermission()}>
-            Enable notifications
+            {t("Enable notifications", "启用通知")}
           </PixelButton>
         ) : null}
         {permission === "denied" ? (
-          <span className="clock-alarms__perm-note">Notifications blocked — in-app only</span>
+          <span className="clock-alarms__perm-note">{t("Notifications blocked — in-app only", "通知被阻止，仅提供应用内提醒")}</span>
         ) : null}
-        {permission === "granted" ? <PixelBadge tone="success">Notifications on</PixelBadge> : null}
+        {permission === "granted" ? <PixelBadge tone="success">{t("Notifications on", "通知已开启")}</PixelBadge> : null}
       </div>
 
-      {alarms.loading ? <LoadingState label="Loading alarms…" /> : null}
+      {alarms.loading ? <LoadingState label={t("Loading alarms…", "正在加载闹钟…")} /> : null}
       {alarms.error ? (
         <div className="widget-fallback">
           <StatusMessage tone="error">
             <p>{alarms.error}</p>
           </StatusMessage>
           <PixelButton size="sm" variant="secondary" onClick={alarms.reload}>
-            Retry
+            {t("Retry", "重试")}
           </PixelButton>
         </div>
       ) : null}
@@ -176,8 +180,8 @@ export function AlarmSection() {
       {!alarms.loading && !alarms.error && items.length === 0 ? (
         <EmptyState
           icon="clock"
-          title="No alarms"
-          description="Add an alarm to get an in-app (and, if permitted, browser) alert."
+          title={t("No alarms", "暂无闹钟")}
+          description={<HelpPopover label={t("Alarms", "闹钟")}>{t("Add an alarm to get an in-app (and, if permitted, browser) alert.", "添加闹钟以接收应用内提醒；授权后也可接收浏览器通知。")}</HelpPopover>}
         />
       ) : null}
 
@@ -187,8 +191,8 @@ export function AlarmSection() {
             <li key={alarm.id} className={alarm.enabled ? "clock-alarm" : "clock-alarm clock-alarm--off"}>
               <div className="clock-alarm__main">
                 <span className="clock-alarm__time">{alarm.time}</span>
-                <span className="clock-alarm__label">{alarm.label || "Alarm"}</span>
-                <span className="clock-alarm__repeat">{formatRepeatLabel(alarm.repeatDays)}</span>
+                <span className="clock-alarm__label">{alarm.label || t("Alarm", "闹钟")}</span>
+                <span className="clock-alarm__repeat">{formatRepeatLabel(alarm.repeatDays, language)}</span>
               </div>
               <div className="clock-alarm__actions">
                 <PixelButton
@@ -196,18 +200,18 @@ export function AlarmSection() {
                   variant={alarm.enabled ? "primary" : "secondary"}
                   onClick={() => void toggle(alarm)}
                 >
-                  {alarm.enabled ? "ON" : "OFF"}
+                  {alarm.enabled ? t("ON", "开启") : t("OFF", "关闭")}
                 </PixelButton>
                 <PixelButton size="sm" variant="secondary" onClick={() => setEditorFor(alarm)}>
-                  Edit
+                  {t("Edit", "编辑")}
                 </PixelButton>
                 <PixelButton
                   size="sm"
                   variant="danger"
                   onClick={() => setDeleting(alarm)}
-                  aria-label={`Delete alarm ${alarm.time}`}
+                  aria-label={t(`Delete alarm ${alarm.time}`, `删除 ${alarm.time} 闹钟`)}
                 >
-                  Del
+                  {t("Del", "删除")}
                 </PixelButton>
               </div>
             </li>
@@ -216,7 +220,7 @@ export function AlarmSection() {
       ) : null}
 
       <PixelButton size="sm" onClick={() => setEditorFor(null)}>
-        + Add Alarm
+        {t("+ Add Alarm", "+ 添加闹钟")}
       </PixelButton>
 
       {editorFor !== undefined ? (
@@ -231,8 +235,8 @@ export function AlarmSection() {
       ) : null}
       {deleting ? (
         <ConfirmDialog
-          title="Delete alarm"
-          message={`Delete the ${deleting.time} alarm${deleting.label ? ` "${deleting.label}"` : ""}?`}
+          title={t("Delete alarm", "删除闹钟")}
+          message={t(`Delete the ${deleting.time} alarm${deleting.label ? ` "${deleting.label}"` : ""}?`, `删除 ${deleting.time} 闹钟${deleting.label ? `“${deleting.label}”` : ""}？`)}
           busy={remove.busy}
           onCancel={() => setDeleting(null)}
           onConfirm={async () => {
@@ -249,7 +253,7 @@ export function AlarmSection() {
 
 /** "MON 07:30" label of the earliest armed alarm occurrence. Exported for
  * the module status provider (dock/top-bar next-alarm chip). */
-export function computeNextAlarm(items: AlarmView[], now: Date): { label: string } | null {
+export function computeNextAlarm(items: AlarmView[], now: Date, language = "en"): { label: string } | null {
   let best: { at: Date; alarm: AlarmView } | null = null;
   for (const alarm of items) {
     const at = nextAlarmOccurrence(alarm, now);
@@ -257,7 +261,7 @@ export function computeNextAlarm(items: AlarmView[], now: Date): { label: string
   }
   if (!best) return null;
   return {
-    label: `${WEEKDAY_LABELS[best.at.getDay()]} ${pad2(best.at.getHours())}:${pad2(best.at.getMinutes())}`,
+    label: `${(language === "zh" ? WEEKDAY_LABELS_ZH : WEEKDAY_LABELS)[best.at.getDay()]} ${pad2(best.at.getHours())}:${pad2(best.at.getMinutes())}`,
   };
 }
 
@@ -268,6 +272,7 @@ interface AlarmEditorProps {
 }
 
 function AlarmEditor({ alarm, onClose, onSaved }: AlarmEditorProps) {
+  const { t, language } = useI18n();
   const [time, setTime] = useState(alarm?.time ?? "07:30");
   const [label, setLabel] = useState(alarm?.label ?? "");
   const [repeatDays, setRepeatDays] = useState<number[]>(alarm?.repeatDays ?? [1, 2, 3, 4, 5]);
@@ -305,7 +310,7 @@ function AlarmEditor({ alarm, onClose, onSaved }: AlarmEditorProps) {
 
   return (
     <div className="px-dialog-backdrop" role="presentation">
-      <PixelWindow title={alarm ? "Edit Alarm" : "New Alarm"} icon="clock" className="px-dialog px-dialog--form">
+      <PixelWindow title={alarm ? t("Edit Alarm", "编辑闹钟") : t("New Alarm", "新闹钟")} icon="clock" className="px-dialog px-dialog--form">
         <form
           className="px-form"
           data-testid="alarm-editor"
@@ -316,31 +321,31 @@ function AlarmEditor({ alarm, onClose, onSaved }: AlarmEditorProps) {
         >
           <div className="px-form__grid">
             <label className="px-form__row">
-              <span className="px-form__label">Time</span>
+              <span className="px-form__label">{t("Time", "时间")}</span>
               <PixelInput
                 type="time"
                 value={time}
                 onChange={(event) => setTime(event.target.value)}
-                aria-label="Alarm time"
+                aria-label={t("Alarm time", "闹钟时间")}
                 required
               />
             </label>
             <label className="px-form__row">
-              <span className="px-form__label">Label</span>
+              <span className="px-form__label">{t("Label", "名称")}</span>
               <PixelInput
                 type="text"
                 value={label}
                 maxLength={100}
                 onChange={(event) => setLabel(event.target.value)}
-                placeholder="Morning"
-                aria-label="Alarm label"
+                placeholder={t("Morning", "早晨")}
+                aria-label={t("Alarm label", "闹钟名称")}
               />
             </label>
           </div>
           <fieldset className="px-form__row">
-            <legend className="px-form__label">Repeat</legend>
-            <div className="clock-alarms__days" role="group" aria-label="Repeat days">
-              {WEEKDAY_LABELS.map((dayLabel, day) => (
+            <legend className="px-form__label">{t("Repeat", "重复")}</legend>
+            <div className="clock-alarms__days" role="group" aria-label={t("Repeat days", "重复日期")}>
+              {(language === "zh" ? WEEKDAY_LABELS_ZH : WEEKDAY_LABELS).map((dayLabel, day) => (
                 <button
                   key={day}
                   type="button"
@@ -352,7 +357,7 @@ function AlarmEditor({ alarm, onClose, onSaved }: AlarmEditorProps) {
                 </button>
               ))}
             </div>
-            <p className="px-form__hint">No days selected = a one-shot alarm (disables itself after ringing).</p>
+            <HelpPopover label={t("Repeat days", "重复日期")}>{t("No days selected = a one-shot alarm (disables itself after ringing).", "不选择重复日期时，闹钟只响一次，响铃后自动停用。")}</HelpPopover>
           </fieldset>
           {save.error ? (
             <StatusMessage tone="error">
@@ -361,10 +366,10 @@ function AlarmEditor({ alarm, onClose, onSaved }: AlarmEditorProps) {
           ) : null}
           <div className="px-dialog__actions">
             <PixelButton variant="secondary" size="sm" onClick={onClose} disabled={save.busy}>
-              Cancel
+              {t("Cancel", "取消")}
             </PixelButton>
             <PixelButton type="submit" size="sm" disabled={!valid || save.busy}>
-              {save.busy ? "Saving…" : alarm ? "Save changes" : "Create alarm"}
+              {save.busy ? t("Saving…", "保存中…") : alarm ? t("Save changes", "保存修改") : t("Create alarm", "创建闹钟")}
             </PixelButton>
           </div>
         </form>

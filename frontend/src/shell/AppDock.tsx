@@ -1,3 +1,4 @@
+import { useI18n } from "../shared/i18n";
 import type { CSSProperties } from "react";
 import { NavLink } from "react-router-dom";
 import type { AppInfo } from "../shared/api";
@@ -25,29 +26,31 @@ function accentVar(accent: string | undefined): string {
  * / running markers, hidden at zero) come from the app-status providers.
  */
 export function AppDock({ apps, presentation }: { apps: AppInfo[]; presentation?: PresentationOverrides }) {
+  const { t, language } = useI18n();
+  const labelFor = (label: string) => ({ Dashboard: t("Dashboard", "仪表盘"), "App Center": t("App Center", "应用中心"), Settings: t("Settings", "设置") }[label] ?? label);
   const statuses = useAppStatuses();
   return (
-    <nav className="dock" aria-label="App navigation">
+    <nav className="dock" aria-label={t("App navigation", "应用导航")}>
       <section className="dock__section">
-        <span className="dock__label">Core</span>
+        <span className="dock__label">{t("Core", "平台")}</span>
         <ul className="dock__list">
           {CORE_ITEMS.map((item) => (
             <li key={item.to}>
-              <NavLink to={item.to} end={item.end} className="dock__item" aria-label={item.label}>
+              <NavLink to={item.to} end={item.end} className="dock__item" aria-label={labelFor(item.label)}>
                 <span className="dock__item-icon" aria-hidden="true">
                   <PixelIcon name={item.icon} size={16} />
                 </span>
-                <span className="dock__item-label">{item.label}</span>
+                <span className="dock__item-label">{labelFor(item.label)}</span>
               </NavLink>
             </li>
           ))}
         </ul>
       </section>
       <section className="dock__section">
-        <span className="dock__label">Apps</span>
+        <span className="dock__label">{t("Apps", "应用")}</span>
         <ul className="dock__list">
           {apps.map((app) => {
-            const resolved = resolvePresentation(app, presentation ?? {});
+            const resolved = resolvePresentation(app, presentation ?? {}, language);
             const chips = statuses.get(app.id) ?? [];
             return (
               <li key={app.id}>

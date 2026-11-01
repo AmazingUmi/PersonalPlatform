@@ -1,3 +1,4 @@
+import { useI18n } from "./i18n";
 import { createContext, useContext, type ReactNode } from "react";
 import { resolvePresentation, type PresentationOverrides } from "./presentation";
 import type { AppInfo } from "./api";
@@ -19,6 +20,7 @@ export function PresentationProvider({
  * nickname set in the App Center shows everywhere the app is presented.
  */
 export function useAppDisplayName(app: Pick<AppInfo, "id" | "name">): string {
+  const { language } = useI18n();
   const overrides = useContext(PresentationContext);
-  return resolvePresentation(app, overrides).displayName;
+  return resolvePresentation(app, overrides, language).displayName;
 }

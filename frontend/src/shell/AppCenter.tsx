@@ -1,3 +1,7 @@
+import { appName, appDescription } from "../shared/localizedMetadata";
+import { localizeError } from "../shared/localizeError";
+import { useI18n } from "../shared/i18n";
+import { HelpPopover } from "../shared/ui/HelpPopover";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { putSetting, setAppEnabled, type AppInfo, type AppStatus } from "../shared/api";
 import {
@@ -38,13 +42,14 @@ function PresentationEditor({
   onClose: () => void;
   onSaved: () => void;
 }) {
-  const resolved = resolvePresentation(app, overrides);
+  const { t, language } = useI18n();
+  const resolved = resolvePresentation(app, overrides, language);
   const current = overrides[app.id];
   const initialAccent =
     current?.accent !== undefined && ACCENT_OPTIONS.includes(current.accent as never)
       ? current.accent
       : "";
-  const [name, setName] = useState(resolved.isCustomized ? resolved.displayName : "");
+  const [name, setName] = useState(current?.displayName ?? "");
   const [accent, setAccent] = useState<string>(initialAccent);
 
   const save = useMutation(async () => {
@@ -74,38 +79,36 @@ function PresentationEditor({
   return (
     <div className="px-dialog-backdrop" role="presentation">
       <PixelWindow
-        title={`Customize ${app.name}`}
+        title={t(`Customize ${app.name}`, `自定义${appName(app.id, app.name, language)}`)}
         icon="palette"
         accent={ACCENT_OPTIONS.includes(accent as never) ? (accent as PixelAccent) : resolved.accent}
         className="px-dialog px-dialog--form"
         data-testid="presentation-editor"
       >
-        <form className="px-form" onSubmit={submit} aria-label={`Customize ${app.name}`}>
-          <p className="px-form__hint">
-            Identity (id, route, version, capabilities) comes from the manifest and cannot change.
-          </p>
+        <form className="px-form" onSubmit={submit} aria-label={t(`Customize ${app.name}`, `自定义${appName(app.id, app.name, language)}`)}>
+          <HelpPopover label={t("App identity", "应用标识")}>{t("Identity (id, route, version, capabilities) comes from the manifest and cannot change.", "应用标识、路由、版本和能力由应用定义，不能在此修改。")}</HelpPopover>
           <label className="px-form__row">
-            <span className="px-form__label">Nickname</span>
+            <span className="px-form__label">{t("Nickname", "昵称")}</span>
             <PixelInput
               value={name}
               onChange={(e) => setName(e.target.value)}
-              aria-label="App nickname"
-              placeholder={app.name}
+              aria-label={t("App nickname", "应用昵称")}
+              placeholder={appName(app.id, app.name, language)}
               autoFocus
             />
           </label>
           <label className="px-form__row">
-            <span className="px-form__label">Accent color</span>
+            <span className="px-form__label">{t("Accent color", "强调色")}</span>
             <select
               className="px-select"
               value={accent}
               onChange={(e) => setAccent(e.target.value)}
-              aria-label="Accent color"
+              aria-label={t("Accent color", "强调色")}
             >
-              <option value="">Default ({String(app.id)})</option>
+              <option value="">{t(`Default (${app.id})`, `默认（${app.id}）`)}</option>
               {ACCENT_OPTIONS.map((option) => (
                 <option key={option} value={option}>
-                  {option}
+                  {({ primary: t("primary", "主色"), success: t("success", "成功色"), warning: t("warning", "警告色"), danger: t("danger", "危险色"), info: t("info", "信息色"), mint: t("mint", "薄荷绿"), yellow: t("yellow", "黄色"), violet: t("violet", "紫色"), coral: t("coral", "珊瑚色") })[option]}
                 </option>
               ))}
             </select>
@@ -125,14 +128,12 @@ function PresentationEditor({
               }}
               disabled={reset.busy || !overrides[app.id]}
             >
-              {reset.busy ? "Resetting…" : "Reset to default"}
+              {reset.busy ? t("Resetting…", "正在重置…") : t("Reset to default", "恢复默认")}
             </PixelButton>
             <span className="app-card__foot-group">
-              <PixelButton variant="secondary" size="sm" onClick={onClose} disabled={save.busy}>
-                Cancel
-              </PixelButton>
+              <PixelButton variant="secondary" size="sm" onClick={onClose} disabled={save.busy}>{t("Cancel", "取消")} </PixelButton>
               <PixelButton type="submit" size="sm" disabled={save.busy}>
-                {save.busy ? "Saving…" : "Save"}
+                {save.busy ? t("Saving…", "正在保存…") : t("Save", "保存")}
               </PixelButton>
             </span>
           </div>
@@ -160,8 +161,9 @@ export function AppCenter({
   presentation?: PresentationOverrides;
   onChanged: () => void;
 }) {
+  const { t, language } = useI18n();
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const [customizing, setCustomizing] = useState<AppInfo | null>(null);
 
   // Presentation-only motion; presets self-skip under reduced motion / jsdom.
@@ -202,7 +204,7 @@ export function AppCenter({
       await setAppEnabled(app.id, enabled);
       onChanged();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(err);
     } finally {
       setBusy(null);
     }
@@ -214,20 +216,19 @@ export function AppCenter({
   return (
     <div className="page">
       <header className="page-header">
-        <h1 className="page-header__title">App Center</h1>
-        <p className="page-header__subtitle">Install, enable and disable platform apps</p>
+        <h1 className="page-header__title">{t("App Center", "应用中心")}</h1>
+        <HelpPopover label={t("App Center", "应用中心")}>{t("Install, enable and disable platform apps", "管理平台应用的启用和停用。")}</HelpPopover>
       </header>
       <p className="app-shelf-summary">
-        {enabledCount} of {apps.length} apps active on the shelf
-      </p>
-      {error && (
+        {enabledCount} {t("of", "/")} {apps.length} {t("apps active on the shelf", "个应用已启用")} </p>
+      {error !== null && (
         <StatusMessage tone="error">
-          <p>{error}</p>
+          <p>{localizeError(error, language)}</p>
         </StatusMessage>
       )}
       <ul className="app-grid" ref={gridRef}>
         {apps.map((app) => {
-          const resolved = resolvePresentation(app, overrides);
+          const resolved = resolvePresentation(app, overrides, language);
           return (
             <li
               key={app.id}
@@ -248,13 +249,13 @@ export function AppCenter({
                   <h2 className="app-card__name">{resolved.displayName}</h2>
                   <span className="app-card__version">
                     v{app.version}
-                    {resolved.isCustomized ? " · customized" : ""}
+                    {resolved.isCustomized ? t(" · customized", " · 已自定义") : ""}
                   </span>
                 </div>
               </div>
-              {app.description ? <p className="app-card__desc">{app.description}</p> : null}
+              {app.description ? <HelpPopover label={resolved.displayName}>{appDescription(app.id, app.description, language)}</HelpPopover> : null}
               {app.status === "error" && app.enabled ? (
-                <p className="app-card__intent">Enable requested — activation failed.</p>
+                <p className="app-card__intent">{t("Enable requested — activation failed.", "已请求启用，但启动失败。")}</p>
               ) : null}
               {app.errorMessage ? (
                 <p className="app-card__error">
@@ -264,11 +265,11 @@ export function AppCenter({
               ) : null}
               <div className="app-card__foot">
                 <span className="app-card__foot-group">
-                  <PixelBadge tone={STATUS_TONES[app.status]}>{app.status}</PixelBadge>
+                  <PixelBadge tone={STATUS_TONES[app.status]}>{({ enabled: t("enabled", "已启用"), disabled: t("disabled", "已停用"), installed: t("installed", "已安装"), error: t("error", "错误") })[app.status]}</PixelBadge>
                   <PixelButton
                     variant="ghost"
                     size="sm"
-                    aria-label={`Customize ${resolved.displayName}`}
+                    aria-label={t(`Customize ${resolved.displayName}`, `自定义${resolved.displayName}`)}
                     onClick={() => setCustomizing(app)}
                   >
                     <PixelIcon name="palette" />
@@ -282,7 +283,7 @@ export function AppCenter({
                       disabled={busy === app.id}
                       onClick={() => void toggle(app, false)}
                     >
-                      {busy === app.id ? "Working…" : "Disable"}
+                      {busy === app.id ? t("Working…", "处理中…") : t("Disable", "停用")}
                     </PixelButton>
                     <PixelButton
                       size="sm"
@@ -290,7 +291,7 @@ export function AppCenter({
                       disabled={busy === app.id}
                       onClick={() => void toggle(app, true)}
                     >
-                      {busy === app.id ? "Working…" : "Retry"}
+                      {busy === app.id ? t("Working…", "处理中…") : t("Retry", "重试")}
                     </PixelButton>
                   </span>
                 ) : (
@@ -300,7 +301,7 @@ export function AppCenter({
                     disabled={busy === app.id || app.status === "installed"}
                     onClick={() => void toggle(app, app.status !== "enabled")}
                   >
-                    {busy === app.id ? "Working…" : app.status === "enabled" ? "Disable" : "Enable"}
+                    {busy === app.id ? t("Working…", "处理中…") : app.status === "enabled" ? t("Disable", "停用") : t("Enable", "启用")}
                   </PixelButton>
                 )}
               </div>

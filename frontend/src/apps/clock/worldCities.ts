@@ -42,3 +42,34 @@ export function worldCityValue(preset: WorldCityPreset): string {
 export function findWorldCityPreset(value: string): WorldCityPreset | undefined {
   return WORLD_CITY_PRESETS.find((preset) => worldCityValue(preset) === value);
 }
+
+const CITY_LABELS_ZH: Record<string, string> = {
+  "Tokyo": "东京",
+  "Shanghai": "上海",
+  "Hong Kong": "香港",
+  "Seoul": "首尔",
+  "Singapore": "新加坡",
+  "Bangkok": "曼谷",
+  "Kolkata": "加尔各答",
+  "Dubai": "迪拜",
+  "Moscow": "莫斯科",
+  "Berlin": "柏林",
+  "Paris": "巴黎",
+  "London": "伦敦",
+  "UTC": "UTC",
+  "São Paulo": "圣保罗",
+  "New York": "纽约",
+  "Chicago": "芝加哥",
+  "Denver": "丹佛",
+  "Los Angeles": "洛杉矶",
+  "Mexico City": "墨西哥城",
+  "Honolulu": "檀香山",
+  "Sydney": "悉尼",
+  "Auckland": "奥克兰",
+};
+
+/** Only curated city/timezone pairs have translated labels; preserve custom names. */
+export function worldCityLabel(entry: WorldCityPreset, language = "en"): string {
+  const preset = WORLD_CITY_PRESETS.find((preset) => preset.city === entry.city && preset.timezone === entry.timezone);
+  return language === "zh" && preset ? CITY_LABELS_ZH[preset.city] ?? entry.city : entry.city;
+}

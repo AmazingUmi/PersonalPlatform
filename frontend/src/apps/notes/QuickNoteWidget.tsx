@@ -1,3 +1,4 @@
+import { useI18n } from "../../shared/i18n";
 import { useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import type { WidgetDensity } from "../../shared/appTypes";
@@ -9,10 +10,10 @@ import { useMutation } from "../../shared/useMutation";
 import { createNote, listNotes, type NoteView } from "./api";
 
 /** Recent-entry row label: explicit title, else a content preview. */
-function recentLabel(note: NoteView): string {
+function recentLabel(note: NoteView, language = "en"): string {
   if (note.title && note.title.trim() !== "") return note.title;
   const preview = note.content.replace(/\s+/g, " ").trim();
-  return preview.length > 40 ? `${preview.slice(0, 40)}…` : preview || "Untitled";
+  return preview.length > 40 ? `${preview.slice(0, 40)}…` : preview || (language === "zh" ? "无标题" : "Untitled");
 }
 
 /**
@@ -26,6 +27,7 @@ function recentLabel(note: NoteView): string {
  * context: compact shrinks the input, expanded adds recent entries.
  */
 export function QuickNoteWidget({ density = "normal" }: { density?: WidgetDensity }) {
+  const { t, language, locale } = useI18n();
   const [content, setContent] = useState("");
   const editRevision = useRef(0);
   const [savedId, setSavedId] = useState<string | null>(null);
@@ -51,13 +53,13 @@ export function QuickNoteWidget({ density = "normal" }: { density?: WidgetDensit
     <div className="notes-quick" data-density={density}>
       <textarea
         className="px-textarea notes-quick__input"
-        placeholder="今天突然想到……"
+        placeholder={t("A thought to capture…", "今天突然想到……")}
         value={content}
         onChange={(e) => {
           editRevision.current += 1;
           setContent(e.target.value);
         }}
-        aria-label="Quick note content"
+        aria-label={t("Quick note content", "快速笔记内容")}
         rows={density === "compact" ? 2 : 3}
       />
       {saved.error ? (
@@ -69,8 +71,8 @@ export function QuickNoteWidget({ density = "normal" }: { density?: WidgetDensit
         <ul className="notes-quick__recent">
           {recent.data.items.slice(0, 3).map((note) => (
             <li key={note.id} className="notes-quick__recent-row">
-              <span className="notes-quick__recent-title">{recentLabel(note)}</span>
-              <span className="notes-quick__recent-date">{note.dayKey}</span>
+              <span className="notes-quick__recent-title">{recentLabel(note, language)}</span>
+              <span className="notes-quick__recent-date">{new Date(`${note.dayKey}T00:00:00`).toLocaleDateString(locale)}</span>
             </li>
           ))}
         </ul>
@@ -81,17 +83,17 @@ export function QuickNoteWidget({ density = "normal" }: { density?: WidgetDensit
           disabled={saved.busy || content.trim() === ""}
           onClick={() => void saved.mutate()}
         >
-          {saved.busy ? "Saving…" : "Save"}
+          {saved.busy ? t("Saving…", "保存中…") : t("Save", "保存")}
         </PixelButton>
         {savedId !== null && !saved.busy ? (
           <>
-            <PixelBadge tone="success">Saved</PixelBadge>
+            <PixelBadge tone="success">{t("Saved", "已保存")}</PixelBadge>
             <Link
               to={`/notes/${savedId}`}
               className="px-button px-button--secondary px-button--sm"
               onClick={() => setSavedId(null)}
             >
-              Open
+              {t("Open", "打开")}
             </Link>
           </>
         ) : null}

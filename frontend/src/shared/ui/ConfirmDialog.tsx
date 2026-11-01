@@ -1,3 +1,4 @@
+import { useI18n } from "../i18n";
 import { useEffect } from "react";
 import { PixelButton } from "./PixelButton";
 import { PixelWindow } from "./PixelWindow";
@@ -19,12 +20,13 @@ interface ConfirmDialogProps {
 export function ConfirmDialog({
   title,
   message,
-  confirmLabel = "Delete",
-  cancelLabel = "Cancel",
+  confirmLabel,
+  cancelLabel,
   busy = false,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  const { t } = useI18n();
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && !busy) onCancel();
@@ -45,10 +47,10 @@ export function ConfirmDialog({
         <p className="px-dialog__message">{message}</p>
         <div className="px-dialog__actions">
           <PixelButton variant="secondary" size="sm" onClick={onCancel} disabled={busy}>
-            {cancelLabel}
+            {cancelLabel ?? t("Cancel", "取消")}
           </PixelButton>
           <PixelButton variant="danger" size="sm" onClick={onConfirm} disabled={busy} autoFocus>
-            {busy ? "Working…" : confirmLabel}
+            {busy ? t("Working…", "处理中…") : confirmLabel ?? t("Delete", "删除")}
           </PixelButton>
         </div>
       </PixelWindow>

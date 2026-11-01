@@ -1,3 +1,5 @@
+import { HelpPopover } from "../../shared/ui/HelpPopover";
+import { useI18n } from "../../shared/i18n";
 import { FocusCompletion } from "./FocusCompletion";
 import { useAppDisplayName } from "../../shared/PresentationContext";
 import { LoadingState } from "../../shared/ui/LoadingState";
@@ -17,6 +19,7 @@ import { useFocusState } from "./useFocusState";
  * one top-level `useFocusState()` and down as props.
  */
 export function FocusPage() {
+  const { t } = useI18n();
   const displayName = useAppDisplayName({ id: "focus", name: "Focus" });
   const { state, loading, error, busy, remainingSeconds, dispatch, reload, completion, dismissCompletion, alerts } = useFocusState();
 
@@ -26,21 +29,21 @@ export function FocusPage() {
         <h1 className="page-header__title">
           <PixelIcon name={appIconName("focus")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
         </h1>
-        <p className="page-header__subtitle">Pomodoro timer with daily summary and history</p>
+        <HelpPopover label={t("About Focus", "关于专注")}>{t("Pomodoro timer with daily summary and history", "番茄计时、每日统计与历史记录")}</HelpPopover>
         <div className="page-header__actions">
           <PixelButton size="sm" variant="secondary" onClick={reload}>
-            <PixelIcon name="refresh" /> Refresh
+            <PixelIcon name="refresh" /> {t("Refresh", "刷新")}
           </PixelButton>
         </div>
       </header>
 
       {loading ? (
-        <LoadingState label="Loading focus…" />
+        <LoadingState label={t("Loading focus…", "正在加载专注状态…")} />
       ) : !state ? (
         <StatusMessage tone="error">
-          <p>{error ?? "Unable to load focus state."}</p>
+          <p>{error ?? t("Unable to load focus state.", "无法加载专注状态。")}</p>
           <PixelButton size="sm" variant="secondary" onClick={reload}>
-            Retry
+            {t("Retry", "重试")}
           </PixelButton>
         </StatusMessage>
       ) : (

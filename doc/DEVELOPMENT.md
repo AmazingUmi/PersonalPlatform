@@ -73,6 +73,14 @@ frontend/src/
 
 Shell 用 `GET /api/core/apps` 的启用状态与编译期模块表求交集：禁用的 App 自动从导航、路由与 Dashboard Widget 中消失。Widget 顺序与可见性持久化在 `core.settings`（key `dashboard.widgets`），渲染顺序即保存顺序；Edit Layout 模式支持拖拽排序（仅通过标题栏 drag handle）、隐藏/恢复、恢复默认。用户对 App 的昵称/Accent 个性化持久化在 `core.settings`（key `apps.presentation`），由 `shared/presentation.ts` 统一 resolve 后应用到 App Center、Dock、Mobile Nav、Dashboard 与 App 页头；`app.yaml` 运行时只读。
 
+### 界面语言与帮助说明
+
+Settings → General → Language / 语言 可切换 English / 简体中文。偏好保存在当前浏览器（跨标签页同步），首次按浏览器语言选择；不随账号同步，不改变业务时区。
+
+组件通过 `shared/i18n` 的 `useI18n()` 获取 `t(英文, 中文)`、`language` 和 `locale`。语言切换不能重建页面、清空草稿或重启计时器。仅翻译展示标签；API 枚举、选项 value/key、用户标题/昵称/笔记及文件名保持原值。日期/数值显示传入 locale，已有业务时间算法仍沿用原约定。
+
+介绍性副标题和字段说明使用 `shared/ui/HelpPopover` 问号浮层，可悬停、键盘聚焦或点击阅读；错误、运行状态、未保存提示及危险操作警告保持可见。浮层不能放在另一个按钮/链接内部。新增 App 时同时补齐页面、Widget、aria 标签与确认文案的中英文配对，并更新默认元数据映射。
+
 ## API 约定
 
 - Core：`/api/core/*`；App：`/api/apps/<app_id>/*`。

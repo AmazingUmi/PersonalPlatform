@@ -1,3 +1,6 @@
+import { appName } from "../shared/localizedMetadata";
+import type { Language } from "../shared/i18n";
+import { useI18n } from "../shared/i18n";
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import type { AppInfo, AuthUser } from "../shared/api";
@@ -8,14 +11,14 @@ import { PixelIcon } from "../shared/ui/PixelIcon";
 import { useAppStatuses } from "./AppStatusContext";
 
 /** Resolve the page title shown in the top bar from the current route. */
-export function pageTitle(pathname: string, apps: AppInfo[]): string {
-  if (pathname === "/") return "Dashboard";
-  if (pathname.startsWith("/apps")) return "App Center";
-  if (pathname.startsWith("/settings")) return "Settings";
+export function pageTitle(pathname: string, apps: AppInfo[], language: Language = "en"): string {
+  if (pathname === "/") return language === "zh" ? "仪表盘" : "Dashboard";
+  if (pathname.startsWith("/apps")) return language === "zh" ? "应用中心" : "App Center";
+  if (pathname.startsWith("/settings")) return language === "zh" ? "设置" : "Settings";
   const match = apps.find(
     (app) => pathname === app.route || pathname.startsWith(`${app.route}/`),
   );
-  return match ? match.name : "Not Found";
+  return match ? appName(match.id, match.name, language) : language === "zh" ? "页面不存在" : "Not Found";
 }
 
 /** 24h wall clock "22:34" — the OS status-bar convention. */
@@ -53,6 +56,7 @@ export function TopBar({
   user?: AuthUser | null;
   onLogout?: () => void;
 }) {
+  const { t, language } = useI18n();
   const { pathname } = useLocation();
   const enabled = apps.filter((app) => app.status === "enabled");
   const statuses = useAppStatuses();
@@ -61,12 +65,12 @@ export function TopBar({
 
   return (
     <header className="topbar">
-      <Link to="/" className="topbar__brand" aria-label="Personal Platform home">
+      <Link to="/" className="topbar__brand" aria-label={t("Personal Platform home", "个人平台首页")}>
         <PixelIcon name="logo" size={24} className="topbar__logo" />
         <span className="topbar__brand-text">Personal Platform</span>
       </Link>
       <span className="topbar__title" aria-hidden="true">
-        ▸ {pageTitle(pathname, apps)}
+        ▸ {pageTitle(pathname, apps, language)}
       </span>
       <span className="topbar__status">
         {chipApps.flatMap((app) =>
@@ -77,22 +81,21 @@ export function TopBar({
         <PixelBadge
           tone={enabled.length > 0 ? "success" : "neutral"}
           className="topbar__apps-count"
-          title="Enabled apps"
+          title={t("Enabled apps", "已启用应用")}
         >
-          {enabled.length} apps active
-        </PixelBadge>
-        <span className="topbar__clock" title="Local time">
+          {enabled.length} {t("apps active", "个应用运行中")} </PixelBadge>
+        <span className="topbar__clock" title={t("Local time", "本地时间")}>
           {clock}
         </span>
         {user ? (
           <span className="topbar__account">
-            <span className="topbar__user" title={`Signed in as ${user.username} (${user.role})`}>
+            <span className="topbar__user" title={t(`Signed in as ${user.username} (${user.role})`, `当前账号：${user.username}（${user.role === "admin" ? "管理员" : "用户"}）`)}>
               <span className="topbar__user-sigil" aria-hidden="true">
                 ▚
               </span>{" "}
               {user.displayName ?? user.username}
               {user.role === "admin" ? (
-                <span className="topbar__user-role" aria-label="administrator role">
+                <span className="topbar__user-role" aria-label={t("administrator role", "管理员角色")}>
                   ★
                 </span>
               ) : null}
@@ -101,11 +104,9 @@ export function TopBar({
               type="button"
               className="topbar__logout"
               onClick={onLogout}
-              aria-label="Log out"
-              title="Log out"
-            >
-              LOGOUT
-            </button>
+              aria-label={t("Log out", "退出登录")}
+              title={t("Log out", "退出登录")}
+            >{t("LOGOUT", "退出")} </button>
           </span>
         ) : null}
       </span>

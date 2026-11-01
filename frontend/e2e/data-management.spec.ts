@@ -104,7 +104,7 @@ test("WebDAV defaults to incremental, explains unchanged data and offers manual 
   await expect(page.getByText(/Backup saved: full.json/)).toBeVisible();
   expect(requestedModes).toEqual(["incremental", "incremental", "full"]);
   await page.getByRole("link", { name: "Connection", exact: true }).click();
-  await expect(page.getByLabel("Automatic backup")).toHaveValue("24");
+  await expect(page.getByRole("combobox", { name: /^Automatic backup/ })).toHaveValue("24");
   await page.goBack();
   const bounds = await page.getByLabel("Manual backup mode").boundingBox();
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);

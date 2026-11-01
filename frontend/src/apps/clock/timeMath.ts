@@ -7,6 +7,8 @@
 
 export const WEEKDAY_LABELS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"] as const;
 
+export const WEEKDAY_LABELS_ZH = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
+
 export interface TimeParts {
   hours24: string;
   hours12: string;
@@ -30,13 +32,14 @@ export function timeParts(date: Date): TimeParts {
   };
 }
 
-export function weekdayLabel(date: Date): string {
-  return WEEKDAY_LABELS[date.getDay()];
+export function weekdayLabel(date: Date, language = "en"): string {
+  return (language === "zh" ? WEEKDAY_LABELS_ZH : WEEKDAY_LABELS)[date.getDay()];
 }
 
 /** "AUG 31 · 2026" line pieces. */
-export function dateLine(date: Date): { monthDay: string; year: string } {
-  const month = date.toLocaleDateString("en-US", { month: "short" }).toUpperCase();
+export function dateLine(date: Date, locale = "en-US"): { monthDay: string; year: string } {
+  if (locale === "zh-CN") return { monthDay: date.toLocaleDateString(locale, { month: "long", day: "numeric" }), year: `${date.getFullYear()}年` };
+  const month = date.toLocaleDateString(locale, { month: "short" }).toUpperCase();
   return { monthDay: `${month} ${pad2(date.getDate())}`, year: String(date.getFullYear()) };
 }
 
@@ -136,11 +139,12 @@ export function zoneDayDiff(date: Date, homeZone: string, otherZone: string): nu
 }
 
 /** "+1h" / "-7h" / "+5h30" compact offset difference (other minus home). */
-export function formatOffsetDiff(diffMinutes: number): string {
+export function formatOffsetDiff(diffMinutes: number, language = "en"): string {
   const sign = diffMinutes < 0 ? "-" : "+";
   const abs = Math.abs(diffMinutes);
   const hours = Math.floor(abs / 60);
   const minutes = abs % 60;
+  if (language === "zh") return `${sign}${hours}小时${minutes ? `${minutes}分` : ""}`;
   return minutes === 0 ? `${sign}${hours}h` : `${sign}${hours}h${pad2(minutes)}`;
 }
 
@@ -154,12 +158,18 @@ export function formatZoneTime(date: Date, timeZone: string): string {
 // Durations (task elapsed / countdown).
 
 /** Compact human duration: "45s" / "24m" / "1h 24m" / "2d 3h". */
-export function humanDuration(ms: number): string {
+export function humanDuration(ms: number, language = "en"): string {
   const total = Math.max(0, Math.floor(ms / 1000));
   const days = Math.floor(total / 86_400);
   const hours = Math.floor((total % 86_400) / 3600);
   const minutes = Math.floor((total % 3600) / 60);
   const seconds = total % 60;
+  if (language === "zh") {
+    if (days >= 1) return `${days}天 ${hours}小时`;
+    if (hours >= 1) return `${hours}小时 ${pad2(minutes)}分`;
+    if (minutes >= 1) return `${minutes}分`;
+    return `${seconds}秒`;
+  }
   if (days >= 1) return `${days}d ${hours}h`;
   if (hours >= 1) return `${hours}h ${pad2(minutes)}m`;
   if (minutes >= 1) return `${minutes}m`;
@@ -203,11 +213,11 @@ export function nextAlarmOccurrence(alarm: AlarmSchedule, now: Date): Date | nul
 }
 
 /** "Once" / "Every day" / "MON TUE WED" summary for the alarm list. */
-export function formatRepeatLabel(repeatDays: number[]): string {
-  if (repeatDays.length === 0) return "Once";
-  if (repeatDays.length === 7) return "Every day";
+export function formatRepeatLabel(repeatDays: number[], language = "en"): string {
+  if (repeatDays.length === 0) return language === "zh" ? "仅一次" : "Once";
+  if (repeatDays.length === 7) return language === "zh" ? "每天" : "Every day";
   return [...repeatDays]
     .sort((a, b) => a - b)
-    .map((day) => WEEKDAY_LABELS[day])
+    .map((day) => (language === "zh" ? WEEKDAY_LABELS_ZH : WEEKDAY_LABELS)[day])
     .join(" ");
 }

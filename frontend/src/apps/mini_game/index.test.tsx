@@ -1,3 +1,4 @@
+import { I18nProvider, useI18n } from "../../shared/i18n";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Game2048 } from "./index";
@@ -102,4 +103,27 @@ describe("Game2048 loading gate (FP-13.1)", () => {
     );
     expect(screen.getAllByText("0").length).toBeGreaterThan(0);
   });
+});
+
+function LanguageSwitch() {
+  const { language, setLanguage } = useI18n();
+  return <button onClick={() => setLanguage(language === "en" ? "zh" : "en")}>Switch language</button>;
+}
+
+it("translates controls and help without reloading the saved board", async () => {
+  const fetchMock = vi.fn(async () => saveResponse({ score: 24, highScore: 220, revision: 3, board: [[2, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]] }));
+  vi.stubGlobal("fetch", fetchMock);
+  const view = render(<I18nProvider initialLanguage="en"><LanguageSwitch /><Game2048 /></I18nProvider>);
+  await screen.findByText("24");
+  const before = view.container.querySelector(".game__tiles")?.innerHTML;
+  fireEvent.click(screen.getByRole("button", { name: "Switch language" }));
+  expect(screen.getByRole("button", { name: "新游戏" })).toBeEnabled();
+  expect(screen.getByLabelText("最高分")).toHaveTextContent("220");
+  expect(view.container.querySelector(".game__tiles")?.innerHTML).toBe(before);
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(screen.queryByText("使用方向键或 WASD 移动方块。")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "帮助：游戏说明" }));
+  expect(screen.getByText("使用方向键或 WASD 移动方块。")).toBeVisible();
+  cleanup();
+  vi.unstubAllGlobals();
 });

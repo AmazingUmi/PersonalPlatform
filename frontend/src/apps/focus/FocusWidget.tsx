@@ -1,3 +1,4 @@
+import { useI18n } from "../../shared/i18n";
 import { useId, useState } from "react";
 import { FocusAlertControls, FocusCompletion } from "./FocusCompletion";
 import { LoadingState } from "../../shared/ui/LoadingState";
@@ -7,10 +8,15 @@ import { formatDuration, kindLabel, type FocusSettings, type SessionKind } from 
 import { useFocusState } from "./useFocusState";
 
 /** Compact human label for the daily summary: "1h 30m" / "30m" / "45s". */
-function secondsToHumanLabel(totalSeconds: number): string {
+function secondsToHumanLabel(totalSeconds: number, language = "en"): string {
   const total = Math.max(0, Math.floor(totalSeconds));
   const hours = Math.floor(total / 3600);
   const minutes = Math.floor((total % 3600) / 60);
+  if (language === "zh") {
+    if (hours >= 1) return `${hours}小时 ${minutes}分`;
+    if (minutes >= 1) return `${minutes}分`;
+    return `${total}秒`;
+  }
   if (hours >= 1) return `${hours}h ${minutes}m`;
   if (minutes >= 1) return `${minutes}m`;
   return `${total}s`;
@@ -45,10 +51,11 @@ function defaultSecondsFor(kind: SessionKind, settings: FocusSettings): number {
  * the surrounding card never navigates on a control press.
  */
 export function FocusWidget() {
+  const { t, language } = useI18n();
   const { state, loading, error, busy, remainingSeconds, dispatch, completion, dismissCompletion, alerts } = useFocusState();
   const [alertsOpen, setAlertsOpen] = useState(false);
   const alertsId = useId();
-  if (loading) return <LoadingState label="Loading…" />;
+  if (loading) return <LoadingState label={t("Loading…", "加载中…")} />;
 
   const active = state?.active ?? null;
   const nextKind = state?.nextKind ?? "focus";
@@ -56,7 +63,7 @@ export function FocusWidget() {
   const today = state?.today ?? { focusedSeconds: 0, completedRounds: 0, sessionsEnded: 0 };
   const kind = active?.kind ?? nextKind;
 
-  const stateLabel = active === null ? "READY" : active.status === "running" ? "FOCUSING" : "PAUSED";
+  const stateLabel = active === null ? t("READY", "就绪") : active.status === "running" ? t("FOCUSING", "专注中") : t("PAUSED", "已暂停");
   // State/kind drive the per-state visuals (apps.css): READY neutral,
   // FOCUSING coral + lamp blink, PAUSED warning; break kinds read info-blue.
   const stateKey = active === null ? "ready" : active.status === "running" ? "focusing" : "paused";
@@ -76,7 +83,7 @@ export function FocusWidget() {
     <div className="focus-widget" data-state={stateKey} data-kind={kind}>
       <FocusCompletion completion={completion} onDismiss={dismissCompletion} alerts={alerts} compact />
       <div className="focus-widget__state">
-        {stateLabel} · {kindLabel(kind)}
+        {stateLabel} · {kindLabel(kind, language)}
       </div>
       {/* Timer zone: the card's first visual element. The panel absorbs the
        * card's slack so an idle card composes tall instead of trailing off
@@ -88,9 +95,9 @@ export function FocusWidget() {
             <span key={index} className={index < roundsDone ? "focus-widget__pip focus-widget__pip--on" : "focus-widget__pip"} />
           ))}
         </div>
-        <p className="focus-widget__rounds-label">{today.completedRounds} ROUNDS</p>
+        <p className="focus-widget__rounds-label">{today.completedRounds} {t("ROUNDS", "轮次")}</p>
       </div>
-      <div className="focus-widget__meta">Focused {secondsToHumanLabel(today.focusedSeconds)}</div>
+      <div className="focus-widget__meta">{t("Focused", "专注时长")} {secondsToHumanLabel(today.focusedSeconds, language)}</div>
       {error !== null ? (
         <StatusMessage tone="error">
           <p>{error}</p>
@@ -104,29 +111,29 @@ export function FocusWidget() {
             disabled={busy}
             onClick={() => void dispatch("start", nextKind)}
           >
-            Start
+            {t("Start", "开始")}
           </PixelButton>
         ) : active.status === "running" ? (
           <>
             <PixelButton size="sm" variant="secondary" disabled={busy} onClick={() => void dispatch("pause")}>
-              Pause
+              {t("Pause", "暂停")}
             </PixelButton>
             <PixelButton size="sm" variant="danger" disabled={busy} onClick={() => void dispatch("stop")}>
-              Stop
+              {t("Stop", "停止")}
             </PixelButton>
           </>
         ) : (
           <>
             <PixelButton size="sm" variant="primary" disabled={busy} onClick={() => void dispatch("resume")}>
-              Resume
+              {t("Resume", "继续")}
             </PixelButton>
             <PixelButton size="sm" variant="danger" disabled={busy} onClick={() => void dispatch("stop")}>
-              Stop
+              {t("Stop", "停止")}
             </PixelButton>
           </>
         )}
-        <PixelButton size="sm" variant="secondary" aria-label="Alert settings" aria-expanded={alertsOpen}
-          aria-controls={alertsId} onClick={() => setAlertsOpen((open) => !open)}>Alerts</PixelButton>
+        <PixelButton size="sm" variant="secondary" aria-label={t("Alert settings", "提醒设置")} aria-expanded={alertsOpen}
+          aria-controls={alertsId} onClick={() => setAlertsOpen((open) => !open)}>{t("Alerts", "提醒")}</PixelButton>
       </div>
       <div id={alertsId} hidden={!alertsOpen} className="focus-widget__alert-settings">
         {alertsOpen && <FocusAlertControls alerts={alerts} />}

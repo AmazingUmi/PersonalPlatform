@@ -1,3 +1,6 @@
+import { localizeError } from "../shared/localizeError";
+import { useI18n } from "../shared/i18n";
+import { HelpPopover } from "../shared/ui/HelpPopover";
 import { useState, type FormEvent } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { ApiError } from "../shared/api";
@@ -15,6 +18,7 @@ import { StatusMessage } from "../shared/ui/StatusMessage";
  * POST /api/core/auth/login; nothing is persisted client-side.
  */
 export function LoginPage() {
+  const { t, language } = useI18n();
   const { signIn } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -52,11 +56,11 @@ export function LoginPage() {
 
   return (
     <div className="page page--boot">
-      <PixelWindow title="System Login" icon="logo">
+      <PixelWindow title={t("System Login", "登录平台")} icon="logo">
         <p className="login-brand">
           <PixelIcon name="logo" size={20} className="login-brand__icon" />
           <span>
-            Personal Platform <span className="login-brand__sigil">:: AUTH REQUIRED</span>
+            Personal Platform <span className="login-brand__sigil">{t(":: AUTH REQUIRED", ":: 需要登录")}</span>
           </span>
         </p>
         <form className="login-form" onSubmit={(e) => void onSubmit(e)}>
@@ -70,8 +74,8 @@ export function LoginPage() {
               maxLength={64}
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="username"
-              aria-label="Username"
+              placeholder={t("username", "用户名")}
+              aria-label={t("Username", "用户名")}
             />
           </label>
           <label className="login-field">
@@ -84,26 +88,24 @@ export function LoginPage() {
               maxLength={256}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="password"
-              aria-label="Password"
+              placeholder={t("password", "密码")}
+              aria-label={t("Password", "密码")}
             />
           </label>
           {error ? (
             <StatusMessage tone="error">
-              <p>{error}</p>
+              <p>{localizeError(error, language)}</p>
             </StatusMessage>
           ) : null}
           <div className="login-actions">
             {busy ? (
-              <LoadingState label="Authenticating…" />
+              <LoadingState label={t("Authenticating…", "正在验证…")} />
             ) : (
-              <PixelButton type="submit" variant="primary">
-                Log In ▸
-              </PixelButton>
+              <PixelButton type="submit" variant="primary">{t("Log In ▸", "登录 ▸")} </PixelButton>
             )}
           </div>
         </form>
-        <p className="login-hint">Session cookie only · HttpOnly · nothing stored in the browser</p>
+        <HelpPopover label={t("Signing in", "登录说明")}>{t("HttpOnly session cookie · your password is not stored by this app in the browser", "登录凭据使用 HttpOnly 会话 Cookie；密码不会保存在浏览器中。")}</HelpPopover>
       </PixelWindow>
     </div>
   );

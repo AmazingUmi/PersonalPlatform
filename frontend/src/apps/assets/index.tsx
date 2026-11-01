@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../shared/api";
+import { localizeError } from "../../shared/localizeError";
+import { useI18n } from "../../shared/i18n";
+import { HelpPopover } from "../../shared/ui/HelpPopover";
 import { useAppDisplayName } from "../../shared/PresentationContext";
 import { ACCENT_OPTIONS } from "../../shared/presentation";
 import type { FrontendAppModule, WidgetDensity } from "../../shared/appTypes";
@@ -57,12 +60,12 @@ interface ItemsListResponse {
 }
 
 const SORT_OPTIONS = [
-  { value: "createdAt", label: "Added" },
-  { value: "updatedAt", label: "Modified" },
-  { value: "name", label: "Name" },
-  { value: "quantity", label: "Quantity" },
-  { value: "acquiredAt", label: "Acquired" },
-  { value: "targetLocation", label: "Location" },
+  { value: "createdAt", label: "Added", zh: "添加时间" },
+  { value: "updatedAt", label: "Modified", zh: "修改时间" },
+  { value: "name", label: "Name", zh: "名称" },
+  { value: "quantity", label: "Quantity", zh: "数量" },
+  { value: "acquiredAt", label: "Acquired", zh: "获取日期" },
+  { value: "targetLocation", label: "Location", zh: "位置" },
 ] as const;
 
 /** Category badges clamped on cards (detail shows all). */
@@ -89,15 +92,20 @@ function sameIdSet(a: string[], b: string[]): boolean {
   return a.every((id) => setB.has(id));
 }
 
-function formatBytes(size: number): string {
-  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-  if (size >= 1024) return `${Math.round(size / 1024)} KB`;
-  return `${size} B`;
+function formatBytes(size: number, locale: string): string {
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toLocaleString(locale, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} MB`;
+  if (size >= 1024) return `${Math.round(size / 1024).toLocaleString(locale)} KB`;
+  return `${size.toLocaleString(locale)} B`;
 }
 
-function formatTimestamp(value: string | null): string {
+/** DATE is a calendar day, so formatting must not shift it with the viewer timezone. */
+function formatCalendarDate(value: string | null, locale: string): string {
+  return value ? new Date(`${value}T00:00:00Z`).toLocaleDateString(locale, { timeZone: "UTC" }) : "—";
+}
+
+function formatTimestamp(value: string | null, locale: string): string {
   if (!value) return "—";
-  return new Date(value).toLocaleString();
+  return new Date(value).toLocaleString(locale);
 }
 
 /** Build the items query string from the current URL search params. */
@@ -156,6 +164,7 @@ function ItemEditor({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const { t } = useI18n();
   const [form, setForm] = useState<ItemEditorState>(() =>
     item ? editorStateFromItem(item) : emptyEditorState(),
   );
@@ -208,43 +217,43 @@ function ItemEditor({
   return (
     <div className="px-dialog-backdrop" role="presentation">
       <PixelWindow
-        title={item ? "Edit Item" : "New Item"}
+        title={item ? t("Edit Item", "编辑物品") : t("New Item", "新建物品")}
         icon="box"
         className="px-dialog px-dialog--form"
         data-testid="item-editor"
       >
-        <form className="px-form" onSubmit={submit} aria-label={item ? "Edit item" : "Create item"}>
+        <form className="px-form" onSubmit={submit} aria-label={item ? t("Edit item", "编辑物品") : t("Create item", "创建物品")}>
           <label className="px-form__row">
-            <span className="px-form__label">Name</span>
+            <span className="px-form__label">{t("Name", "名称")}</span>
             <PixelInput
               value={form.name}
               onChange={(e) => set("name", e.target.value)}
-              aria-label="Item name"
+              aria-label={t("Item name", "物品名称")}
               required
               autoFocus
             />
           </label>
           <label className="px-form__row">
-            <span className="px-form__label">Description</span>
+            <span className="px-form__label">{t("Description", "描述")}</span>
             <textarea
               className="px-textarea"
               value={form.description}
               onChange={(e) => set("description", e.target.value)}
-              aria-label="Item description"
+              aria-label={t("Item description", "物品描述")}
             />
           </label>
           <div className="px-form__row">
-            <span className="px-form__label">Quantity</span>
+            <span className="px-form__label">{t("Quantity", "数量")}</span>
             <PixelInput
               type="number"
               min={0}
               value={form.quantity}
               onChange={(e) => set("quantity", e.target.value)}
-              aria-label="Quantity"
+              aria-label={t("Quantity", "数量")}
             />
           </div>
           <div className="px-form__row">
-            <span className="px-form__label">Category</span>
+            <span className="px-form__label">{t("Category", "分类")}</span>
             {categories.length > 0 ? (
               <div className="assets-editor__categories">
                 {categories.map((category) => (
@@ -253,7 +262,7 @@ function ItemEditor({
                     type="button"
                     className="px-chip"
                     aria-pressed={form.categoryIds.includes(category.id)}
-                    aria-label={`Toggle category ${category.name}`}
+                    aria-label={t(`Toggle category ${category.name}`, `切换分类 ${category.name}`)}
                     onClick={() => toggleCategory(category.id)}
                   >
                     {category.color ? (
@@ -264,33 +273,30 @@ function ItemEditor({
                 ))}
               </div>
             ) : (
-              <p className="px-form__hint">No categories yet — add one below the category chips first.</p>
+              <p className="px-form__hint">{t("No categories yet — add one below the category chips first.", "暂无分类，请先在分类区域添加。")}</p>
             )}
           </div>
           <div className="px-form__grid">
             <label className="px-form__row">
-              <span className="px-form__label">Acquired date</span>
+              <span className="px-form__label">{t("Acquired date", "获取日期")}</span>
               <PixelInput
                 type="date"
                 value={form.acquiredAt}
                 onChange={(e) => set("acquiredAt", e.target.value)}
-                aria-label="Acquired date"
+                aria-label={t("Acquired date", "获取日期")}
               />
             </label>
             <label className="px-form__row">
-              <span className="px-form__label">Location</span>
+              <span className="px-form__label">{t("Location", "位置")}</span>
               <PixelInput
                 value={form.targetLocation}
                 onChange={(e) => set("targetLocation", e.target.value)}
-                aria-label="Target location"
-                placeholder="e.g. shelf-a"
+                aria-label={t("Target location", "存放位置")}
+                placeholder={t("e.g. shelf-a", "例如：书架 A")}
               />
             </label>
           </div>
-          <p className="px-form__hint">
-            Acquired date is optional — fill it in when you got the item (purchase, gift, …).
-            The intake time is recorded automatically.
-          </p>
+          <HelpPopover label={t("Acquired date", "获取日期")}><p>{t("Acquired date is optional — fill it in when you got the item (purchase, gift, …). The intake time is recorded automatically.", "获取日期可选，填写购入、获赠等实际取得物品的日期。添加时间会自动记录。")}</p></HelpPopover>
           {save.error ? (
             <StatusMessage tone="error">
               <p>{save.error}</p>
@@ -298,10 +304,9 @@ function ItemEditor({
           ) : null}
           <div className="px-dialog__actions">
             <PixelButton variant="secondary" size="sm" onClick={onClose} disabled={save.busy}>
-              Cancel
-            </PixelButton>
+              {t("Cancel", "取消")}</PixelButton>
             <PixelButton type="submit" size="sm" disabled={!form.name.trim() || save.busy}>
-              {save.busy ? "Saving…" : item ? "Save changes" : "Create item"}
+              {save.busy ? t("Saving…", "正在保存…") : item ? t("Save changes", "保存修改") : t("Create item", "创建物品")}
             </PixelButton>
           </div>
         </form>
@@ -321,6 +326,7 @@ function EditCategoryDialog({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const { t } = useI18n();
   const [name, setName] = useState(category.name);
   const [color, setColor] = useState<string>(category.color ?? "");
   const save = useMutation(async () => {
@@ -339,24 +345,24 @@ function EditCategoryDialog({
 
   return (
     <div className="px-dialog-backdrop" role="presentation">
-      <PixelWindow title="Edit Category" icon="palette" className="px-dialog px-dialog--form">
-        <form className="px-form" onSubmit={submit} aria-label="Edit category">
+      <PixelWindow title={t("Edit Category", "编辑分类")} icon="palette" className="px-dialog px-dialog--form">
+        <form className="px-form" onSubmit={submit} aria-label={t("Edit category", "编辑分类")}>
           <label className="px-form__row">
-            <span className="px-form__label">Name</span>
-            <PixelInput value={name} onChange={(e) => setName(e.target.value)} aria-label="Category name" autoFocus />
+            <span className="px-form__label">{t("Name", "名称")}</span>
+            <PixelInput value={name} onChange={(e) => setName(e.target.value)} aria-label={t("Category name", "分类名称")} autoFocus />
           </label>
           <label className="px-form__row">
-            <span className="px-form__label">Color</span>
+            <span className="px-form__label">{t("Color", "颜色")}</span>
             <select
               className="px-select"
               value={color}
               onChange={(e) => setColor(e.target.value)}
-              aria-label="Category color"
+              aria-label={t("Category color", "分类颜色")}
             >
-              <option value="">Default</option>
+              <option value="">{t("Default", "默认")}</option>
               {ACCENT_OPTIONS.map((accent) => (
                 <option key={accent} value={accent}>
-                  {accent}
+                  {t(accent, {"primary": "主色", "success": "成功绿", "warning": "警告黄", "danger": "危险红", "info": "信息蓝", "mint": "薄荷绿", "yellow": "黄色", "violet": "紫色", "coral": "珊瑚色"}[accent])}
                 </option>
               ))}
             </select>
@@ -369,10 +375,9 @@ function EditCategoryDialog({
           ) : null}
           <div className="px-dialog__actions">
             <PixelButton variant="secondary" size="sm" onClick={onClose} disabled={save.busy}>
-              Cancel
-            </PixelButton>
+              {t("Cancel", "取消")}</PixelButton>
             <PixelButton type="submit" size="sm" disabled={!name.trim() || save.busy}>
-              {save.busy ? "Saving…" : "Save"}
+              {save.busy ? t("Saving…", "正在保存…") : t("Save", "保存")}
             </PixelButton>
           </div>
         </form>
@@ -382,6 +387,7 @@ function EditCategoryDialog({
 }
 
 function AssetsPage() {
+  const { t, locale } = useI18n();
   const displayName = useAppDisplayName({ id: "assets", name: "Assets" });
   const [searchParams, setSearchParams] = useSearchParams();
   const [reloadKey, setReloadKey] = useState(0);
@@ -474,7 +480,7 @@ function AssetsPage() {
         <h1 className="page-header__title">
           <PixelIcon name={appIconName("assets")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
         </h1>
-        <p className="page-header__subtitle">Personal inventory</p>
+        <HelpPopover label={t("About assets", "关于资产")}><p>{t("Personal inventory", "管理个人物品、分类、位置与附件。")}</p></HelpPopover>
         <div className="page-header__actions">
           <PixelButton
             size="sm"
@@ -482,74 +488,71 @@ function AssetsPage() {
             aria-expanded={filtersOpen}
             onClick={() => setFiltersOpen((open) => !open)}
           >
-            <PixelIcon name="search" /> Filters
-            {activeFilterCount > 0 ? <PixelBadge tone="warning">{activeFilterCount}</PixelBadge> : null}
+            <PixelIcon name="search" /> {t("Filters", "筛选")}{activeFilterCount > 0 ? <PixelBadge tone="warning">{activeFilterCount.toLocaleString(locale)}</PixelBadge> : null}
           </PixelButton>
           <PixelButton size="sm" onClick={() => setEditorFor(null)}>
-            <PixelIcon name="plus" /> New Item
-          </PixelButton>
+            <PixelIcon name="plus" /> {t("New Item", "新建物品")}</PixelButton>
         </div>
       </header>
 
       {filtersOpen ? (
-      <PixelWindow title="Filters" icon="search" className="assets-filters" actions={
+      <PixelWindow title={t("Filters", "筛选")} icon="search" className="assets-filters" actions={
         <PixelButton variant="ghost" size="sm" onClick={resetFilters} disabled={activeFilterCount === 0}>
-          Reset
-        </PixelButton>
+          {t("Reset", "重置")}</PixelButton>
       }>
         <div className="assets-filters__row">
           <div className="assets-search">
             <PixelIcon name="search" />
             <PixelInput
-              placeholder="Search name or category…"
+              placeholder={t("Search name or category…", "搜索名称或分类…")}
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
-              aria-label="Search items"
+              aria-label={t("Search items", "搜索物品")}
             />
           </div>
           <PixelInput
-            placeholder="Location"
+            placeholder={t("Location", "位置")}
             value={searchParams.get("targetLocation") ?? ""}
             onChange={(e) => setParam("targetLocation", e.target.value)}
-            aria-label="Filter by location"
+            aria-label={t("Filter by location", "按位置筛选")}
             className="assets-filters__location"
           />
         </div>
         <div className="assets-filters__row">
           <label className="assets-filters__date">
-            <span>Acquired from</span>
+            <span>{t("Acquired from", "获取日期从")}</span>
             <PixelInput
               type="date"
               value={searchParams.get("acquiredAfter") ?? ""}
               onChange={(e) => setParam("acquiredAfter", e.target.value)}
-              aria-label="Acquired after"
+              aria-label={t("Acquired after", "获取日期起点")}
             />
           </label>
           <label className="assets-filters__date">
-            <span>to</span>
+            <span>{t("to", "至")}</span>
             <PixelInput
               type="date"
               value={searchParams.get("acquiredBefore") ?? ""}
               onChange={(e) => setParam("acquiredBefore", e.target.value)}
-              aria-label="Acquired before"
+              aria-label={t("Acquired before", "获取日期终点")}
             />
           </label>
           <label className="assets-filters__date">
-            <span>Added from</span>
+            <span>{t("Added from", "添加日期从")}</span>
             <PixelInput
               type="date"
               value={searchParams.get("createdAfter") ?? ""}
               onChange={(e) => setParam("createdAfter", e.target.value ? new Date(e.target.value).toISOString() : "")}
-              aria-label="Added after"
+              aria-label={t("Added after", "添加日期起点")}
             />
           </label>
           <label className="assets-filters__date">
-            <span>to</span>
+            <span>{t("to", "至")}</span>
             <PixelInput
               type="date"
               value={searchParams.get("createdBefore") ?? ""}
               onChange={(e) => setParam("createdBefore", e.target.value ? new Date(e.target.value).toISOString() : "")}
-              aria-label="Added before"
+              aria-label={t("Added before", "添加日期终点")}
             />
           </label>
         </div>
@@ -558,11 +561,11 @@ function AssetsPage() {
             className="px-select"
             value={sortBy}
             onChange={(e) => setParam("sortBy", e.target.value)}
-            aria-label="Sort by"
+            aria-label={t("Sort by", "排序依据")}
           >
             {SORT_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>
-                Sort: {option.label}
+                {t(`Sort: ${option.label}`, `排序：${option.zh}`)}
               </option>
             ))}
           </select>
@@ -570,33 +573,31 @@ function AssetsPage() {
             size="sm"
             variant="secondary"
             onClick={() => setParam("order", order === "asc" ? "desc" : "asc")}
-            aria-label={`Sort order: ${order}. Click to switch.`}
+            aria-label={t(`Sort order: ${order}. Click to switch.`, `排序方向：${order === "asc" ? "升序" : "降序"}，点击切换。`)}
           >
             <PixelIcon name={order === "asc" ? "up" : "down"} />
-            {order === "asc" ? "Asc" : "Desc"}
+            {order === "asc" ? t("Asc", "升序") : t("Desc", "降序")}
           </PixelButton>
           <span className="assets-filters__spacer" />
           <PixelButton size="sm" variant="secondary" onClick={() => setFiltersOpen(false)}>
-            Close
-          </PixelButton>
+            {t("Close", "关闭")}</PixelButton>
         </div>
       </PixelWindow>
       ) : null}
 
       <section className="assets-section" aria-labelledby="assets-categories">
         <h2 id="assets-categories" className="section-title">
-          Categories
-        </h2>
+          {t("Categories", "分类")}</h2>
         <div className="px-chips">
           <button
             type="button"
             className="px-chip"
             aria-pressed={selectedCategoryIds.length === 0}
-            aria-label="All categories"
+            aria-label={t("All categories", "全部分类")}
             onClick={() => setParam("categories", "")}
           >
-            <span>All</span>
-            <span className="px-chip__count">{counts?.all ?? 0}</span>
+            <span>{t("All", "全部")}</span>
+            <span className="px-chip__count">{(counts?.all ?? 0).toLocaleString(locale)}</span>
           </button>
           {(categories.data?.items ?? []).map((category) => {
             const open = openCategoryId === category.id;
@@ -606,20 +607,20 @@ function AssetsPage() {
                   type="button"
                   className="px-chip"
                   aria-pressed={selectedCategoryIds.includes(category.id)}
-                  aria-label={`Filter by category ${category.name}`}
+                  aria-label={t(`Filter by category ${category.name}`, `按分类 ${category.name} 筛选`)}
                   onClick={() => toggleCategoryFilter(category.id)}
                 >
                   {category.color ? (
                     <span className="px-cat-dot" data-accent={category.color} aria-hidden="true" />
                   ) : null}
                   <span>{category.name}</span>
-                  <span className="px-chip__count">{countForCategory(category.id)}</span>
+                  <span className="px-chip__count">{countForCategory(category.id).toLocaleString(locale)}</span>
                 </button>
                 <PixelButton
                   variant="ghost"
                   size="sm"
                   className="px-chip-manage"
-                  aria-label={`Manage category ${category.name}`}
+                  aria-label={t(`Manage category ${category.name}`, `管理分类 ${category.name}`)}
                   aria-expanded={open}
                   onClick={() => setOpenCategoryId(open ? null : category.id)}
                 >
@@ -631,7 +632,7 @@ function AssetsPage() {
                       variant="ghost"
                       size="sm"
                       className="px-button--icon"
-                      aria-label={`Rename category ${category.name}`}
+                      aria-label={t(`Rename category ${category.name}`, `重命名分类 ${category.name}`)}
                       onClick={() => setCategoryEdit(category)}
                     >
                       <PixelIcon name="edit" />
@@ -640,7 +641,7 @@ function AssetsPage() {
                       variant="ghost"
                       size="sm"
                       className="px-button--icon"
-                      aria-label={`Delete category ${category.name}`}
+                      aria-label={t(`Delete category ${category.name}`, `删除分类 ${category.name}`)}
                       onClick={() => setCategoryDelete(category)}
                     >
                       <PixelIcon name="trash" />
@@ -652,7 +653,7 @@ function AssetsPage() {
           })}
           <form
             className="category-add"
-            aria-label="Add a category"
+            aria-label={t("Add a category", "添加分类")}
             onSubmit={async (event) => {
               event.preventDefault();
               if (!newCategoryName.trim() || newCategory.busy) return;
@@ -664,17 +665,17 @@ function AssetsPage() {
           >
             <PixelInput
               className="category-add__input"
-              placeholder="New category"
+              placeholder={t("New category", "新分类")}
               value={newCategoryName}
               onChange={(e) => setNewCategoryName(e.target.value)}
-              aria-label="New category name"
+              aria-label={t("New category name", "新分类名称")}
             />
             <PixelButton
               type="submit"
               variant="secondary"
               size="sm"
               className="px-button--icon"
-              aria-label="Add category"
+              aria-label={t("Add category", "添加分类")}
               disabled={!newCategoryName.trim() || newCategory.busy}
             >
               <PixelIcon name="plus" />
@@ -690,33 +691,30 @@ function AssetsPage() {
 
       <section className="assets-section" aria-labelledby="assets-inventory">
         <h2 id="assets-inventory" className="section-title">
-          Inventory
-        </h2>
+          {t("Inventory", "物品清单")}</h2>
         {items.loading ? (
-          <LoadingState label="Loading items…" />
+          <LoadingState label={t("Loading items…", "正在加载物品…")} />
         ) : items.error ? (
           <StatusMessage tone="error">
             <p>{items.error}</p>
             <PixelButton size="sm" variant="secondary" onClick={items.reload}>
-              Retry
-            </PixelButton>
+              {t("Retry", "重试")}</PixelButton>
           </StatusMessage>
         ) : allItems.length === 0 && !hasFilters ? (
           <EmptyState
             icon="box"
-            title="Your inventory is empty"
-            description="Create the first item to start tracking your personal assets."
+            title={t("Your inventory is empty", "物品清单为空")}
+            description={t("Create the first item to start tracking your personal assets.", "创建第一个物品，开始记录个人资产。")}
             action={
               <PixelButton size="sm" onClick={() => setEditorFor(null)}>
-                <PixelIcon name="plus" /> New Item
-              </PixelButton>
+                <PixelIcon name="plus" /> {t("New Item", "新建物品")}</PixelButton>
             }
           />
         ) : allItems.length === 0 ? (
           <EmptyState
             icon="search"
-            title="No matching items"
-            description="Try a different search term or clear the filters."
+            title={t("No matching items", "没有匹配的物品")}
+            description={t("Try a different search term or clear the filters.", "尝试其他搜索词或清除筛选条件。")}
           />
         ) : (
           <ul className="inventory-grid">
@@ -742,7 +740,7 @@ function AssetsPage() {
                   <span className="inv-card__name">{item.name}</span>
                 </Link>
                 <div className="inv-card__foot">
-                  <span className="inv-card__qty">×{item.quantity}</span>
+                  <span className="inv-card__qty">×{(item.quantity).toLocaleString(locale)}</span>
                   <span className="inv-card__badges">
                     {item.categories.slice(0, CATEGORY_BADGE_LIMIT).map((category) => (
                       <PixelBadge key={category.id} accent={accentOf(category.color)}>
@@ -789,8 +787,8 @@ function AssetsPage() {
       ) : null}
       {categoryDelete ? (
         <ConfirmDialog
-          title="Delete category"
-          message={`Delete "${categoryDelete.name}"? Items keep their other categories; items that only have this one become uncategorized.`}
+          title={t("Delete category", "删除分类")}
+          message={t(`Delete "${categoryDelete.name}"? Items keep their other categories; items that only have this one become uncategorized.`, `删除分类“${categoryDelete.name}”？物品的其他分类将保留，仅属于此分类的物品将变为未分类。`)}
           busy={deleteCategory.busy}
           onCancel={() => setCategoryDelete(null)}
           onConfirm={async () => {
@@ -821,11 +819,13 @@ function AssetsPage() {
 const ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024;
 
 function AssetDetailPage() {
+  const { t, locale, language } = useI18n();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [reloadKey, setReloadKey] = useState(0);
   const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<unknown>(null);
+  const [oversizedFile, setOversizedFile] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [attachmentDelete, setAttachmentDelete] = useState<Attachment | null>(null);
@@ -851,9 +851,11 @@ function AssetDetailPage() {
   const upload = async (file: File) => {
     setUploading(true);
     setUploadError(null);
+    setOversizedFile(null);
     try {
       if (file.size > ATTACHMENT_MAX_BYTES) {
-        throw new Error(`${file.name} is larger than the 10 MB attachment limit`);
+        setOversizedFile(file.name);
+        return;
       }
       // Multipart upload (FP-12.2): no Base64 inflation, one streaming part.
       const form = new FormData();
@@ -865,7 +867,7 @@ function AssetDetailPage() {
       });
       refresh();
     } catch (error) {
-      setUploadError(error instanceof Error ? error.message : String(error));
+      setUploadError(error);
     } finally {
       setUploading(false);
     }
@@ -874,7 +876,7 @@ function AssetDetailPage() {
   if (item.loading) {
     return (
       <div className="page" data-app="assets">
-        <LoadingState label="Loading item…" />
+        <LoadingState label={t("Loading item…", "正在加载物品…")} />
       </div>
     );
   }
@@ -884,8 +886,7 @@ function AssetDetailPage() {
         <StatusMessage tone="error">
           <p>{item.error}</p>
           <PixelButton size="sm" variant="secondary" onClick={item.reload}>
-            Retry
-          </PixelButton>
+            {t("Retry", "重试")}</PixelButton>
         </StatusMessage>
       </div>
     );
@@ -897,8 +898,7 @@ function AssetDetailPage() {
     <div className="page page--detail" data-app="assets">
       <Link to="/assets" className="back-link">
         <PixelIcon name="back" />
-        Assets
-      </Link>
+        {t("Assets", "资产")}</Link>
 
       <PixelWindow
         title={data.name}
@@ -907,21 +907,19 @@ function AssetDetailPage() {
         actions={
           <>
             <PixelButton size="sm" variant="secondary" onClick={() => setEditing(true)}>
-              <PixelIcon name="edit" /> Edit
-            </PixelButton>
+              <PixelIcon name="edit" /> {t("Edit", "编辑")}</PixelButton>
             <PixelButton size="sm" variant="danger" onClick={() => setDeleting(true)}>
-              <PixelIcon name="trash" /> Delete
-            </PixelButton>
+              <PixelIcon name="trash" /> {t("Delete", "删除")}</PixelButton>
           </>
         }
       >
         <dl className="px-deflist">
           <div>
-            <dt>Quantity</dt>
-            <dd>×{data.quantity}</dd>
+            <dt>{t("Quantity", "数量")}</dt>
+            <dd>×{(data.quantity).toLocaleString(locale)}</dd>
           </div>
           <div>
-            <dt>Category</dt>
+            <dt>{t("Category", "分类")}</dt>
             <dd>
               {data.categories.length > 0 ? (
                 <span className="asset-detail__categories">
@@ -937,20 +935,20 @@ function AssetDetailPage() {
             </dd>
           </div>
           <div>
-            <dt>Location</dt>
+            <dt>{t("Location", "位置")}</dt>
             <dd>{data.targetLocation ?? "—"}</dd>
           </div>
           <div>
-            <dt>Acquired</dt>
-            <dd>{data.acquiredAt ?? "—"}</dd>
+            <dt>{t("Acquired", "获取日期")}</dt>
+            <dd>{formatCalendarDate(data.acquiredAt, locale)}</dd>
           </div>
           <div>
-            <dt>Added (auto)</dt>
-            <dd>{formatTimestamp(data.createdAt)}</dd>
+            <dt>{t("Added (auto)", "添加时间（自动）")}</dt>
+            <dd>{formatTimestamp(data.createdAt, locale)}</dd>
           </div>
           <div>
-            <dt>Last modified</dt>
-            <dd>{formatTimestamp(data.updatedAt)}</dd>
+            <dt>{t("Last modified", "最后修改时间")}</dt>
+            <dd>{formatTimestamp(data.updatedAt, locale)}</dd>
           </div>
         </dl>
         {data.description ? <p className="asset-detail__desc">{data.description}</p> : null}
@@ -961,9 +959,9 @@ function AssetDetailPage() {
         ) : null}
       </PixelWindow>
 
-      <PixelWindow title="Attachments" icon="file">
+      <PixelWindow title={t("Attachments", "附件")} icon="file">
         {(attachments.data?.items ?? []).length === 0 ? (
-          <p className="muted">No attachments yet.</p>
+          <p className="muted">{t("No attachments yet.", "暂无附件。")}</p>
         ) : (
           <ul className="attachment-list">
             {(attachments.data?.items ?? []).map((attachment) => (
@@ -973,16 +971,16 @@ function AssetDetailPage() {
                   className="attachment-row__name"
                   href={`/api/apps/assets/items/${id}/attachments/${attachment.id}`}
                   download
-                  title={`Download ${attachment.filename}`}
+                  title={t(`Download ${attachment.filename}`, `下载 ${attachment.filename}`)}
                 >
                   {attachment.filename}
                 </a>
-                <span className="attachment-row__size">{formatBytes(attachment.size)}</span>
+                <span className="attachment-row__size">{formatBytes(attachment.size, locale)}</span>
                 <PixelButton
                   variant="ghost"
                   size="sm"
                   className="px-button--icon"
-                  aria-label={`Delete attachment ${attachment.filename}`}
+                  aria-label={t(`Delete attachment ${attachment.filename}`, `删除附件 ${attachment.filename}`)}
                   onClick={() => setAttachmentDelete(attachment)}
                 >
                   <PixelIcon name="trash" />
@@ -993,7 +991,7 @@ function AssetDetailPage() {
         )}
         <label className="attachment-upload">
           <PixelIcon name="upload" />
-          <span>{uploading ? "Uploading…" : "Upload a file"}</span>
+          <span>{uploading ? t("Uploading…", "正在上传…") : t("Upload a file", "上传文件")}</span>
           <input
             type="file"
             disabled={uploading}
@@ -1005,9 +1003,9 @@ function AssetDetailPage() {
             }}
           />
         </label>
-        {uploadError ? (
+        {uploadError || oversizedFile !== null ? (
           <StatusMessage tone="error">
-            <p>{uploadError}</p>
+            <p>{oversizedFile !== null ? t(`${oversizedFile} is larger than the 10 MB attachment limit`, `${oversizedFile} 超过附件大小上限 10 MB`) : localizeError(uploadError, language)}</p>
           </StatusMessage>
         ) : null}
         {attachments.error ? (
@@ -1030,8 +1028,8 @@ function AssetDetailPage() {
       ) : null}
       {deleting ? (
         <ConfirmDialog
-          title="Delete item"
-          message={`Delete "${data.name}" and all of its attachments? This cannot be undone.`}
+          title={t("Delete item", "删除物品")}
+          message={t(`Delete "${data.name}" and all of its attachments? This cannot be undone.`, `删除“${data.name}”及其全部附件？此操作无法撤销。`)}
           busy={deleteItem.busy}
           onCancel={() => setDeleting(false)}
           onConfirm={async () => {
@@ -1043,8 +1041,8 @@ function AssetDetailPage() {
       ) : null}
       {attachmentDelete ? (
         <ConfirmDialog
-          title="Delete attachment"
-          message={`Delete attachment "${attachmentDelete.filename}"?`}
+          title={t("Delete attachment", "删除附件")}
+          message={t(`Delete attachment "${attachmentDelete.filename}"?`, `删除附件“${attachmentDelete.filename}”？`)}
           busy={deleteAttachment.busy}
           onCancel={() => setAttachmentDelete(null)}
           onConfirm={async () => {
@@ -1067,6 +1065,7 @@ function AssetDetailPage() {
  * management page: rows are name + quantity only.
  */
 function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity }) {
+  const { t, locale } = useI18n();
   const compact = density === "compact";
   const recentLimit = density === "expanded" ? 4 : 3;
   const summary = useAsync(
@@ -1092,7 +1091,7 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
     [density],
   );
   if ((compact && summary.loading) || (!compact && (list.loading || categories.loading))) {
-    return <LoadingState label="Loading…" />;
+    return <LoadingState label={t("Loading…", "正在加载…")} />;
   }
   const error =
     (compact ? summary.error : null) ?? (compact ? null : (list.error ?? categories.error));
@@ -1107,8 +1106,7 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
           variant="secondary"
           onClick={compact ? summary.reload : (list.error ? list.reload : categories.reload)}
         >
-          Retry
-        </PixelButton>
+          {t("Retry", "重试")}</PixelButton>
       </div>
     );
   }
@@ -1118,12 +1116,12 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
     return (
       <div className="px-stats">
         <div className="px-stat">
-          <span className="px-stat__label">Items</span>
-          <span className="px-stat__value">{data.items}</span>
+          <span className="px-stat__label">{t("Items", "物品")}</span>
+          <span className="px-stat__value">{(data.items).toLocaleString(locale)}</span>
         </div>
         <div className="px-stat">
-          <span className="px-stat__label">Categories</span>
-          <span className="px-stat__value">{data.categories}</span>
+          <span className="px-stat__label">{t("Categories", "分类")}</span>
+          <span className="px-stat__value">{data.categories.toLocaleString(locale)}</span>
         </div>
       </div>
     );
@@ -1137,7 +1135,7 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
     .filter(([, count]) => count > 0)
     .sort((a, b) => b[1] - a[1])
     .slice(0, 3)
-    .map(([id, count]) => ({ id, name: categoryNames.get(id) ?? "Unknown", count }));
+    .map(([id, count]) => ({ id, name: categoryNames.get(id) ?? t("Unknown", "未知"), count }));
   const leadingCount = topCategories[0]?.count ?? 1;
   const recent = data.items.slice(0, recentLimit);
   return (
@@ -1148,12 +1146,12 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
        * widget, the rows below carry the data density. */}
       <div className="assets-widget__index">
         <span className="assets-widget__index-entry">
-          <span className="assets-widget__index-value">{data.counts.all}</span>
-          <span className="assets-widget__index-label">Items</span>
+          <span className="assets-widget__index-value">{(data.counts.all).toLocaleString(locale)}</span>
+          <span className="assets-widget__index-label">{t("Items", "物品")}</span>
         </span>
         <span className="assets-widget__index-entry">
-          <span className="assets-widget__index-value">{Object.keys(data.counts.categories).length}</span>
-          <span className="assets-widget__index-label">Categories</span>
+          <span className="assets-widget__index-value">{(Object.keys(data.counts.categories).length).toLocaleString(locale)}</span>
+          <span className="assets-widget__index-label">{t("Categories", "分类")}</span>
         </span>
       </div>
       {topCategories.length > 0 ? (
@@ -1165,9 +1163,9 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
                 value={category.count}
                 max={leadingCount}
                 accent="yellow"
-                label={`${category.name}: ${category.count} items, most is ${leadingCount}`}
+                label={t(`${category.name}: ${(category.count).toLocaleString(locale)} items, most is ${leadingCount.toLocaleString(locale)}`, `${category.name}：${(category.count).toLocaleString(locale)} 件物品，最多为 ${leadingCount.toLocaleString(locale)} 件`)}
               />
-              <span className="assets-widget__category-count">{category.count}</span>
+              <span className="assets-widget__category-count">{(category.count).toLocaleString(locale)}</span>
             </li>
           ))}
         </ul>
@@ -1178,7 +1176,7 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
             <li key={item.id} className="assets-widget__recent-row">
               <span className="assets-widget__recent-name">{item.name}</span>
               <span className="assets-widget__recent-leader" aria-hidden="true" />
-              <span className="assets-widget__recent-qty">×{item.quantity}</span>
+              <span className="assets-widget__recent-qty">×{(item.quantity).toLocaleString(locale)}</span>
             </li>
           ))}
         </ul>
@@ -1186,7 +1184,7 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
         /* Ledger keeps its ruled silhouette even when empty (dashboard
          * empty-state rule): ghost leader lines instead of blank space. */
         <div className="assets-widget__empty">
-          <p className="assets-widget__empty-title">NOTHING TRACKED YET</p>
+          <p className="assets-widget__empty-title">{t("NOTHING TRACKED YET", "尚未记录物品")}</p>
           <span className="assets-widget__recent-leader assets-widget__recent-leader--ghost" aria-hidden="true" />
           <span className="assets-widget__recent-leader assets-widget__recent-leader--ghost" aria-hidden="true" />
           <span className="assets-widget__recent-leader assets-widget__recent-leader--ghost" aria-hidden="true" />

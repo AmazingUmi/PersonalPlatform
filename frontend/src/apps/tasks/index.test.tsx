@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import TasksApp from "./index";
+import { I18nProvider, useI18n } from "../../shared/i18n";
 
 function jsonResponse(body: unknown, ok = true, status = 200): Response {
   return { ok, status, json: async () => body } as unknown as Response;
@@ -240,4 +241,32 @@ describe("status provider (shell chips)", () => {
     body = { today: 0 };
     await expect(TasksApp.status!.load()).resolves.toEqual([]);
   });
+});
+
+function LanguageSwitch() {
+  const { setLanguage } = useI18n();
+  return <button onClick={() => setLanguage("en")}>Switch to English</button>;
+}
+
+it("switches task UI language without changing user titles, filters or an open draft", async () => {
+  const fetchMock = setupFetch();
+  render(<I18nProvider initialLanguage="zh"><MemoryRouter initialEntries={["/tasks?status=todo&priority=3"]}>
+    {TasksApp.routes[0]!.element}<LanguageSwitch />
+  </MemoryRouter></I18nProvider>);
+  expect(await screen.findByText("Ship release")).toBeDefined();
+  expect(screen.getByText("紧急", { selector: ".px-badge" })).toBeDefined();
+  expect(screen.queryByText("管理个人任务、优先级与截止时间。")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "帮助：关于任务" }));
+  expect(screen.getByRole("dialog", { name: "关于任务" }).textContent).toContain("管理个人任务");
+  fireEvent.click(screen.getByRole("button", { name: "关闭帮助" }));
+  fireEvent.click(screen.getByRole("button", { name: "新建任务" }));
+  fireEvent.change(screen.getByLabelText("任务标题"), { target: { value: "Draft 保留" } });
+  fireEvent.change(screen.getByLabelText("优先级", { selector: "select" }), { target: { value: "2" } });
+  fireEvent.click(screen.getByRole("button", { name: "Switch to English" }));
+  expect((screen.getByLabelText("Task title") as HTMLInputElement).value).toBe("Draft 保留");
+  expect((screen.getByLabelText("Priority", { selector: "select" }) as HTMLSelectElement).value).toBe("2");
+  expect(screen.getByRole("button", { name: "Create task" })).toBeDefined();
+  expect(screen.getByText("Ship release")).toBeDefined();
+  expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/tasks?"))
+    .every(([url]) => String(url).includes("status=todo") && String(url).includes("priority=3"))).toBe(true);
 });

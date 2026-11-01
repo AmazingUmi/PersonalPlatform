@@ -1,3 +1,5 @@
+import { I18nProvider, useI18n } from "../shared/i18n";
+import { localizeError } from "../shared/localizeError";
 import { useEffect, useRef, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { fetchApps, getSetting, type AppInfo } from "../shared/api";
@@ -22,11 +24,11 @@ import { enabledAppModules, resolveRoutes } from "./routes";
 
 export function App() {
   return (
-    <AuthProvider>
+    <I18nProvider><AuthProvider>
       <BrowserRouter>
         <SessionGate />
       </BrowserRouter>
-    </AuthProvider>
+    </AuthProvider></I18nProvider>
   );
 }
 
@@ -39,6 +41,7 @@ export function App() {
  * successful login lands where the user was heading.
  */
 function SessionGate() {
+  const { t, language } = useI18n();
   const { status, refresh } = useAuth();
   const location = useLocation();
 
@@ -53,8 +56,8 @@ function SessionGate() {
         </header>
         <main className="shell__content">
           <div className="page page--boot">
-            <PixelWindow title="Booting" icon="logo">
-              <LoadingState label="Checking session…" />
+            <PixelWindow title={t("Booting", "启动中")} icon="logo">
+              <LoadingState label={t("Checking session…", "正在检查登录状态…")} />
             </PixelWindow>
           </div>
         </main>
@@ -73,17 +76,12 @@ function SessionGate() {
         </header>
         <main className="shell__content">
           <div className="page page--boot">
-            <PixelWindow title="Backend Unavailable" icon="warning" accent="danger">
+            <PixelWindow title={t("Backend Unavailable", "后端暂不可用")} icon="warning" accent="danger">
               <StatusMessage tone="error">
-                <p>
-                  The platform backend cannot be reached right now. Your session was not
-                  rejected — this is a connectivity or service outage.
-                </p>
+                <p>{t("The platform backend cannot be reached right now. Your session was not rejected — this is a connectivity or service outage.", "暂时无法连接平台后端，请检查网络或服务状态。")} </p>
               </StatusMessage>
               <div className="login-actions">
-                <PixelButton variant="primary" onClick={() => void refresh()}>
-                  Retry ▸
-                </PixelButton>
+                <PixelButton variant="primary" onClick={() => void refresh()}>{t("Retry ▸", "重试 ▸")} </PixelButton>
               </div>
             </PixelWindow>
           </div>
@@ -114,6 +112,7 @@ function SessionGate() {
 }
 
 function PlatformShell() {
+  const { t, language } = useI18n();
   const { user, signOut } = useAuth();
   const [apps, setApps] = useState<AppInfo[] | null>(null);
   // Initial-load error (no data at all) gets the full boot error screen.
@@ -179,21 +178,19 @@ function PlatformShell() {
         <main className="shell__content">
           <div className="page page--boot">
             {error ? (
-              <PixelWindow title="System Error" icon="warning" accent="danger">
+              <PixelWindow title={t("System Error", "系统错误")} icon="warning" accent="danger">
                 <StatusMessage tone="error">
-                  <p>Backend unavailable: {error}</p>
+                  <p>{t("Backend unavailable:", "后端不可用：")} {localizeError(error, language)}</p>
                 </StatusMessage>
                 <PixelButton
                   variant="secondary"
                   size="sm"
                   onClick={() => setRefreshKey((key) => key + 1)}
-                >
-                  Retry
-                </PixelButton>
+                >{t("Retry", "重试")} </PixelButton>
               </PixelWindow>
             ) : (
-              <PixelWindow title="Booting" icon="logo">
-                <LoadingState label="Loading system…" />
+              <PixelWindow title={t("Booting", "启动中")} icon="logo">
+                <LoadingState label={t("Loading system…", "正在加载系统…")} />
               </PixelWindow>
             )}
           </div>
@@ -211,24 +208,18 @@ function PlatformShell() {
     <PresentationProvider value={overrides}>
       <AppStatusProvider modules={modules}>
         <div className="shell">
-            <a className="skip-link" href="#shell-content">
-              Skip to content
-            </a>
+            <a className="skip-link" href="#shell-content">{t("Skip to content", "跳到正文")} </a>
             <TopBar apps={apps} user={user} onLogout={() => void signOut()} />
             <div className="shell__workspace">
               <AppDock apps={enabled} presentation={overrides} />
               <main className="shell__content" id="shell-content" tabIndex={-1} aria-busy={refreshing}>
                 {refreshError ? (
                   <StatusMessage tone="error">
-                    <p>Refresh failed: {refreshError} — showing previously loaded data.</p>
-                    <PixelButton variant="secondary" size="sm" onClick={retryRefresh}>
-                      Retry
-                    </PixelButton>
+                    <p>{t("Refresh failed:", "刷新失败：")} {localizeError(refreshError, language)} {t("— showing previously loaded data.", "——当前显示上次加载的数据。")}</p>
+                    <PixelButton variant="secondary" size="sm" onClick={retryRefresh}>{t("Retry", "重试")} </PixelButton>
                   </StatusMessage>
                 ) : refreshing ? (
-                  <p className="muted" role="status">
-                    Refreshing…
-                  </p>
+                  <p className="muted" role="status">{t("Refreshing…", "正在刷新…")} </p>
                 ) : null}
                 <Routes>
                   <Route path="/" element={<Dashboard apps={apps} presentation={overrides} />} />

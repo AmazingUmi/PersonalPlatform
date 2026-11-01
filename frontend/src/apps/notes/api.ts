@@ -15,8 +15,10 @@ export const MOODS: { value: Mood; label: string; tone: BadgeTone }[] = [
   { value: "bad", label: "Bad", tone: "danger" },
 ];
 
-export function moodMeta(mood: Mood): { value: Mood; label: string; tone: BadgeTone } {
-  return MOODS.find((entry) => entry.value === mood) ?? MOODS[2]!;
+export function moodMeta(mood: Mood, language = "en"): { value: Mood; label: string; tone: BadgeTone } {
+  const entry = MOODS.find((entry) => entry.value === mood) ?? MOODS[2]!;
+  const labels = { great: "很棒", good: "不错", neutral: "平静", low: "低落", bad: "难过" };
+  return language === "zh" ? { ...entry, label: labels[entry.value] } : entry;
 }
 
 export interface NoteTagView {

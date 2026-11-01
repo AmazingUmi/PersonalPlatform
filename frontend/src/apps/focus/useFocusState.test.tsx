@@ -1,3 +1,4 @@
+import { I18nProvider, useI18n } from "../../shared/i18n";
 vi.mock("../../shell/AuthContext", () => ({ useAuth: () => ({ user: { id: "focus-test-user" } }) }));
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -688,4 +689,22 @@ describe("Focus server-time and monotonic clock", () => {
     expect(result.current.error).not.toBeNull();
     expect(Number.isFinite(result.current.displayNow)).toBe(true);
   });
+});
+
+it("keeps the running timer and polling subscription intact across language switches", async () => {
+  const running = focusState(activeSession({ expectedEndAt: new Date(Date.now() + 60_000).toISOString(), remainingSeconds: 60 }));
+  const fetchMock = stubFetch(() => jsonResponse(running));
+  const { result } = renderHook(() => ({ focus: useFocusState(), i18n: useI18n() }), {
+    wrapper: ({ children }) => <I18nProvider initialLanguage="en">{children}</I18nProvider>,
+  });
+  await act(async () => {});
+  await act(async () => { vi.advanceTimersByTime(3000); });
+  expect(result.current.focus.remainingSeconds).toBe(57);
+  const state = result.current.focus.state;
+  act(() => result.current.i18n.setLanguage("zh"));
+  expect(result.current.focus.state).toBe(state);
+  expect(result.current.focus.remainingSeconds).toBe(57);
+  await act(async () => { vi.advanceTimersByTime(1000); });
+  expect(result.current.focus.remainingSeconds).toBe(56);
+  expect(stateGetCalls(fetchMock)).toBe(1);
 });

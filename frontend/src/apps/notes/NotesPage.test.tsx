@@ -1,3 +1,4 @@
+import { I18nProvider } from "../../shared/i18n";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -246,4 +247,17 @@ describe("NotesPage", () => {
 
     expect(await screen.findByText(/Showing first 2 of 502 — refine filters/)).toBeDefined();
   });
+});
+
+it("localizes server day labels and mood choices without translating user content or filter values", async () => {
+  const fetchMock = setupFetch(listResponse([note({ title: "Today stays my title", mood: "great", tags: [{ id: "tag-1", name: "work" }] })]));
+  render(<I18nProvider initialLanguage="zh"><MemoryRouter><NotesPage /></MemoryRouter></I18nProvider>);
+  expect(await screen.findByText("Today stays my title")).toBeVisible();
+  expect(screen.getByRole("heading", { name: "今天" })).toBeVisible();
+  expect(screen.getByText("很棒")).toBeVisible();
+  expect(screen.getByText("work")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+  fireEvent.change(screen.getByRole("combobox", { name: "按心情筛选" }), { target: { value: "good" } });
+  await waitFor(() => expect(lastNotesUrl(fetchMock)).toContain("mood=good"));
+  expect(screen.getByRole("option", { name: "不错" })).toHaveValue("good");
 });

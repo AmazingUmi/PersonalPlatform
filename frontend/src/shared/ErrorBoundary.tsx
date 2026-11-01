@@ -1,3 +1,4 @@
+import { useI18n } from "./i18n";
 import { Component, type ReactNode } from "react";
 
 interface Props {
@@ -23,8 +24,10 @@ export class ErrorBoundary extends Component<Props, State> {
 
   render(): ReactNode {
     if (this.state.hasError) {
-      return this.props.fallback ?? <div className="error-boundary">Something went wrong.</div>;
+      return this.props.fallback ?? <ErrorFallback />;
     }
     return this.props.children;
   }
 }
+
+function ErrorFallback() { const { t } = useI18n(); return <div className="error-boundary">{t("Something went wrong.", "出现错误，请重试。")}</div>; }

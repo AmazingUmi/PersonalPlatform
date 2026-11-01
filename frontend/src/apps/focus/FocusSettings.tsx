@@ -1,3 +1,4 @@
+import { useI18n } from "../../shared/i18n";
 import { useState } from "react";
 import { api } from "../../shared/api";
 import { PixelButton } from "../../shared/ui/PixelButton";
@@ -18,11 +19,11 @@ interface SettingsForm {
 type FieldKey = keyof SettingsForm;
 
 /** Bounds per the frozen F04 contract: minutes >= 1, interval 2..10. */
-const FIELDS: Array<{ key: FieldKey; label: string; min: number; max: number | null }> = [
-  { key: "focusMinutes", label: "Focus minutes", min: 1, max: null },
-  { key: "shortBreakMinutes", label: "Short break minutes", min: 1, max: null },
-  { key: "longBreakMinutes", label: "Long break minutes", min: 1, max: null },
-  { key: "longBreakInterval", label: "Rounds before long break", min: 2, max: 10 },
+const FIELDS: Array<{ key: FieldKey; label: string; labelZh: string; min: number; max: number | null }> = [
+  { key: "focusMinutes", label: "Focus minutes", labelZh: "专注时长（分钟）", min: 1, max: null },
+  { key: "shortBreakMinutes", label: "Short break minutes", labelZh: "短休息（分钟）", min: 1, max: null },
+  { key: "longBreakMinutes", label: "Long break minutes", labelZh: "长休息（分钟）", min: 1, max: null },
+  { key: "longBreakInterval", label: "Rounds before long break", labelZh: "长休息前轮数", min: 2, max: 10 },
 ];
 
 function fieldValue(form: SettingsForm, key: FieldKey): number {
@@ -48,6 +49,7 @@ function formToPayload(form: SettingsForm): FocusSettings {
 
 /** Settings zone (APP-1 F07): durations in minutes, PUT as seconds. */
 export function FocusSettings({ settings, onSaved }: { settings: FocusSettings; onSaved?: () => void }) {
+  const { t } = useI18n();
   const [form, setForm] = useState<SettingsForm>(() => ({
     focusMinutes: String(Math.round(settings.focusDurationSeconds / 60)),
     shortBreakMinutes: String(Math.round(settings.shortBreakDurationSeconds / 60)),
@@ -81,12 +83,12 @@ export function FocusSettings({ settings, onSaved }: { settings: FocusSettings; 
   };
 
   return (
-    <PixelWindow title="Settings" icon="settings" className="focus-window">
-      <form className="px-form" onSubmit={submit} aria-label="Focus settings">
+    <PixelWindow title={t("Settings", "设置")} icon="settings" className="focus-window">
+      <form className="px-form" onSubmit={submit} aria-label={t("Focus settings", "专注设置")}>
         <div className="px-form__grid">
           {FIELDS.map((field) => (
             <label key={field.key} className="px-form__row">
-              <span className="px-form__label">{field.label}</span>
+              <span className="px-form__label">{t(field.label, field.labelZh)}</span>
               <PixelInput
                 type="number"
                 min={field.min}
@@ -95,7 +97,7 @@ export function FocusSettings({ settings, onSaved }: { settings: FocusSettings; 
                 inputMode="numeric"
                 value={form[field.key]}
                 onChange={(event) => set(field.key, event.target.value)}
-                aria-label={field.label}
+                aria-label={t(field.label, field.labelZh)}
               />
             </label>
           ))}
@@ -106,12 +108,12 @@ export function FocusSettings({ settings, onSaved }: { settings: FocusSettings; 
           </StatusMessage>
         ) : saved ? (
           <StatusMessage tone="success">
-            <p>Settings saved</p>
+            <p>{t("Settings saved", "设置已保存")}</p>
           </StatusMessage>
         ) : null}
         <div className="focus-controls">
           <PixelButton type="submit" disabled={!formValid(form) || save.busy}>
-            {save.busy ? "Saving…" : "Save"}
+            {save.busy ? t("Saving…", "保存中…") : t("Save", "保存")}
           </PixelButton>
         </div>
       </form>

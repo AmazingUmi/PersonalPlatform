@@ -1,3 +1,5 @@
+import type { Language } from "./i18n";
+import { appName } from "./localizedMetadata";
 import type { AppInfo } from "./api";
 import { appAccent } from "./ui/appIcons";
 import type { PixelAccent } from "./ui/PixelWindow";
@@ -63,9 +65,10 @@ export function normalizeOverrides(value: unknown): PresentationOverrides {
 export function resolvePresentation(
   app: Pick<AppInfo, "id" | "name">,
   overrides: PresentationOverrides,
+  language: Language = "en",
 ): ResolvedPresentation {
   const override = overrides[app.id] ?? {};
-  const displayName = override.displayName ?? app.name;
+  const displayName = override.displayName ?? appName(app.id, app.name, language);
   const defaultAccent = appAccent(app.id);
   const accent =
     override.accent !== undefined && ACCENT_OPTIONS.includes(override.accent as PixelAccent)

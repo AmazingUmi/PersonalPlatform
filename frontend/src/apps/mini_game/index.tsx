@@ -1,3 +1,5 @@
+import { HelpPopover } from "../../shared/ui/HelpPopover";
+import { useI18n } from "../../shared/i18n";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../shared/api";
 import { useAppDisplayName } from "../../shared/PresentationContext";
@@ -62,6 +64,7 @@ interface MoveFx {
 const NO_FX: MoveFx = { seq: 0, mergedIds: [], spawnId: null };
 
 export function Game2048() {
+  const { t } = useI18n();
   const displayName = useAppDisplayName({ id: "mini_game", name: "Mini Game (2048)" });
   // Loading gate (FP-13.1): the initial board is NOT randomized until the
   // save round-trip finishes, and moves / New Game are blocked while loading
@@ -176,31 +179,31 @@ export function Game2048() {
         <p className="page-header__subtitle">{displayName}</p>
       </header>
       <div className="game__bar">
-        <div className="game__score" aria-label="Score">
-          <span className="game__score-label">Score</span>
+        <div className="game__score" aria-label={t("Score", "得分")}>
+          <span className="game__score-label">{t("Score", "得分")}</span>
           <span className="game__score-value">{score}</span>
         </div>
-        <div className="game__score" aria-label="High score">
-          <span className="game__score-label">Best</span>
+        <div className="game__score" aria-label={t("High score", "最高分")}>
+          <span className="game__score-label">{t("Best", "最高")}</span>
           <span className="game__score-value">{highScore}</span>
         </div>
         <PixelButton onClick={newGame} disabled={phase !== "ready"}>
-          New Game
+          {t("New Game", "新游戏")}
         </PixelButton>
         <PixelBadge
           tone={saveState === "error" ? "danger" : saveState === "saved" ? "success" : "neutral"}
         >
           {saveState === "saving"
-            ? "Saving…"
+            ? t("Saving…", "保存中…")
             : saveState === "saved"
-              ? "Saved"
+              ? t("Saved", "已保存")
               : saveState === "error"
-                ? "Save failed"
-                : "Idle"}
+                ? t("Save failed", "保存失败")
+                : t("Idle", "空闲")}
         </PixelBadge>
       </div>
       {phase === "loading" ? (
-        <LoadingState label="Loading save…" />
+        <LoadingState label={t("Loading save…", "正在加载存档…")} />
       ) : (
       <div className={over ? "game__board game__board--over" : "game__board"}>
         {/* Background grid: exactly 16 .game__cell slots. The empty span mark
@@ -236,10 +239,10 @@ export function Game2048() {
       )}
       {over && (
         <StatusMessage tone="warning" className="game__over">
-          <p>Game over — press New Game.</p>
+          <p>{t("Game over — press New Game.", "游戏结束，点击“新游戏”。")}</p>
         </StatusMessage>
       )}
-      <p className="game__hint">Arrow keys (or WASD) to move tiles.</p>
+      <HelpPopover label={t("How to play", "游戏说明")}>{t("Arrow keys (or WASD) to move tiles.", "使用方向键或 WASD 移动方块。")}</HelpPopover>
     </div>
   );
 }
@@ -252,10 +255,11 @@ export function Game2048() {
  * the card composed.
  */
 function HighScoreWidget() {
+  const { t } = useI18n();
   const summary = useAsync(() => api<{ highScore: number }>("/api/apps/mini_game/summary"));
   const run = useAsync(() => api<{ save: SaveState | null }>("/api/apps/mini_game/saves"));
   const scorePulse = usePulseOnChange<number, HTMLSpanElement>(summary.data?.highScore ?? 0);
-  if (summary.loading || run.loading) return <LoadingState label="Loading…" />;
+  if (summary.loading || run.loading) return <LoadingState label={t("Loading…", "加载中…")} />;
   const error = summary.error ?? run.error;
   if (error) {
     return (
@@ -265,7 +269,7 @@ function HighScoreWidget() {
         </StatusMessage>
         {summary.error ? (
           <PixelButton size="sm" variant="secondary" onClick={summary.reload}>
-            Retry
+            {t("Retry", "重试")}
           </PixelButton>
         ) : null}
       </div>
@@ -280,18 +284,18 @@ function HighScoreWidget() {
   return (
     <div className="game-widget">
       <div className="game-widget__best">
-        <span className="game-widget__label">HIGH SCORE</span>
+        <span className="game-widget__label">{t("HIGH SCORE", "最高分")}</span>
         <span className="game-widget__best-value" ref={scorePulse}>
           {summary.data?.highScore ?? 0}
         </span>
       </div>
       <div className="game-widget__run">
         <div className="game-widget__run-stat">
-          <span className="game-widget__label">CURRENT</span>
+          <span className="game-widget__label">{t("CURRENT", "当前")}</span>
           <span className="game-widget__run-value">{hasRun ? currentScore : "—"}</span>
         </div>
         <div className="game-widget__run-stat">
-          <span className="game-widget__label">BEST TILE</span>
+          <span className="game-widget__label">{t("BEST TILE", "最大方块")}</span>
           <span className="game-widget__run-value">{hasRun ? bestTile : "—"}</span>
         </div>
       </div>
@@ -310,7 +314,8 @@ function HighScoreWidget() {
           );
         })}
       </div>
-      <p className="game-widget__hint">{hasRun ? "Run in progress — beat it on the board." : "Beat it on the board."}</p>
+      {hasRun ? <p className="game-widget__hint">{t("Run in progress", "游戏进行中")}</p> : null}
+      <HelpPopover label={t("2048 high score", "2048 最高分")}>{t("Beat it on the board.", "在棋盘上刷新纪录。")}</HelpPopover>
     </div>
   );
 }

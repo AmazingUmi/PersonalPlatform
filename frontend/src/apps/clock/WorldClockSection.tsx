@@ -1,3 +1,5 @@
+import { HelpPopover } from "../../shared/ui/HelpPopover";
+import { useI18n } from "../../shared/i18n";
 import { useState } from "react";
 import { api } from "../../shared/api";
 import { useAsync } from "../../shared/useAsync";
@@ -7,7 +9,7 @@ import { LoadingState } from "../../shared/ui/LoadingState";
 import { PixelButton } from "../../shared/ui/PixelButton";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { formatOffsetDiff, formatZoneTime, zoneDayDiff, zoneOffsetMinutes } from "./timeMath";
-import { WORLD_CITY_PRESETS, findWorldCityPreset, worldCityValue } from "./worldCities";
+import { WORLD_CITY_PRESETS, findWorldCityPreset, worldCityValue, worldCityLabel } from "./worldCities";
 
 export interface WorldClockView {
   id: string;
@@ -29,6 +31,7 @@ const WORLD_CLOCKS_URL = "/api/apps/clock/world-clocks";
  * dropdown (worldCities.ts), so a mismatched combination can never be saved.
  */
 export function WorldClockSection({ now }: { now: Date }) {
+  const { t, language } = useI18n();
   const clocks = useAsync(() => api<{ items: WorldClockView[] }>(WORLD_CLOCKS_URL));
   const [presetValue, setPresetValue] = useState("");
   const preset = findWorldCityPreset(presetValue);
@@ -75,14 +78,14 @@ export function WorldClockSection({ now }: { now: Date }) {
 
   return (
     <div className="clock-world">
-      {clocks.loading ? <LoadingState label="Loading world clocks…" /> : null}
+      {clocks.loading ? <LoadingState label={t("Loading world clocks…", "正在加载世界时钟…")} /> : null}
       {clocks.error ? (
         <div className="widget-fallback">
           <StatusMessage tone="error">
             <p>{clocks.error}</p>
           </StatusMessage>
           <PixelButton size="sm" variant="secondary" onClick={clocks.reload}>
-            Retry
+            {t("Retry", "重试")}
           </PixelButton>
         </div>
       ) : null}
@@ -90,8 +93,8 @@ export function WorldClockSection({ now }: { now: Date }) {
       {!clocks.loading && !clocks.error && items.length === 0 ? (
         <EmptyState
           icon="clock"
-          title="No world clocks"
-          description={`Add a city to compare its local time with ${homeZone}.`}
+          title={t("No world clocks", "暂无世界时钟")}
+          description={<HelpPopover label={t("World clocks", "世界时钟")}>{t(`Add a city to compare its local time with ${homeZone}.`, `添加城市，将当地时间与 ${homeZone} 比较。`)}</HelpPopover>}
         />
       ) : null}
 
@@ -103,14 +106,14 @@ export function WorldClockSection({ now }: { now: Date }) {
             return (
               <li key={entry.id} className="clock-world__row">
                 <div className="clock-world__main">
-                  <span className="clock-world__city">{entry.city}</span>
+                  <span className="clock-world__city">{worldCityLabel(entry, language)}</span>
                   <span className="clock-world__zone">{entry.timezone}</span>
                 </div>
                 <div className="clock-world__time">
                   <span className="clock-world__clock">{formatZoneTime(now, entry.timezone)}</span>
                   <span className="clock-world__offset">
-                    {dayDiffLabel(dayDiff)}
-                    {diff !== 0 ? ` ${formatOffsetDiff(diff)}` : ""}
+                    {dayDiffLabel(dayDiff, language)}
+                    {diff !== 0 ? ` ${formatOffsetDiff(diff, language)}` : ""}
                   </span>
                 </div>
                 <div className="clock-world__actions">
@@ -119,7 +122,7 @@ export function WorldClockSection({ now }: { now: Date }) {
                     variant="secondary"
                     onClick={() => void move(index, -1)}
                     disabled={index === 0}
-                    aria-label={`Move ${entry.city} up`}
+                    aria-label={t(`Move ${entry.city} up`, `上移 ${worldCityLabel(entry, language)}`)}
                   >
                     ↑
                   </PixelButton>
@@ -128,7 +131,7 @@ export function WorldClockSection({ now }: { now: Date }) {
                     variant="secondary"
                     onClick={() => void move(index, 1)}
                     disabled={index === items.length - 1}
-                    aria-label={`Move ${entry.city} down`}
+                    aria-label={t(`Move ${entry.city} down`, `下移 ${worldCityLabel(entry, language)}`)}
                   >
                     ↓
                   </PixelButton>
@@ -136,7 +139,7 @@ export function WorldClockSection({ now }: { now: Date }) {
                     size="sm"
                     variant="danger"
                     onClick={() => void removeAt(entry)}
-                    aria-label={`Remove ${entry.city}`}
+                    aria-label={t(`Remove ${entry.city}`, `移除 ${worldCityLabel(entry, language)}`)}
                   >
                     ✕
                   </PixelButton>
@@ -157,24 +160,24 @@ export function WorldClockSection({ now }: { now: Date }) {
         }}
       >
         <label className="px-form__row">
-          <span className="px-form__label">City (timezone bound)</span>
+          <span className="px-form__label">{t("City (timezone bound)", "城市（对应时区）")}</span>
           <select
             className="px-select"
             value={presetValue}
             onChange={(event) => setPresetValue(event.target.value)}
-            aria-label="City and timezone"
+            aria-label={t("City and timezone", "城市与时区")}
           >
-            <option value="">Select a city…</option>
+            <option value="">{t("Select a city…", "选择城市…")}</option>
             {WORLD_CITY_PRESETS.map((entry) => (
               <option key={worldCityValue(entry)} value={worldCityValue(entry)}>
-                {entry.city} · {entry.timezone}
+                {worldCityLabel(entry, language)} · {entry.timezone}
               </option>
             ))}
           </select>
         </label>
-        {preset ? <p className="clock-world__add-hint">Binds {preset.city} to {preset.timezone}.</p> : null}
+        {preset ? <HelpPopover label={t("City timezone", "城市时区")}>{t(`Binds ${preset.city} to ${preset.timezone}.`, `${worldCityLabel(preset, language)} 对应时区 ${preset.timezone}。`)}</HelpPopover> : null}
         {alreadyAdded ? (
-          <p className="clock-world__add-hint">{preset?.city} is already on the list.</p>
+          <p className="clock-world__add-hint">{preset ? worldCityLabel(preset, language) : ""} {t("is already on the list.", "已在列表中。")}</p>
         ) : null}
         {add.error ? (
           <StatusMessage tone="error">
@@ -182,16 +185,16 @@ export function WorldClockSection({ now }: { now: Date }) {
           </StatusMessage>
         ) : null}
         <PixelButton type="submit" size="sm" disabled={!canAdd || add.busy}>
-          {add.busy ? "Adding…" : "+ Add City"}
+          {add.busy ? t("Adding…", "添加中…") : t("+ Add City", "+ 添加城市")}
         </PixelButton>
       </form>
     </div>
   );
 }
 
-function dayDiffLabel(diff: number): string {
-  if (diff === 0) return "Today";
-  if (diff === 1) return "Tomorrow";
-  if (diff === -1) return "Yesterday";
-  return `${diff > 0 ? "+" : ""}${diff}d`;
+function dayDiffLabel(diff: number, language = "en"): string {
+  if (diff === 0) return language === "zh" ? "今天" : "Today";
+  if (diff === 1) return language === "zh" ? "明天" : "Tomorrow";
+  if (diff === -1) return language === "zh" ? "昨天" : "Yesterday";
+  return `${diff > 0 ? "+" : ""}${diff}${language === "zh" ? "天" : "d"}`;
 }

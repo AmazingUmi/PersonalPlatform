@@ -1,3 +1,5 @@
+import { HelpPopover } from "../../shared/ui/HelpPopover";
+import { useI18n } from "../../shared/i18n";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useAppDisplayName } from "../../shared/PresentationContext";
@@ -12,6 +14,7 @@ import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { useAsync } from "../../shared/useAsync";
 import {
   MOODS,
+  moodMeta,
   createNote,
   createTag,
   deleteNote,
@@ -79,6 +82,7 @@ function formStateFromNote(note: NoteView): NoteFormState {
  * occurredAt), value = update.
  */
 function NoteEditorForm({ note }: { note: NoteView | null }) {
+  const { t, language } = useI18n();
   const navigate = useNavigate();
   const isEdit = note !== null;
   const [form, setForm] = useState<NoteFormState>(() =>
@@ -160,53 +164,53 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
   return (
     <>
       <PixelWindow
-        title={isEdit ? "Edit Note" : "New Note"}
+        title={isEdit ? t("Edit Note", "编辑笔记") : t("New Note", "新笔记")}
         icon="file"
         className="notes-editor"
         headingLevel={2}
       >
-        <form className="px-form" onSubmit={submit} aria-label={isEdit ? "Edit note" : "Create note"}>
+        <form className="px-form" onSubmit={submit} aria-label={isEdit ? t("Edit note", "编辑笔记") : t("Create note", "创建笔记")}>
           <label className="px-form__row">
-            <span className="px-form__label">Title</span>
+            <span className="px-form__label">{t("Title", "标题")}</span>
             <PixelInput
               value={form.title}
               onChange={(e) => set("title", e.target.value)}
-              aria-label="Note title"
-              placeholder="Optional"
+              aria-label={t("Note title", "笔记标题")}
+              placeholder={t("Optional", "选填")}
               autoFocus
             />
           </label>
           <div className="px-form__grid">
             <label className="px-form__row">
-              <span className="px-form__label">Occurred At</span>
+              <span className="px-form__label">{t("Occurred At", "记录时间")}</span>
               <PixelInput
                 type="datetime-local"
                 value={form.occurredAt}
                 onChange={(e) => set("occurredAt", e.target.value)}
-                aria-label="Occurred at"
+                aria-label={t("Occurred at", "记录时间")}
               />
             </label>
             <label className="px-form__row">
-              <span className="px-form__label">Mood</span>
+              <span className="px-form__label">{t("Mood", "心情")}</span>
               <select
                 className="px-select"
                 value={form.mood}
                 onChange={(e) => set("mood", e.target.value)}
-                aria-label="Mood"
+                aria-label={t("Mood", "心情")}
               >
-                <option value="">None</option>
+                <option value="">{t("None", "无")}</option>
                 {MOODS.map((mood) => (
                   <option key={mood.value} value={mood.value}>
-                    {mood.label}
+                    {moodMeta(mood.value, language).label}
                   </option>
                 ))}
               </select>
             </label>
           </div>
           <div className="px-form__row">
-            <span className="px-form__label">Tags</span>
+            <span className="px-form__label">{t("Tags", "标签")}</span>
             {tagList.loading ? (
-              <p className="px-form__hint">Loading tags…</p>
+              <p className="px-form__hint">{t("Loading tags…", "正在加载标签…")}</p>
             ) : allTags.length > 0 ? (
               <div className="notes-editor__tags">
                 {allTags.map((tag) => (
@@ -215,7 +219,7 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
                     type="button"
                     className="px-chip"
                     aria-pressed={form.tagIds.includes(tag.id)}
-                    aria-label={`Toggle tag ${tag.name}`}
+                    aria-label={t(`Toggle tag ${tag.name}`, `切换标签 ${tag.name}`)}
                     onClick={() => toggleTag(tag.id)}
                   >
                     {tag.name}
@@ -223,7 +227,7 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
                 ))}
               </div>
             ) : (
-              <p className="px-form__hint">No tags yet — type a name below and press Enter.</p>
+              <div>{t("No tags yet", "暂无标签")} <HelpPopover label={t("Tags", "标签")}>{t("Type a name below and press Enter.", "在下方输入名称并按回车创建。")}</HelpPopover></div>
             )}
             <div className="notes-editor__new-tag">
               <PixelInput
@@ -236,8 +240,8 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
                   if (newTagName.trim() === "" || tagCreate.busy) return;
                   void tagCreate.mutate();
                 }}
-                aria-label="New tag name"
-                placeholder="New tag…"
+                aria-label={t("New tag name", "新标签名称")}
+                placeholder={t("New tag…", "新标签…")}
               />
               <PixelButton
                 size="sm"
@@ -245,7 +249,7 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
                 disabled={newTagName.trim() === "" || tagCreate.busy}
                 onClick={() => void tagCreate.mutate()}
               >
-                Add
+                {t("Add", "添加")}
               </PixelButton>
             </div>
             {tagCreate.error ? (
@@ -255,13 +259,13 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
             ) : null}
           </div>
           <label className="px-form__row">
-            <span className="px-form__label">Content</span>
+            <span className="px-form__label">{t("Content", "内容")}</span>
             <textarea
               className="px-textarea notes-editor__content"
               value={form.content}
               onChange={(e) => set("content", e.target.value)}
-              aria-label="Note content"
-              placeholder="What's on your mind?"
+              aria-label={t("Note content", "笔记内容")}
+              placeholder={t("What's on your mind?", "记录此刻的想法")}
               required
             />
           </label>
@@ -272,7 +276,7 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
               checked={form.pinned}
               onChange={(e) => set("pinned", e.target.checked)}
             />
-            Pinned
+            {t("Pinned", "置顶")}
           </label>
           {save.error ? (
             <StatusMessage tone="error">
@@ -288,22 +292,22 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
                 onClick={() => setConfirmingDelete(true)}
                 disabled={save.busy}
               >
-                <PixelIcon name="trash" /> Delete
+                <PixelIcon name="trash" /> {t("Delete", "删除")}
               </PixelButton>
             ) : null}
             <PixelButton variant="secondary" size="sm" onClick={() => navigate("/notes")} disabled={save.busy}>
-              Cancel
+              {t("Cancel", "取消")}
             </PixelButton>
             <PixelButton type="submit" size="sm" disabled={contentBlank || save.busy}>
-              {save.busy ? "Saving…" : isEdit ? "Save changes" : "Create note"}
+              {save.busy ? t("Saving…", "保存中…") : isEdit ? t("Save changes", "保存修改") : t("Create note", "创建笔记")}
             </PixelButton>
           </div>
         </form>
       </PixelWindow>
       {confirmingDelete ? (
         <ConfirmDialog
-          title="Delete note"
-          message="Delete this note? This cannot be undone."
+          title={t("Delete note", "删除笔记")}
+          message={t("Delete this note? This cannot be undone.", "删除这条笔记？此操作无法撤销。")}
           busy={remove.busy}
           onCancel={() => setConfirmingDelete(false)}
           onConfirm={async () => {
@@ -320,6 +324,7 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
 
 /** /notes/new (id absent) and /notes/:id (edit) share this page shell. */
 export function NoteEditorPage() {
+  const { t } = useI18n();
   const displayName = useAppDisplayName({ id: "notes", name: "Notes" });
   const { id } = useParams();
   const isEdit = Boolean(id);
@@ -328,26 +333,26 @@ export function NoteEditorPage() {
   return (
     <div className="page" data-app="notes">
       <header className="page-header">
-        <h1 className="page-header__title">{isEdit ? "Edit Note" : "New Note"}</h1>
+        <h1 className="page-header__title">{isEdit ? t("Edit Note", "编辑笔记") : t("New Note", "新笔记")}</h1>
         <p className="page-header__subtitle">{displayName}</p>
         <div className="page-header__actions">
           <Link to="/notes" className="px-button px-button--secondary px-button--sm">
-            <PixelIcon name="back" /> Notes
+            <PixelIcon name="back" /> {t("Notes", "笔记")}
           </Link>
         </div>
       </header>
 
       {isEdit && note.loading ? (
-        <LoadingState label="Loading note…" />
+        <LoadingState label={t("Loading note…", "正在加载笔记…")} />
       ) : isEdit && note.error ? (
         <StatusMessage tone="error">
           <p>{note.error}</p>
           <div className="page-header__actions">
             <PixelButton size="sm" variant="secondary" onClick={note.reload}>
-              Retry
+              {t("Retry", "重试")}
             </PixelButton>
             <Link to="/notes" className="px-button px-button--secondary px-button--sm">
-              Back to Notes
+              {t("Back to Notes", "返回笔记")}
             </Link>
           </div>
         </StatusMessage>

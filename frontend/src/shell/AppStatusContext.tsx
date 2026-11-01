@@ -1,3 +1,4 @@
+import { useI18n } from "../shared/i18n";
 import {
   createContext,
   useCallback,
@@ -92,7 +93,21 @@ export function AppStatusProvider({ modules, children }: { modules: FrontendAppM
 
 /** Chips for one app (empty array when unknown/failed/not provided). */
 export function useAppStatuses(): AppStatusMap {
-  return useContext(AppStatusContext) ?? EMPTY_STATUS;
+  const statuses = useContext(AppStatusContext) ?? EMPTY_STATUS;
+  const { language } = useI18n();
+  return useMemo(() => {
+    if (language === "en") return statuses;
+    return new Map([...statuses].map(([appId, chips]) => [appId, chips.map(chip => {
+      if (appId === "tasks" && chip.id === "today") return { ...chip, title: `今天有 ${chip.label} 个到期任务` };
+      if (appId === "focus" && chip.id === "running") return { ...chip, title: "专注计时正在进行" };
+      if (appId === "clock" && chip.id === "next-alarm") {
+        const days: Record<string, string> = { MON: "周一", TUE: "周二", WED: "周三", THU: "周四", FRI: "周五", SAT: "周六", SUN: "周日", TODAY: "今天", TOMORROW: "明天" };
+        const label = chip.label.replace(/^(MON|TUE|WED|THU|FRI|SAT|SUN|TODAY|TOMORROW)\b/i, day => days[day.toUpperCase()]!);
+        return { ...chip, label, title: `下次闹钟 ${label}` };
+      }
+      return chip;
+    })]));
+  }, [statuses, language]);
 }
 
 /** Structural equality so unchanged refreshes don't re-render the chrome. */

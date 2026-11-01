@@ -1,3 +1,7 @@
+import { widgetTitle } from "../shared/localizedMetadata";
+import { localizeError } from "../shared/localizeError";
+import { useI18n } from "../shared/i18n";
+import { HelpPopover } from "../shared/ui/HelpPopover";
 import {
   useCallback,
   useEffect,
@@ -158,17 +162,18 @@ interface CardFeedback {
 export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentation?: PresentationOverrides }) {
   const navigate = useNavigate();
   const modules = enabledAppModules(apps);
+  const { t, language } = useI18n();
   const available = useMemo(() => resolveWidgets(modules), [modules]);
   const routesById = useMemo(() => new Map(apps.map((app) => [app.id, app.route])), [apps]);
   const presentations = useMemo(
-    () => new Map(apps.map((app) => [app.id, resolvePresentation(app, presentation ?? {})])),
-    [apps, presentation],
+    () => new Map(apps.map((app) => [app.id, resolvePresentation(app, presentation ?? {}, language)])),
+    [apps, presentation, language],
   );
 
   const [parsed, setParsed] = useState<ParsedDashboardLayout | "loading">("loading");
   const [editMode, setEditMode] = useState(false);
   const [draft, setDraft] = useState<DraftLayout | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<unknown>(null);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [canvasWidth, setCanvasWidth] = useState(0);
   const [activeDrag, setActiveDrag] = useState<DragPreview | null>(null);
@@ -216,7 +221,7 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
         setParsed({ kind: "v2", items: layout.items, hidden: layout.hidden });
         return true;
       } catch (error) {
-        setSaveError(error instanceof Error ? error.message : String(error));
+        setSaveError(error);
         return false;
       }
     });
@@ -639,10 +644,10 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
     return (
       <div className="page">
         <header className="page-header">
-          <h1 className="page-header__title">Dashboard</h1>
-          <p className="page-header__subtitle">System overview</p>
+          <h1 className="page-header__title">{t("Dashboard", "仪表盘")}</h1>
+          <HelpPopover label={t("Dashboard", "仪表盘")}>{t("System overview", "查看各应用概况，可编辑组件的位置和大小。")}</HelpPopover>
         </header>
-        <LoadingState label="Loading widgets…" />
+        <LoadingState label={t("Loading widgets…", "正在加载组件…")} />
       </div>
     );
   }
@@ -667,13 +672,11 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
     <div className="page">
       <header className="page-header page-header--dashboard">
         <div className="page-header__heading">
-          <h1 className="page-header__title">
-            Dashboard
-            {/* Modular-apps glyph: three pixel squares standing for the app
+          <h1 className="page-header__title">{t("Dashboard", "仪表盘")} {/* Modular-apps glyph: three pixel squares standing for the app
              * modules this dashboard composes (purely decorative). */}
             <span className="page-header__glyph" aria-hidden="true" />
           </h1>
-          <p className="page-header__subtitle">{editMode ? "Edit mode · drag, resize, hide" : "System overview"}</p>
+          <div className="page-header__subtitle">{editMode && <span>{t("Edit mode", "编辑模式")}</span>}<HelpPopover label={t("Dashboard layout", "仪表盘布局")}>{t("Edit mode · drag, resize, hide", "进入编辑模式后，可拖动、调整大小或隐藏组件。")}</HelpPopover></div>
         </div>
         <div className="page-header__actions">
           {editMode ? (
@@ -686,42 +689,36 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
                 onClick={() => setResetConfirmOpen(true)}
                 disabled={available.length === 0}
               >
-                <PixelIcon name="refresh" /> Reset Layout
-              </PixelButton>
-              <PixelButton size="sm" onClick={() => void finishEditing()}>
-                Done
-              </PixelButton>
+                <PixelIcon name="refresh" /> {t("Reset Layout", "重置布局")} </PixelButton>
+              <PixelButton size="sm" onClick={() => void finishEditing()}>{t("Done", "完成")} </PixelButton>
             </>
           ) : (
             <PixelButton size="sm" onClick={startEditing} disabled={available.length === 0}>
-              <PixelIcon name="grip" /> Edit Layout
-            </PixelButton>
+              <PixelIcon name="grip" /> {t("Edit Layout", "编辑布局")} </PixelButton>
           )}
         </div>
       </header>
       {resetConfirmOpen ? (
         <ConfirmDialog
-          title="Reset dashboard layout?"
-          message="This restores default widget positions and sizes."
-          confirmLabel="Reset Layout"
+          title={t("Reset dashboard layout?", "重置仪表盘布局？")}
+          message={t("This restores default widget positions and sizes.", "这将恢复组件的默认位置和大小。")}
+          confirmLabel={t("Reset Layout", "重置布局")}
           onConfirm={() => void performReset()}
           onCancel={() => setResetConfirmOpen(false)}
         />
       ) : null}
-      {saveError && (
+      {saveError !== null && (
         <StatusMessage tone="error">
-          <p>Layout save failed: {saveError}</p>
+          <p>{t("Layout save failed:", "布局保存失败：")} {localizeError(saveError, language)}</p>
         </StatusMessage>
       )}
       {visible.length === 0 && hidden.length === 0 ? (
         <EmptyState
           icon="apps"
-          title="No widgets available"
-          description="Enable apps in the App Center to populate the dashboard."
+          title={t("No widgets available", "暂无组件")}
+          description={<HelpPopover label={t("Dashboard widgets", "仪表盘组件")}>{t("Enable apps in the App Center to populate the dashboard.", "在应用中心启用应用后，即可在仪表盘查看组件。")}</HelpPopover>}
           action={
-            <Link to="/apps" className="px-button px-button--primary px-button--md">
-              Open App Center
-            </Link>
+            <Link to="/apps" className="px-button px-button--primary px-button--md">{t("Open App Center", "打开应用中心")} </Link>
           }
         />
       ) : (
@@ -768,7 +765,7 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
                       onNavigate={openWidget}
                       errorFallback
                     >
-                      <p className="dashboard-widget-error">Widget failed to render.</p>
+                      <p className="dashboard-widget-error">{t("Widget failed to render.", "组件显示失败。")}</p>
                     </DashboardCard>
                   }
                 >
@@ -802,12 +799,12 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
       )}
 
       {editMode ? (
-        <section className="dashboard-hidden" aria-label="Hidden widgets">
+        <section className="dashboard-hidden" aria-label={t("Hidden widgets", "隐藏的组件")}>
           {hidden.length === 0 ? (
-            <span>No hidden widgets.</span>
+            <span>{t("No hidden widgets.", "没有隐藏的组件。")}</span>
           ) : (
             <>
-              <span>Hidden widgets:</span>
+              <span>{t("Hidden widgets:", "隐藏的组件：")}</span>
               <span className="px-chips">
                 {hidden.map((resolved) => (
                   <button
@@ -817,8 +814,8 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
                     onClick={() => showWidget(widgetKey(resolved))}
                   >
                     <PixelIcon name="eyeOff" />
-                    <span>{resolved.widget.title}</span>
-                    <span className="px-chip__count">Show</span>
+                    <span>{widgetTitle(resolved.appId, resolved.widget.id, resolved.widget.title, language)}</span>
+                    <span className="px-chip__count">{t("Show", "显示")}</span>
                   </button>
                 ))}
               </span>
@@ -827,7 +824,7 @@ export function Dashboard({ apps, presentation }: { apps: AppInfo[]; presentatio
         </section>
       ) : hidden.length > 0 ? (
         <p className="dashboard-hidden">
-          <span>{hidden.length} widget(s) hidden.</span>
+          <span>{hidden.length} {t("widget(s) hidden.", "个组件已隐藏。")}</span>
         </p>
       ) : null}
     </div>
@@ -897,6 +894,8 @@ function DashboardCard({
   errorFallback,
   children,
 }: DashboardCardProps) {
+  const { t, language } = useI18n();
+  const title = widgetTitle(resolved.appId, resolved.widget.id, resolved.widget.title, language);
   const key = widgetKey(resolved);
   const isResizing = resizing !== undefined;
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
@@ -938,7 +937,7 @@ function DashboardCard({
 
   const card = (
     <PixelWindow
-      title={resolved.widget.title}
+      title={title}
       icon={errorFallback ? "warning" : appIconName(resolved.appId)}
       accent={errorFallback ? "danger" : accent}
       data-widget-key={key}
@@ -947,7 +946,7 @@ function DashboardCard({
           <button
             type="button"
             className="drag-handle"
-            aria-label={`Move ${resolved.widget.title}`}
+            aria-label={t(`Move ${title}`, `移动${title}`)}
             {...attributes}
             {...listeners}
           >
@@ -957,7 +956,7 @@ function DashboardCard({
       }
       actions={
         onHide ? (
-          <PixelButton size="sm" variant="ghost" onClick={onHide} aria-label={`Hide ${resolved.widget.title}`}>
+          <PixelButton size="sm" variant="ghost" onClick={onHide} aria-label={t(`Hide ${title}`, `隐藏${title}`)}>
             <PixelIcon name="eyeOff" />
           </PixelButton>
         ) : undefined
@@ -994,7 +993,7 @@ function DashboardCard({
             role="button"
             tabIndex={0}
             className="dashboard-card__hit"
-            aria-label={`Open ${resolved.widget.title}`}
+            aria-label={t(`Open ${title}`, `打开${title}`)}
             onClick={(event) => {
               if (isInteractiveTarget(event.target)) return;
               onNavigate(resolved);
@@ -1023,12 +1022,12 @@ function DashboardCard({
           {/* Current size announced on focus (a button role carries no value
            * semantics, so the state lives in the described-by text). */}
           <span id={`resize-status-${key.replace(/[^a-zA-Z0-9_-]/g, "-")}`} className="visually-hidden">
-            {size.w} by {size.h} grid units
+            {size.w} {t("by", "×")} {size.h} {t("grid units", "网格单位")}
           </span>
           <button
             type="button"
             className="resize-handle"
-            aria-label={`Resize ${resolved.widget.title}`}
+            aria-label={t(`Resize ${title}`, `调整${title}大小`)}
             aria-describedby={`resize-status-${key.replace(/[^a-zA-Z0-9_-]/g, "-")}`}
             disabled={resizeLocked}
             onPointerDown={(event) => onResizeStart(key, event)}

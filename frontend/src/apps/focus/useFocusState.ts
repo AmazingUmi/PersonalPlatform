@@ -1,3 +1,5 @@
+import { useI18n } from "../../shared/i18n";
+import { localizeError } from "../../shared/localizeError";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../../shell/AuthContext";
 import { useFocusAlerts } from "./useFocusAlerts";
@@ -58,6 +60,7 @@ export function useFocusState(): {
   dismissCompletion: () => void;
   alerts: ReturnType<typeof useFocusAlerts>;
 } {
+  const { language } = useI18n();
   const { user } = useAuth();
   const userId = user?.id ?? null;
   const alerts = useFocusAlerts(userId);
@@ -69,7 +72,7 @@ export function useFocusState(): {
   identityRef.current = userId;
   const [state, setState] = useState<FocusState | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
   const [displayNow, setDisplayNow] = useState(0);
 
@@ -146,7 +149,7 @@ export function useFocusState(): {
       // A background failure is silent only when there is valid state to
       // keep displaying; it must not strand a superseded initial load.
       if (mode === "foreground" || stateRef.current === null) {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(err);
       }
     } finally {
       if (current()) setLoading(false);
@@ -283,7 +286,7 @@ export function useFocusState(): {
         applyState(healed);
         setError(null);
       } else {
-        setError(err instanceof Error ? err.message : String(err));
+        setError(err);
       }
     } finally {
       if (current()) {
@@ -305,5 +308,5 @@ export function useFocusState(): {
     return Number.isFinite(active.remainingSeconds) ? Math.max(0, active.remainingSeconds) : 0;
   }, [active, displayNow]);
 
-  return { state, loading, error, busy, displayNow, remainingSeconds, dispatch, reload, completion, dismissCompletion: () => setCompletion(null), alerts };
+  return { state, loading, error: error ? localizeError(error, language) : null, busy, displayNow, remainingSeconds, dispatch, reload, completion, dismissCompletion: () => setCompletion(null), alerts };
 }

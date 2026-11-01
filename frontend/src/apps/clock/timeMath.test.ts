@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  dateLine,
   formatOffsetDiff,
   formatRepeatLabel,
   formatZoneTime,
@@ -169,4 +170,15 @@ describe("alarm scheduling", () => {
     expect(formatRepeatLabel([5, 1, 2, 3, 4])).toBe("MON TUE WED THU FRI");
     expect(formatRepeatLabel([6, 0])).toBe("SUN SAT");
   });
+});
+
+it("localizes display dates, units and alarm repeat labels without changing clock math", () => {
+  const date = new Date(2026, 7, 31, 19, 26, 42);
+  expect(dateLine(date, "zh-CN")).toEqual({ monthDay: "8月31日", year: "2026年" });
+  expect(weekdayLabel(date, "zh")).toBe("周一");
+  expect(humanDuration(84 * 60_000, "zh")).toBe("1小时 24分");
+  expect(formatOffsetDiff(330, "zh")).toBe("+5小时30分");
+  expect(formatRepeatLabel([1, 3, 5], "zh")).toBe("周一 周三 周五");
+  expect(formatRepeatLabel([], "zh")).toBe("仅一次");
+  expect(timeParts(date).hours24).toBe("19");
 });

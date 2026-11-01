@@ -1,5 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { I18nProvider, useI18n } from "../shared/i18n";
+import { DataManagementPanel } from "./DataManagementPanel";
 import { Settings } from "./Settings";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import * as api from "../shared/api";
@@ -34,6 +36,15 @@ function chooseFile(payload: unknown = { type: "personal-platform-data", scope: 
 function LocationControls() {
   const location = useLocation(); const navigate = useNavigate();
   return <><output data-testid="location">{location.search}</output><button onClick={() => navigate(-1)}>Browser back</button><button onClick={() => navigate(1)}>Browser forward</button></>;
+}
+function LanguageSwitch() {
+  const { language, setLanguage } = useI18n();
+  return <button onClick={() => setLanguage(language === "zh" ? "en" : "zh")}>Switch language</button>;
+}
+function renderChinese(section: "data" | "webdav", view = "connection") {
+  return render(<I18nProvider initialLanguage="zh"><MemoryRouter initialEntries={[`/settings?section=${section}&view=${view}`]}>
+    <DataManagementPanel section={section} /><LanguageSwitch />
+  </MemoryRouter></I18nProvider>);
 }
 async function ready(section = "data", view = "connection", extra = "") {
   render(<MemoryRouter initialEntries={[`/settings?section=${section}&view=${view}${extra}`]}><Settings /><LocationControls /></MemoryRouter>);
@@ -395,6 +406,88 @@ describe("Settings data management", () => {
     expect(screen.getByRole("link", { name: "Connection" })).toHaveAttribute("aria-current", "page");
     expect(screen.getByLabelText("WebDAV folder URL")).toBeVisible();
     expect(screen.queryByRole("button", { name: "Back up now" })).not.toBeInTheDocument();
+  });
+
+  it.each(["admin", "user"])("keeps %s data scope permissions and a selected file across language switches", async (userRole) => {
+    role = userRole;
+    renderChinese("data");
+    const scope = screen.getByLabelText("数据范围");
+    expect(within(scope).getAllByRole("option")).toHaveLength(userRole === "admin" ? 2 : 1);
+    if (userRole === "admin") {
+      fireEvent.change(scope, { target: { value: "all" } });
+      expect(screen.getByText(/此备份包含所有用户的应用数据和账号密码散列/)).toBeVisible();
+      fireEvent.change(scope, { target: { value: "own" } });
+    }
+    expect(screen.queryByText(/备份为 JSON 格式/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "帮助：关于数据备份" }));
+    expect(screen.getByRole("dialog", { name: "关于数据备份" })).toHaveTextContent("32 MiB");
+    fireEvent.click(screen.getByRole("button", { name: "关闭帮助" }));
+    expect(screen.getByRole("button", { name: "选择文件" })).toHaveClass("px-button");
+    const file = new File(["{}"], "保留 Original.json", { type: "application/json" });
+    Object.defineProperty(file, "text", { value: async () => "{}" });
+    fireEvent.change(screen.getByLabelText("备份文件"), { target: { files: [file] } });
+    await screen.findByText("已选择：保留 Original.json");
+    fireEvent.click(screen.getByRole("button", { name: "预览合并" }));
+    const preview = await screen.findByTestId("merge-preview");
+    expect(within(preview).getByRole("cell", { name: "任务" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Switch language" }));
+    expect(screen.getByText("Selected: 保留 Original.json")).toBeVisible();
+    expect(screen.getByTestId("merge-preview")).toBeVisible();
+    expect(screen.getByLabelText("Data scope")).toHaveValue("own");
+    expect(within(preview).getByRole("cell", { name: "Tasks" })).toBeVisible();
+    expect(data.importSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("localizes WebDAV help and connection results without clearing credential drafts", async () => {
+    vi.mocked(data.testWebDav).mockResolvedValue({ ok: true });
+    renderChinese("webdav");
+    await screen.findByDisplayValue(config.endpoint);
+    expect(screen.getByRole("option", { name: "每 24 小时" })).toHaveValue("24");
+    expect(screen.queryByRole("link", { name: "坚果云官方说明" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "帮助：连接设置" }));
+    expect(screen.getByRole("link", { name: "坚果云官方说明" })).toHaveAttribute("href", "https://help.jianguoyun.com/?p=3234");
+    fireEvent.click(screen.getByRole("button", { name: "关闭帮助" }));
+    fireEvent.change(screen.getByLabelText("WebDAV 用户名"), { target: { value: "draft@example.com" } });
+    fireEvent.change(screen.getByLabelText("WebDAV 密码或应用授权密码"), { target: { value: "draft-password" } });
+    fireEvent.change(screen.getByLabelText("自动备份"), { target: { value: "6" } });
+    fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
+    await screen.findByText(/连接成功，WebDAV 目录可访问/);
+    fireEvent.click(screen.getByRole("button", { name: "Switch language" }));
+    expect(screen.getByText(/Connection successful. WebDAV directory is reachable/)).toBeVisible();
+    expect(screen.getByLabelText("WebDAV username")).toHaveValue("draft@example.com");
+    expect(screen.getByLabelText("WebDAV password or app token")).toHaveValue("draft-password");
+    expect(screen.getByLabelText("Automatic backup")).toHaveValue("6");
+    expect(data.saveWebDav).not.toHaveBeenCalled();
+    expect(data.testWebDav).toHaveBeenCalledWith({ endpoint: config.endpoint, username: "draft@example.com", password: "draft-password" });
+  });
+
+  it("localizes full backup results and history while keeping filenames and API mode unchanged", async () => {
+    vi.mocked(data.backupWebDav).mockResolvedValue({ status: "created", backup, uploadedBytes: 256, uploadedObjects: 2 });
+    vi.mocked(data.getBackupHistory).mockResolvedValue({ items: [backup] });
+    renderChinese("webdav", "backup");
+    await screen.findByRole("button", { name: "立即备份" });
+    expect(screen.getByText(new Date(config.nextRunAt!).toLocaleString("zh-CN"))).toBeVisible();
+    fireEvent.change(screen.getByLabelText("手动备份方式"), { target: { value: "full" } });
+    fireEvent.click(screen.getByRole("button", { name: "立即备份" }));
+    await screen.findByText("备份已保存：historical.json。已上传 0.3 KiB，共 2 个对象。");
+    expect(data.backupWebDav).toHaveBeenCalledWith("full");
+    fireEvent.click(screen.getByRole("link", { name: "历史" }));
+    expect(screen.getByRole("button", { name: "预览 historical.json 以导入" })).toBeVisible();
+    expect(screen.getByText(/增量 · 我的数据/)).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Switch language" }));
+    expect(screen.getByText("Backup saved: historical.json. Uploaded 0.3 KiB in 2 object(s).")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Download historical.json" })).toBeVisible();
+    expect(screen.getByLabelText("Manual backup mode")).toHaveValue("full");
+  });
+
+  it("updates known backup validation errors on language switch", async () => {
+    renderChinese("data");
+    const text = vi.fn();
+    fireEvent.change(screen.getByLabelText("备份文件"), { target: { files: [{ name: "huge.json", size: data.MAX_SNAPSHOT_BYTES + 1, text }] } });
+    await screen.findByText("备份超过了 32 MiB 的大小限制。");
+    fireEvent.click(screen.getByRole("button", { name: "Switch language" }));
+    expect(screen.getByText("The backup exceeds the 32 MiB limit.")).toBeVisible();
+    expect(text).not.toHaveBeenCalled();
   });
 
 });

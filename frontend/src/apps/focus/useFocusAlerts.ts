@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useI18n } from "../../shared/i18n";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { kindLabel, type FocusHistoryItem } from "./api";
 
 type AlertState = { sound: boolean; volume: number; soundStatus: string; notifications: boolean; notificationStatus: string };
@@ -152,7 +153,7 @@ class AlertController {
     this.permissionEpoch += 1;
     this.update({ notifications: false, notificationStatus: "Browser notifications off" });
   };
-  announce = (session: FocusHistoryItem) => {
+  announce = (session: FocusHistoryItem, language = "en") => {
     if (!this.listeners.size || this.claimed.has(session.id)) return;
     this.claimed.add(session.id);
     if (this.claimed.size > 512) this.claimed.delete(this.claimed.values().next().value!);
@@ -163,8 +164,8 @@ class AlertController {
         this.update({ notifications: false, notificationStatus: notificationStatus() });
         return;
       }
-      const notice = new Notification(`${kindLabel(session.kind)} complete`, {
-        body: "Your timer has finished. Open Focus when you are ready for the next session.",
+      const notice = new Notification(language === "zh" ? `${kindLabel(session.kind, language)}完成` : `${kindLabel(session.kind)} complete`, {
+        body: language === "zh" ? "计时已完成，准备好后打开专注，开始下一阶段。" : "Your timer has finished. Open Focus when you are ready for the next session.",
         tag: `focus:${this.userId}:${session.id}`,
       });
       this.notices.add(notice);
@@ -189,6 +190,9 @@ function forUser(id: string) {
 }
 
 export function useFocusAlerts(userId: string | null) {
+  const { language } = useI18n();
+  const languageRef = useRef(language);
+  languageRef.current = language;
   const controller = userId ? forUser(userId) : null;
   const [, render] = useState(0);
   useEffect(() => {
@@ -198,9 +202,12 @@ export function useFocusAlerts(userId: string | null) {
     document.addEventListener("visibilitychange", refresh);
     return () => { document.removeEventListener("visibilitychange", refresh); unsubscribe(); };
   }, [controller]);
-  const announce = useCallback((session: FocusHistoryItem) => controller?.announce(session), [controller]);
+  const announce = useCallback((session: FocusHistoryItem) => controller?.announce(session, languageRef.current), [controller]);
+  const state = controller?.state ?? { sound: false, volume: 60, soundStatus: "Sound off", notifications: false, notificationStatus: "Sign in to enable alerts" };
   return {
-    ...(controller?.state ?? { sound: false, volume: 60, soundStatus: "Sound off", notifications: false, notificationStatus: "Sign in to enable alerts" }),
+    ...state,
+    soundStatus: alertStatusLabel(state.soundStatus, language),
+    notificationStatus: alertStatusLabel(state.notificationStatus, language),
     setVolume: controller?.setVolume,
     enableSound: controller?.enableSound,
     muteSound: controller?.muteSound,
@@ -209,4 +216,24 @@ export function useFocusAlerts(userId: string | null) {
     disableNotifications: controller?.disableNotifications,
     announce,
   };
+}
+
+function alertStatusLabel(status: string, language: string): string {
+  const labels: Record<string, string> = {
+    "Sound off": "声音已关闭",
+    "Sound unavailable — use Enable sound to retry": "声音不可用，请点击“启用声音”重试",
+    "Sound inactive — use Enable sound to retry": "声音未激活，请点击“启用声音”重试",
+    "Activating sound…": "正在激活声音…",
+    "Sound ready": "声音已就绪",
+    "Sound unavailable in this browser": "当前浏览器不支持声音提醒",
+    "Browser notifications unavailable": "浏览器通知不可用",
+    "Browser permission: granted": "浏览器权限：已允许",
+    "Browser permission: default": "浏览器权限：未设置",
+    "Browser permission: denied": "浏览器权限：已拒绝",
+    "Browser notification permission unavailable": "无法获取浏览器通知权限",
+    "Browser notifications off": "浏览器通知已关闭",
+    "Browser notification could not be shown": "无法显示浏览器通知",
+    "Sign in to enable alerts": "登录后可启用提醒",
+  };
+  return language === "zh" ? labels[status] ?? status : status;
 }

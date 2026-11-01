@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppInfo } from "../shared/api";
+import { I18nProvider } from "../shared/i18n";
 import { AppCenter } from "./AppCenter";
 
 const assetsApp: AppInfo = {
@@ -69,6 +70,20 @@ describe("AppCenter", () => {
     const [path, init] = fetchMock.mock.calls[0]!;
     expect(path).toBe("/api/core/apps/assets/enabled");
     expect(JSON.parse(String(init.body))).toEqual({ enabled: true });
+  });
+
+  it("keeps accent-only customization free of a translated default nickname", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) });
+    vi.stubGlobal("fetch", fetchMock);
+    const changed = vi.fn();
+    render(<I18nProvider initialLanguage="zh"><AppCenter apps={[assetsApp]} presentation={{ assets: { accent: "mint" } }} onChanged={changed} /></I18nProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "自定义资产" }));
+    expect(screen.getByLabelText("应用昵称")).toHaveValue("");
+    expect(screen.getByLabelText("应用昵称")).toHaveAttribute("placeholder", "资产");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(changed).toHaveBeenCalledOnce());
+    const call = fetchMock.mock.calls.find(([url]) => String(url).includes("apps.presentation"));
+    expect(JSON.parse(String(call![1].body))).toEqual({ value: { assets: { accent: "mint" } } });
   });
 
   it("customizes an app nickname and accent through the presentation editor", async () => {

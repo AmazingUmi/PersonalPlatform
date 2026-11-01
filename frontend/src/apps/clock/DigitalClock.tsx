@@ -1,3 +1,4 @@
+import { useI18n } from "../../shared/i18n";
 import { useEffect, useRef } from "react";
 import type { WidgetDensity } from "../../shared/appTypes";
 import { tick } from "../../shared/motion/pixelFeedback";
@@ -62,8 +63,9 @@ function useTickRef(value: string) {
  * the global prefers-reduced-motion override.
  */
 export function DigitalClock({ now, settings, variant, focus, density = "normal" }: DigitalClockProps) {
+  const { t, language, locale } = useI18n();
   const parts = timeParts(now);
-  const date = dateLine(now);
+  const date = dateLine(now, locale);
   const hours = settings.hourFormat === 12 ? parts.hours12 : parts.hours24;
   const compact = density === "compact";
   const hoursRef = useTickRef(hours);
@@ -79,17 +81,17 @@ export function DigitalClock({ now, settings, variant, focus, density = "normal"
         .filter(Boolean)
         .join(" ")}
       role="timer"
-      aria-label={`Current time ${hours}:${parts.minutes}${
-        settings.hourFormat === 12 ? ` ${parts.meridiem}` : ""
+      aria-label={`${t("Current time", "当前时间")} ${hours}:${parts.minutes}${
+        settings.hourFormat === 12 ? ` ${t(parts.meridiem, parts.meridiem === "AM" ? "上午" : "下午")}` : ""
       }`}
     >
       {compact ? null : (
         <div className="clock-digital__top">
           <span className="clock-digital__label">
             {focus ? <span className="clock-digital__focus-dot" aria-hidden="true" /> : null}
-            {focus ? "FOCUS" : "CLOCK"}
+            {focus ? t("FOCUS", "专注") : t("CLOCK", "时钟")}
           </span>
-          <span className="clock-digital__weekday">{weekdayLabel(now)}</span>
+          <span className="clock-digital__weekday">{weekdayLabel(now, language)}</span>
         </div>
       )}
       <div className="clock-digital__time">
@@ -108,12 +110,12 @@ export function DigitalClock({ now, settings, variant, focus, density = "normal"
           </span>
         ) : null}
         {settings.hourFormat === 12 ? (
-          <span className="clock-digital__meridiem">{parts.meridiem}</span>
+          <span className="clock-digital__meridiem">{t(parts.meridiem, parts.meridiem === "AM" ? "上午" : "下午")}</span>
         ) : null}
       </div>
       {focus && !compact ? (
         <div className="clock-digital__focus-line">
-          RUNNING · {focusElapsedClock(focus, now)}
+          {t("RUNNING ·", "进行中 ·")} {focusElapsedClock(focus, now)}
           <span className="clock-digital__focus-title"> {focus.title}</span>
         </div>
       ) : null}
@@ -124,7 +126,7 @@ export function DigitalClock({ now, settings, variant, focus, density = "normal"
       ) : null}
       {focus ? (
         <span className="visually-hidden">
-          Task running for {humanDuration(focusElapsedMs(focus, now))}
+          {t("Task running for", "任务已进行")} {humanDuration(focusElapsedMs(focus, now), language)}
         </span>
       ) : null}
     </div>

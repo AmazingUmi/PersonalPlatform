@@ -1,3 +1,4 @@
+import { useI18n } from "../shared/i18n";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import type { AppInfo } from "../shared/api";
@@ -24,6 +25,7 @@ const PANEL_EXIT_ANIMATION = "mobile-nav-panel-out";
  * behavior is identical across browsers and test DOMs.
  */
 export function MobileNav({ apps, presentation }: { apps: AppInfo[]; presentation?: PresentationOverrides }) {
+  const { t, language } = useI18n();
   const [open, setOpen] = useState(false);
   const [closing, setClosing] = useState(false);
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -91,7 +93,7 @@ export function MobileNav({ apps, presentation }: { apps: AppInfo[]; presentatio
           <button
             type="button"
             className={`mobile-nav__backdrop${closing ? " mobile-nav__backdrop--closing" : ""}`}
-            aria-label="Close menu"
+            aria-label={t("Close menu", "关闭菜单")}
             onClick={requestClose}
             tabIndex={closing ? -1 : undefined}
           />
@@ -99,18 +101,16 @@ export function MobileNav({ apps, presentation }: { apps: AppInfo[]; presentatio
             ref={panelRef}
             className={`mobile-nav__panel${closing ? " mobile-nav__panel--closing" : ""}`}
             role="dialog"
-            aria-label="More apps"
+            aria-label={t("More apps", "更多应用")}
             id="mobile-menu"
           >
             <ul className="mobile-nav__panel-list">
               <li>
                 <NavLink to="/settings" className="mobile-nav__panel-link">
-                  <PixelIcon name="settings" />
-                  Settings
-                </NavLink>
+                  <PixelIcon name="settings" />{t("Settings", "设置")} </NavLink>
               </li>
               {apps.map((app) => {
-                const resolved = resolvePresentation(app, presentation ?? {});
+                const resolved = resolvePresentation(app, presentation ?? {}, language);
                 const chips = statuses.get(app.id) ?? [];
                 return (
                   <li key={app.id}>
@@ -136,14 +136,14 @@ export function MobileNav({ apps, presentation }: { apps: AppInfo[]; presentatio
           </div>
         </>
       ) : null}
-      <nav className="mobile-nav" aria-label="Primary navigation">
+      <nav className="mobile-nav" aria-label={t("Primary navigation", "主导航")}>
         <NavLink to="/" end className="mobile-nav__item">
           <PixelIcon name="dashboard" />
-          <span className="mobile-nav__item-label">Dashboard</span>
+          <span className="mobile-nav__item-label">{t("Dashboard", "仪表盘")}</span>
         </NavLink>
         <NavLink to="/apps" className="mobile-nav__item">
           <PixelIcon name="apps" />
-          <span className="mobile-nav__item-label">Apps</span>
+          <span className="mobile-nav__item-label">{t("Apps", "应用")}</span>
         </NavLink>
         <button
           type="button"
@@ -154,7 +154,7 @@ export function MobileNav({ apps, presentation }: { apps: AppInfo[]; presentatio
           onClick={toggleLauncher}
         >
           <PixelIcon name="menu" />
-          <span className="mobile-nav__item-label">More</span>
+          <span className="mobile-nav__item-label">{t("More", "更多")}</span>
         </button>
       </nav>
     </>

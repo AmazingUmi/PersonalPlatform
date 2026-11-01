@@ -1,3 +1,5 @@
+import { useI18n } from "./i18n";
+import { localizeError } from "./localizeError";
 import { useCallback, useRef, useState } from "react";
 
 export interface MutationState {
@@ -13,8 +15,9 @@ export interface MutationState {
  * and double-submit protection without pulling in a state-management library.
  */
 export function useMutation(fn: () => Promise<unknown>): MutationState {
+  const { language } = useI18n();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const inFlight = useRef(false);
 
   const mutate = useCallback(async () => {
@@ -26,7 +29,7 @@ export function useMutation(fn: () => Promise<unknown>): MutationState {
       await fn();
       return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(err);
       return false;
     } finally {
       inFlight.current = false;
@@ -35,5 +38,5 @@ export function useMutation(fn: () => Promise<unknown>): MutationState {
   }, [fn]);
 
   const clearError = useCallback(() => setError(null), []);
-  return { mutate, busy, error, clearError };
+  return { mutate, busy, error: error === null ? null : localizeError(error, language), clearError };
 }

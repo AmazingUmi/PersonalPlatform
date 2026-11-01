@@ -1,3 +1,4 @@
+import { useI18n } from "../../shared/i18n";
 import type { WidgetDensity } from "../../shared/appTypes";
 import { useAsync } from "../../shared/useAsync";
 import { LoadingState } from "../../shared/ui/LoadingState";
@@ -55,10 +56,11 @@ function moreTodayCount(status: { next: { id: string } | null; today: { remainin
 
 /** Hero date bar: weekday on the left, month-day on the right. */
 function HeroDateBar({ now }: { now: Date }) {
-  const date = dateLine(now);
+  const { language, locale } = useI18n();
+  const date = dateLine(now, locale);
   return (
     <p className="clock-hero__datebar">
-      <span className="clock-hero__weekday">{weekdayLabel(now)}</span>
+      <span className="clock-hero__weekday">{weekdayLabel(now, language)}</span>
       <span className="clock-hero__date">
         {date.monthDay} {date.year}
       </span>
@@ -85,6 +87,7 @@ function HeroAgenda({
   now: Date;
   wide: boolean;
 }) {
+  const { t, language } = useI18n();
   const next = agenda.next;
   const nextAt = next ? new Date(Date.parse(next.startAt)) : null;
   const nextParts = nextAt ? timeParts(nextAt) : null;
@@ -92,39 +95,39 @@ function HeroAgenda({
     <div className="clock-hero__agenda">
       <section className="clock-hero__current">
         <p className="clock-hero__row-label">
-          CURRENT
+          {t("CURRENT", "当前")}
           {focus ? (
             <span className="clock-hero__live">
               <span className="clock-hero__live-dot" aria-hidden="true" />
-              RUNNING
+              {t("RUNNING", "进行中")}
             </span>
           ) : null}
         </p>
         <p className="clock-hero__current-title">
-          {agenda.current ? agenda.current.title : "Nothing running"}
+          {agenda.current ? agenda.current.title : t("Nothing running", "暂无进行中的任务")}
         </p>
         {focus ? (
           wide ? (
             <p className="clock-hero__elapsed">
               <span className="clock-hero__elapsed-time">{focusElapsedClock(focus, now)}</span>
-              <span className="clock-hero__elapsed-label">ELAPSED</span>
+              <span className="clock-hero__elapsed-label">{t("ELAPSED", "已用时间")}</span>
             </p>
           ) : (
             <p className="clock-hero__row-eta">
-              {humanDuration(now.getTime() - Date.parse(focus.startedAt))} elapsed
+              {humanDuration(now.getTime() - Date.parse(focus.startedAt), language)} {t("elapsed", "已用时间")}
             </p>
           )
         ) : null}
       </section>
       <section className="clock-hero__next">
-        <p className="clock-hero__row-label">NEXT</p>
+        <p className="clock-hero__row-label">{t("NEXT", "下一项")}</p>
         <p className="clock-hero__next-title">
-          {next ? next.title : "Nothing scheduled"}
+          {next ? next.title : t("Nothing scheduled", "暂无已安排任务")}
           {next && nextParts ? (
             <span className="clock-hero__row-eta">
               {" "}
-              {nextParts.hours24}:{nextParts.minutes} · in{" "}
-              {humanDuration(Date.parse(next.startAt) - now.getTime())}
+              {nextParts.hours24}:{nextParts.minutes} {t("· in", "· 距开始")}{" "}
+              {humanDuration(Date.parse(next.startAt) - now.getTime(), language)}
             </span>
           ) : null}
         </p>
@@ -146,12 +149,13 @@ function HeroAgenda({
  * keeps control presses from navigating the card.
  */
 export function ClockWidget({ density = "normal" }: { density?: WidgetDensity }) {
+  const { t } = useI18n();
   const { settings, loading, error, reload, save } = useClockSettings();
   const minuteNow = useClockNow(false);
   const { status, focus } = useTasksStatus(minuteNow.getMinutes());
   const faceNow = useClockNow(settings.showSeconds || focus !== null);
 
-  if (loading) return <LoadingState label="Loading…" />;
+  if (loading) return <LoadingState label={t("Loading…", "加载中…")} />;
   if (error) {
     return (
       <div className="widget-fallback">
@@ -159,7 +163,7 @@ export function ClockWidget({ density = "normal" }: { density?: WidgetDensity })
           <p>{error}</p>
         </StatusMessage>
         <button type="button" className="px-button px-button--secondary px-button--sm" onClick={reload}>
-          Retry
+          {t("Retry", "重试")}
         </button>
       </div>
     );
@@ -183,14 +187,14 @@ export function ClockWidget({ density = "normal" }: { density?: WidgetDensity })
       </div>
       {!compact ? (
         <div className="clock-hero__bottom">
-          <div className="px-seg" role="group" aria-label="Clock display mode">
+          <div className="px-seg" role="group" aria-label={t("Clock display mode", "时钟显示方式")}>
             <button
               type="button"
               className="px-seg__btn"
               aria-pressed={settings.displayMode === "digital"}
               onClick={() => setMode("digital")}
             >
-              DIGITAL
+              {t("DIGITAL", "数字")}
             </button>
             <button
               type="button"
@@ -198,11 +202,11 @@ export function ClockWidget({ density = "normal" }: { density?: WidgetDensity })
               aria-pressed={settings.displayMode === "analog"}
               onClick={() => setMode("analog")}
             >
-              ANALOG
+              {t("ANALOG", "指针")}
             </button>
           </div>
           <p className="clock-hero__remaining">
-            {remaining > 0 ? `${remaining} MORE TASKS TODAY` : "NOTHING ELSE TODAY"}
+            {remaining > 0 ? t(`${remaining} MORE TASKS TODAY`, `今天还有 ${remaining} 项任务`) : t("NOTHING ELSE TODAY", "今天没有其他任务")}
             <span className="clock-hero__remaining-arrow" aria-hidden="true" />
           </p>
         </div>

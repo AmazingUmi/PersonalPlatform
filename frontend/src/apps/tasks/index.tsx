@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../shared/api";
+import { useI18n } from "../../shared/i18n";
+import { HelpPopover } from "../../shared/ui/HelpPopover";
 import { useAppDisplayName } from "../../shared/PresentationContext";
 import type { FrontendAppModule, WidgetDensity } from "../../shared/appTypes";
 import { useDebouncedValue } from "../../shared/useDebouncedValue";
@@ -31,26 +33,26 @@ interface Task {
 }
 
 export const PRIORITIES = [
-  { value: 0, label: "Low", tone: "neutral" as BadgeTone },
-  { value: 1, label: "Normal", tone: "info" as BadgeTone },
-  { value: 2, label: "High", tone: "warning" as BadgeTone },
-  { value: 3, label: "Urgent", tone: "danger" as BadgeTone },
+  { value: 0, label: "Low", zh: "低", tone: "neutral" as BadgeTone },
+  { value: 1, label: "Normal", zh: "普通", tone: "info" as BadgeTone },
+  { value: 2, label: "High", zh: "高", tone: "warning" as BadgeTone },
+  { value: 3, label: "Urgent", zh: "紧急", tone: "danger" as BadgeTone },
 ] as const;
 
 const SORT_OPTIONS = [
-  { value: "createdAt", label: "Added" },
-  { value: "updatedAt", label: "Modified" },
-  { value: "startAt", label: "Start" },
-  { value: "dueAt", label: "Deadline" },
-  { value: "priority", label: "Priority" },
-  { value: "title", label: "Title" },
-  { value: "status", label: "Status" },
+  { value: "createdAt", label: "Added", zh: "添加时间" },
+  { value: "updatedAt", label: "Modified", zh: "修改时间" },
+  { value: "startAt", label: "Start", zh: "开始时间" },
+  { value: "dueAt", label: "Deadline", zh: "截止时间" },
+  { value: "priority", label: "Priority", zh: "优先级" },
+  { value: "title", label: "Title", zh: "标题" },
+  { value: "status", label: "Status", zh: "状态" },
 ] as const;
 
 const STATUS_FILTERS = [
-  { value: "", label: "All" },
-  { value: "todo", label: "Todo" },
-  { value: "done", label: "Done" },
+  { value: "", label: "All", zh: "全部" },
+  { value: "todo", label: "Todo", zh: "待办" },
+  { value: "done", label: "Done", zh: "已完成" },
 ] as const;
 
 /** Filter keys that count towards the collapsed Filters-button badge. */
@@ -68,9 +70,9 @@ function isOverdue(task: Task): boolean {
   return task.status !== "done" && task.due_at !== null && new Date(task.due_at).getTime() < Date.now();
 }
 
-function formatDateTime(value: string | null): string {
+function formatDateTime(value: string | null, locale: string): string {
   if (!value) return "—";
-  return new Date(value).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return new Date(value).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" });
 }
 
 /** ISO instant -> value usable by <input type="datetime-local"> in local time. */
@@ -133,6 +135,7 @@ function TaskEditor({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const { t } = useI18n();
   const [form, setForm] = useState<TaskEditorState>(() =>
     task ? editorStateFromTask(task) : emptyEditorState(),
   );
@@ -172,55 +175,55 @@ function TaskEditor({
   return (
     <div className="px-dialog-backdrop" role="presentation">
       <PixelWindow
-        title={task ? "Edit Task" : "New Task"}
+        title={task ? t("Edit Task", "编辑任务") : t("New Task", "新建任务")}
         icon="tasks"
         className="px-dialog px-dialog--form"
         data-testid="task-editor"
       >
-        <form className="px-form" onSubmit={submit} aria-label={task ? "Edit task" : "Create task"}>
+        <form className="px-form" onSubmit={submit} aria-label={task ? t("Edit task", "编辑任务") : t("Create task", "创建任务")}>
           <label className="px-form__row">
-            <span className="px-form__label">Title</span>
+            <span className="px-form__label">{t("Title", "标题")}</span>
             <PixelInput
               value={form.title}
               onChange={(e) => set("title", e.target.value)}
-              aria-label="Task title"
+              aria-label={t("Task title", "任务标题")}
               required
               autoFocus
             />
           </label>
           <label className="px-form__row">
-            <span className="px-form__label">Description</span>
+            <span className="px-form__label">{t("Description", "描述")}</span>
             <textarea
               className="px-textarea"
               value={form.description}
               onChange={(e) => set("description", e.target.value)}
-              aria-label="Task description"
+              aria-label={t("Task description", "任务描述")}
             />
           </label>
           <div className="px-form__grid">
             <label className="px-form__row">
-              <span className="px-form__label">Status</span>
+              <span className="px-form__label">{t("Status", "状态")}</span>
               <select
                 className="px-select"
                 value={form.status}
                 onChange={(e) => set("status", e.target.value)}
-                aria-label="Status"
+                aria-label={t("Status", "状态")}
               >
-                <option value="todo">Todo</option>
-                <option value="done">Done</option>
+                <option value="todo">{t("Todo", "待办")}</option>
+                <option value="done">{t("Done", "已完成")}</option>
               </select>
             </label>
             <label className="px-form__row">
-              <span className="px-form__label">Priority</span>
+              <span className="px-form__label">{t("Priority", "优先级")}</span>
               <select
                 className="px-select"
                 value={form.priority}
                 onChange={(e) => set("priority", Number(e.target.value))}
-                aria-label="Priority"
+                aria-label={t("Priority", "优先级")}
               >
                 {PRIORITIES.map((priority) => (
                   <option key={priority.value} value={priority.value}>
-                    {priority.label}
+                    {t(priority.label, priority.zh)}
                   </option>
                 ))}
               </select>
@@ -228,21 +231,21 @@ function TaskEditor({
           </div>
           <div className="px-form__grid">
             <label className="px-form__row">
-              <span className="px-form__label">Start</span>
+              <span className="px-form__label">{t("Start", "开始")}</span>
               <PixelInput
                 type="datetime-local"
                 value={form.startAt}
                 onChange={(e) => set("startAt", e.target.value)}
-                aria-label="Start time"
+                aria-label={t("Start time", "开始时间")}
               />
             </label>
             <label className="px-form__row">
-              <span className="px-form__label">Deadline</span>
+              <span className="px-form__label">{t("Deadline", "截止时间")}</span>
               <PixelInput
                 type="datetime-local"
                 value={form.dueAt}
                 onChange={(e) => set("dueAt", e.target.value)}
-                aria-label="Deadline"
+                aria-label={t("Deadline", "截止时间")}
               />
             </label>
           </div>
@@ -253,10 +256,9 @@ function TaskEditor({
           ) : null}
           <div className="px-dialog__actions">
             <PixelButton variant="secondary" size="sm" onClick={onClose} disabled={save.busy}>
-              Cancel
-            </PixelButton>
+              {t("Cancel", "取消")}</PixelButton>
             <PixelButton type="submit" size="sm" disabled={!form.title.trim() || save.busy}>
-              {save.busy ? "Saving…" : task ? "Save changes" : "Create task"}
+              {save.busy ? t("Saving…", "正在保存…") : task ? t("Save changes", "保存修改") : t("Create task", "创建任务")}
             </PixelButton>
           </div>
         </form>
@@ -266,6 +268,7 @@ function TaskEditor({
 }
 
 function TasksPage() {
+  const { t, locale } = useI18n();
   const displayName = useAppDisplayName({ id: "tasks", name: "Tasks" });
   const [searchParams, setSearchParams] = useSearchParams();
   const [reloadKey, setReloadKey] = useState(0);
@@ -345,7 +348,7 @@ function TasksPage() {
         <h1 className="page-header__title">
           <PixelIcon name={appIconName("tasks")} size={20} className="page-header__app-icon" aria-hidden="true" /> {displayName}
         </h1>
-        <p className="page-header__subtitle">Personal task manager</p>
+        <HelpPopover label={t("About tasks", "关于任务")}><p>{t("Personal task manager", "管理个人任务、优先级与截止时间。")}</p></HelpPopover>
         <div className="page-header__actions">
           <PixelButton
             size="sm"
@@ -353,32 +356,29 @@ function TasksPage() {
             aria-expanded={filtersOpen}
             onClick={() => setFiltersOpen((open) => !open)}
           >
-            <PixelIcon name="search" /> Filters
-            {activeFilterCount > 0 ? <PixelBadge tone="warning">{activeFilterCount}</PixelBadge> : null}
+            <PixelIcon name="search" /> {t("Filters", "筛选")}{activeFilterCount > 0 ? <PixelBadge tone="warning">{activeFilterCount.toLocaleString(locale)}</PixelBadge> : null}
           </PixelButton>
           <PixelButton size="sm" onClick={() => setEditorFor(null)}>
-            <PixelIcon name="plus" /> New Task
-          </PixelButton>
+            <PixelIcon name="plus" /> {t("New Task", "新建任务")}</PixelButton>
         </div>
       </header>
 
       {filtersOpen ? (
-      <PixelWindow title="Filters" icon="search" className="assets-filters" actions={
+      <PixelWindow title={t("Filters", "筛选")} icon="search" className="assets-filters" actions={
         <PixelButton variant="ghost" size="sm" onClick={resetFilters} disabled={activeFilterCount === 0}>
-          Reset
-        </PixelButton>
+          {t("Reset", "重置")}</PixelButton>
       }>
         <div className="assets-filters__row">
           <div className="assets-search">
             <PixelIcon name="search" />
             <PixelInput
-              placeholder="Search tasks…"
+              placeholder={t("Search tasks…", "搜索任务…")}
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
-              aria-label="Search tasks"
+              aria-label={t("Search tasks", "搜索任务")}
             />
           </div>
-          <div className="px-seg" role="group" aria-label="Filter tasks by status">
+          <div className="px-seg" role="group" aria-label={t("Filter tasks by status", "按状态筛选任务")}>
             {STATUS_FILTERS.map((filter) => (
               <button
                 key={filter.value}
@@ -387,7 +387,7 @@ function TasksPage() {
                 aria-pressed={statusFilter === filter.value}
                 onClick={() => setParam("status", filter.value)}
               >
-                {filter.label}
+                {t(filter.label, filter.zh)}
               </button>
             ))}
           </div>
@@ -395,48 +395,48 @@ function TasksPage() {
             className="px-select"
             value={searchParams.get("priority") ?? ""}
             onChange={(e) => setParam("priority", e.target.value)}
-            aria-label="Filter by priority"
+            aria-label={t("Filter by priority", "按优先级筛选")}
           >
-            <option value="">All priorities</option>
+            <option value="">{t("All priorities", "全部优先级")}</option>
             {PRIORITIES.map((priority) => (
               <option key={priority.value} value={priority.value}>
-                {priority.label}
+                {t(priority.label, priority.zh)}
               </option>
             ))}
           </select>
         </div>
         <div className="assets-filters__row">
           <label className="assets-filters__date">
-            <span>Due from</span>
+            <span>{t("Due from", "截止日期从")}</span>
             <PixelInput
               type="date"
               value={searchParams.get("dueAfter")?.slice(0, 10) ?? ""}
               onChange={(e) =>
                 setParam("dueAfter", e.target.value ? new Date(`${e.target.value}T00:00`).toISOString() : "")
               }
-              aria-label="Due after"
+              aria-label={t("Due after", "截止日期起点")}
             />
           </label>
           <label className="assets-filters__date">
-            <span>to</span>
+            <span>{t("to", "至")}</span>
             <PixelInput
               type="date"
               value={searchParams.get("dueBefore")?.slice(0, 10) ?? ""}
               onChange={(e) =>
                 setParam("dueBefore", e.target.value ? new Date(`${e.target.value}T23:59`).toISOString() : "")
               }
-              aria-label="Due before"
+              aria-label={t("Due before", "截止日期终点")}
             />
           </label>
           <select
             className="px-select"
             value={sortBy}
             onChange={(e) => setParam("sortBy", e.target.value)}
-            aria-label="Sort by"
+            aria-label={t("Sort by", "排序依据")}
           >
             {SORT_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>
-                Sort: {option.label}
+                {t(`Sort: ${option.label}`, `排序：${option.zh}`)}
               </option>
             ))}
           </select>
@@ -444,43 +444,40 @@ function TasksPage() {
             size="sm"
             variant="secondary"
             onClick={() => setParam("order", order === "asc" ? "desc" : "asc")}
-            aria-label={`Sort order: ${order}. Click to switch.`}
+            aria-label={t(`Sort order: ${order}. Click to switch.`, `排序方向：${order === "asc" ? "升序" : "降序"}，点击切换。`)}
           >
             <PixelIcon name={order === "asc" ? "up" : "down"} />
-            {order === "asc" ? "Asc" : "Desc"}
+            {order === "asc" ? t("Asc", "升序") : t("Desc", "降序")}
           </PixelButton>
           <span className="assets-filters__spacer" />
           <PixelButton size="sm" variant="secondary" onClick={() => setFiltersOpen(false)}>
-            Close
-          </PixelButton>
+            {t("Close", "关闭")}</PixelButton>
         </div>
       </PixelWindow>
       ) : null}
 
       {tasks.loading ? (
-        <LoadingState label="Loading tasks…" />
+        <LoadingState label={t("Loading tasks…", "正在加载任务…")} />
       ) : tasks.error ? (
         <StatusMessage tone="error">
           <p>{tasks.error}</p>
           <PixelButton size="sm" variant="secondary" onClick={tasks.reload}>
-            Retry
-          </PixelButton>
+            {t("Retry", "重试")}</PixelButton>
         </StatusMessage>
       ) : items.length === 0 && !hasFilters ? (
         <EmptyState
           icon="tasks"
-          title="No tasks yet"
-          description="Create your first task to start tracking your work."
+          title={t("No tasks yet", "暂无任务")}
+          description={t("Create your first task to start tracking your work.", "创建第一个任务，开始记录工作。")}
           action={
             <PixelButton size="sm" onClick={() => setEditorFor(null)}>
-              <PixelIcon name="plus" /> New Task
-            </PixelButton>
+              <PixelIcon name="plus" /> {t("New Task", "新建任务")}</PixelButton>
           }
         />
       ) : items.length === 0 ? (
-        <EmptyState icon="search" title="No matching tasks" description="Switch the filters to see other tasks." />
+        <EmptyState icon="search" title={t("No matching tasks", "没有匹配的任务")} description={t("Switch the filters to see other tasks.", "调整筛选条件以查看其他任务。")} />
       ) : (
-        <PixelWindow title="Task Log" icon="tasks" className="task-window">
+        <PixelWindow title={t("Task Log", "任务列表")} icon="tasks" className="task-window">
           <ul className="task-list">
             {items.map((task) => {
               const done = task.status === "done";
@@ -492,21 +489,21 @@ function TasksPage() {
                     className="px-checkbox"
                     checked={done}
                     onChange={() => void setStatus(task, done ? "todo" : "done")}
-                    aria-label={done ? `Mark "${task.title}" as todo` : `Mark "${task.title}" as done`}
+                    aria-label={done ? t(`Mark "${task.title}" as todo`, `将“${task.title}”标为待办`) : t(`Mark "${task.title}" as done`, `将“${task.title}”标为已完成`)}
                   />
                   <span className="task__body">
                     <span className="task__title">{task.title}</span>
                     <span className="task__meta">
-                      <PixelBadge tone={priority.tone}>{priority.label}</PixelBadge>
+                      <PixelBadge tone={priority.tone}>{t(priority.label, priority.zh)}</PixelBadge>
                       {task.start_at ? (
-                        <PixelBadge tone="neutral">Start {formatDateTime(task.start_at)}</PixelBadge>
+                        <PixelBadge tone="neutral">{t("Start", "开始")} {formatDateTime(task.start_at, locale)}</PixelBadge>
                       ) : null}
                       {task.due_at ? (
                         <PixelBadge tone={isOverdue(task) ? "danger" : "neutral"}>
-                          Due {formatDateTime(task.due_at)}
+                          {t("Due", "截止")} {formatDateTime(task.due_at, locale)}
                         </PixelBadge>
                       ) : null}
-                      {done ? <PixelBadge tone="success">Done</PixelBadge> : null}
+                      {done ? <PixelBadge tone="success">{t("Done", "已完成")}</PixelBadge> : null}
                     </span>
                   </span>
                   <span className="task__side">
@@ -514,7 +511,7 @@ function TasksPage() {
                       variant="ghost"
                       size="sm"
                       className="px-button--icon"
-                      aria-label={`Edit task "${task.title}"`}
+                      aria-label={t(`Edit task "${task.title}"`, `编辑任务“${task.title}”`)}
                       onClick={() => setEditorFor(task)}
                     >
                       <PixelIcon name="edit" />
@@ -523,7 +520,7 @@ function TasksPage() {
                       variant="ghost"
                       size="sm"
                       className="px-button--icon task__delete"
-                      aria-label={`Delete task "${task.title}"`}
+                      aria-label={t(`Delete task "${task.title}"`, `删除任务“${task.title}”`)}
                       onClick={() => setDeleting(task)}
                     >
                       <PixelIcon name="trash" />
@@ -548,8 +545,8 @@ function TasksPage() {
       ) : null}
       {deleting ? (
         <ConfirmDialog
-          title="Delete task"
-          message={`Delete "${deleting.title}"? This cannot be undone.`}
+          title={t("Delete task", "删除任务")}
+          message={t(`Delete "${deleting.title}"? This cannot be undone.`, `删除“${deleting.title}”？此操作无法撤销。`)}
           busy={remove.busy}
           onCancel={() => setDeleting(null)}
           onConfirm={async () => {
@@ -572,6 +569,7 @@ const pad = (value: number) => String(value).padStart(2, "0");
  * the list page.
  */
 function TaskDetailPage() {
+  const { t, locale } = useI18n();
   const { id } = useParams();
   const [reloadKey, setReloadKey] = useState(0);
   const [editing, setEditing] = useState(false);
@@ -584,7 +582,7 @@ function TaskDetailPage() {
   if (task.loading) {
     return (
       <div className="page page--detail" data-app="tasks">
-        <LoadingState label="Loading task…" />
+        <LoadingState label={t("Loading task…", "正在加载任务…")} />
       </div>
     );
   }
@@ -593,12 +591,11 @@ function TaskDetailPage() {
       <div className="page page--detail" data-app="tasks">
         <EmptyState
           icon="warning"
-          title="Task not found"
-          description="It may have been deleted, or the Tasks app was restarted."
+          title={t("Task not found", "任务不存在")}
+          description={t("It may have been deleted, or the Tasks app was restarted.", "任务可能已删除，或任务应用已重新启动。")}
           action={
             <Link className="px-button px-button--secondary px-button--md" to="/tasks">
-              Back to Tasks
-            </Link>
+              {t("Back to Tasks", "返回任务")}</Link>
           }
         />
       </div>
@@ -625,69 +622,67 @@ function TaskDetailPage() {
       <header className="page-header">
         <div>
           <h1 className="page-header__title">{current.title}</h1>
-          <p className="page-header__subtitle">Task detail</p>
+          <HelpPopover label={t("Task detail", "任务详情")}><p>{t("Review the task schedule and status, edit its details or mark it complete.", "查看任务计划和状态，编辑详情或标记完成。")}</p></HelpPopover>
         </div>
         <div className="page-header__actions">
           <PixelButton variant="secondary" size="sm" onClick={() => setEditing(true)}>
-            <PixelIcon name="edit" /> Edit
-          </PixelButton>
+            <PixelIcon name="edit" /> {t("Edit", "编辑")}</PixelButton>
           <PixelButton
             variant={current.status === "done" ? "secondary" : "primary"}
             size="sm"
             onClick={toggleStatus}
           >
-            {current.status === "done" ? "Reopen" : "Complete"}
+            {current.status === "done" ? t("Reopen", "重新打开") : t("Complete", "完成")}
           </PixelButton>
           <Link className="px-button px-button--secondary px-button--sm" to="/tasks">
-            <PixelIcon name="back" /> Tasks
-          </Link>
+            <PixelIcon name="back" /> {t("Tasks", "任务")}</Link>
         </div>
       </header>
 
-      <PixelWindow title="Task" icon="tasks">
+      <PixelWindow title={t("Task", "任务")} icon="tasks">
         <dl className="px-deflist">
           <div className="task-detail__field">
-            <dt>Status</dt>
+            <dt>{t("Status", "状态")}</dt>
             <dd>
               {current.status === "done" ? (
-                <PixelBadge tone="success">Done</PixelBadge>
+                <PixelBadge tone="success">{t("Done", "已完成")}</PixelBadge>
               ) : (
-                <PixelBadge tone="warning">Todo</PixelBadge>
+                <PixelBadge tone="warning">{t("Todo", "待办")}</PixelBadge>
               )}
             </dd>
           </div>
           <div className="task-detail__field">
-            <dt>Priority</dt>
+            <dt>{t("Priority", "优先级")}</dt>
             <dd>
-              <PixelBadge tone={priority.tone}>{priority.label}</PixelBadge>
+              <PixelBadge tone={priority.tone}>{t(priority.label, priority.zh)}</PixelBadge>
             </dd>
           </div>
           <div className="task-detail__field">
-            <dt>Start</dt>
-            <dd>{formatDateTime(current.start_at)}</dd>
+            <dt>{t("Start", "开始")}</dt>
+            <dd>{formatDateTime(current.start_at, locale)}</dd>
           </div>
           <div className="task-detail__field">
-            <dt>Deadline</dt>
+            <dt>{t("Deadline", "截止时间")}</dt>
             <dd>
-              {formatDateTime(current.due_at)}
+              {formatDateTime(current.due_at, locale)}
               {isOverdue(current) ? (
                 <>
                   {" "}
-                  <PixelBadge tone="danger">Overdue</PixelBadge>
+                  <PixelBadge tone="danger">{t("Overdue", "已逾期")}</PixelBadge>
                 </>
               ) : null}
             </dd>
           </div>
           {current.completed_at ? (
             <div className="task-detail__field">
-              <dt>Completed</dt>
-              <dd>{formatDateTime(current.completed_at)}</dd>
+              <dt>{t("Completed", "完成时间")}</dt>
+              <dd>{formatDateTime(current.completed_at, locale)}</dd>
             </div>
           ) : null}
         </dl>
         {current.description ? (
           <div className="task-detail__description">
-            <h3 className="task-detail__description-title">Notes</h3>
+            <h3 className="task-detail__description-title">{t("Notes", "备注")}</h3>
             <p>{current.description}</p>
           </div>
         ) : null}
@@ -747,6 +742,7 @@ function moreTodayCount(status: PublicStatusView | null): number {
  * card never pays for data it cannot show.
  */
 function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
+  const { t, locale } = useI18n();
   const wantStatus = density !== "normal";
   const wantSummary = density !== "compact";
   const status = useAsync(
@@ -765,7 +761,7 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
   const overduePulse = usePulseOnChange<number, HTMLSpanElement>(summary.data?.overdue ?? 0);
   const donePulse = usePulseOnChange<number, HTMLSpanElement>(summary.data?.done ?? 0);
   if ((wantStatus && status.loading) || (wantSummary && summary.loading)) {
-    return <LoadingState label="Loading…" />;
+    return <LoadingState label={t("Loading…", "正在加载…")} />;
   }
   const statusError = wantStatus ? status.error : null;
   const summaryError = wantSummary ? summary.error : null;
@@ -777,8 +773,7 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
           <p>{error}</p>
         </StatusMessage>
         <PixelButton size="sm" variant="secondary" onClick={status.error ? status.reload : summary.reload}>
-          Retry
-        </PixelButton>
+          {t("Retry", "重试")}</PixelButton>
       </div>
     );
   }
@@ -787,9 +782,9 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
     const current = status.data?.current ?? null;
     return (
       <div className="tasks-widget tasks-widget--compact">
-        <span className="tasks-widget__label">CURRENT</span>
-        <span className="tasks-widget__title">{current ? current.title : "No running task"}</span>
-        <span className="tasks-widget__more">{moreTodayCount(status.data)} MORE TODAY</span>
+        <span className="tasks-widget__label">{t("CURRENT", "当前")}</span>
+        <span className="tasks-widget__title">{current ? current.title : t("No running task", "当前没有任务")}</span>
+        <span className="tasks-widget__more">{t(`${moreTodayCount(status.data).toLocaleString(locale)} MORE TODAY`, `今天还有 ${moreTodayCount(status.data).toLocaleString(locale)} 个任务`)}</span>
       </div>
     );
   }
@@ -805,15 +800,15 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
       {/* Planner head (PXOS 2.1 §6): one ruled index line instead of boxed
        * stat cards — the lead count first, overdue/done as margin notes. */}
       <div className="tasks-widget__head">
-        <span className="tasks-widget__lead-label">Today</span>
-        <span className="tasks-widget__lead-value" ref={todayPulse}>{pad(data.today)}</span>
+        <span className="tasks-widget__lead-label">{t("Today", "今天")}</span>
+        <span className="tasks-widget__lead-value" ref={todayPulse}>{data.today.toLocaleString(locale, { minimumIntegerDigits: 2 })}</span>
         <span className="tasks-widget__note tasks-widget__note--overdue">
-          <span className="tasks-widget__note-label">Overdue</span>
-          <b ref={overduePulse}>{pad(data.overdue)}</b>
+          <span className="tasks-widget__note-label">{t("Overdue", "已逾期")}</span>
+          <b ref={overduePulse}>{data.overdue.toLocaleString(locale, { minimumIntegerDigits: 2 })}</b>
         </span>
         <span className="tasks-widget__note tasks-widget__note--done">
-          <span className="tasks-widget__note-label">Done</span>
-          <b ref={donePulse}>{data.done}</b>
+          <span className="tasks-widget__note-label">{t("Done", "已完成")}</span>
+          <b ref={donePulse}>{data.done.toLocaleString(locale)}</b>
         </span>
       </div>
       {meterTotal > 0 ? (
@@ -822,7 +817,7 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
             value={doneToday}
             max={meterTotal}
             accent="mint"
-            label={`Today: ${doneToday} of ${meterTotal} done`}
+            label={t(`Today: ${doneToday.toLocaleString(locale)} of ${meterTotal.toLocaleString(locale)} done`, `今天：已完成 ${doneToday.toLocaleString(locale)} / ${meterTotal.toLocaleString(locale)} 个任务`)}
           />
           <span className="tasks-widget__progress-value">{meterPercent}%</span>
         </div>
@@ -830,10 +825,9 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
         /* Empty days keep the meter's silhouette (ten hollow segments) so the
          * card never collapses into blank space (dashboard empty-state rule). */
         <div className="tasks-widget__progress">
-          <PixelMeter value={0} max={1} accent="mint" label="No tasks scheduled today" />
+          <PixelMeter value={0} max={1} accent="mint" label={t("No tasks scheduled today", "今天没有计划任务")} />
           <span className="tasks-widget__progress-value tasks-widget__progress-value--empty">
-            NO TASKS SCHEDULED
-          </span>
+            {t("NO TASKS SCHEDULED", "暂无计划任务")}</span>
         </div>
       )}
       {density !== "expanded" ? (
@@ -842,26 +836,26 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
          * zero-data day still reads as a complete sentence. */
         <p className="tasks-widget__summary">
           {data.today + data.overdue > 0
-            ? `${data.today + data.overdue} TASK${data.today + data.overdue === 1 ? "" : "S"} REMAINING`
-            : "ALL DONE FOR TODAY"}
+            ? t(`${(data.today + data.overdue).toLocaleString(locale)} TASK${data.today + data.overdue === 1 ? "" : "S"} REMAINING`, `还有 ${(data.today + data.overdue).toLocaleString(locale)} 个任务`)
+            : t("ALL DONE FOR TODAY", "今天的任务已全部完成")}
         </p>
       ) : (
         /* Checklist zone: current/next as ruled rows with checkbox rhythm. */
         <ul className="tasks-widget__checklist">
           <li className="tasks-widget__check">
             <span className="tasks-widget__check-box" aria-hidden="true" />
-            <span className="tasks-widget__check-label">CURRENT</span>
-            <span className="tasks-widget__check-title">{status.data?.current ? status.data.current.title : "None"}</span>
+            <span className="tasks-widget__check-label">{t("CURRENT", "当前")}</span>
+            <span className="tasks-widget__check-title">{status.data?.current ? status.data.current.title : t("None", "无")}</span>
           </li>
           <li className="tasks-widget__check">
             <span className="tasks-widget__check-box" aria-hidden="true" />
-            <span className="tasks-widget__check-label">NEXT</span>
-            <span className="tasks-widget__check-title">{status.data?.next ? status.data.next.title : "None"}</span>
+            <span className="tasks-widget__check-label">{t("NEXT", "下一个")}</span>
+            <span className="tasks-widget__check-title">{status.data?.next ? status.data.next.title : t("None", "无")}</span>
           </li>
         </ul>
       )}
       {density === "expanded" ? (
-        <p className="tasks-widget__count">{moreTodayCount(status.data)} MORE TODAY</p>
+        <p className="tasks-widget__count">{t(`${moreTodayCount(status.data).toLocaleString(locale)} MORE TODAY`, `今天还有 ${moreTodayCount(status.data).toLocaleString(locale)} 个任务`)}</p>
       ) : null}
     </div>
   );

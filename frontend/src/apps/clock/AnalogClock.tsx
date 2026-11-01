@@ -1,3 +1,4 @@
+import { useI18n } from "../../shared/i18n";
 import type { WidgetDensity } from "../../shared/appTypes";
 import type { ClockSettings } from "./useClockSettings";
 import { focusElapsedClock, type ClockFocusState } from "./DigitalClock";
@@ -33,6 +34,7 @@ function Tick({ angle, major }: { angle: number; major: boolean }) {
  * second hand ticks discretely — a sweep would fight the pixel aesthetic.
  */
 export function AnalogClock({ now, settings, variant, focus, density = "normal" }: AnalogClockProps) {
+  const { t } = useI18n();
   const angles = handAngles(now);
   const parts = timeParts(now);
   const ticks = Array.from({ length: 60 }, (_, index) => ({
@@ -49,7 +51,7 @@ export function AnalogClock({ now, settings, variant, focus, density = "normal" 
         .filter(Boolean)
         .join(" ")}
       role="timer"
-      aria-label={`Current time ${parts.hours24}:${parts.minutes}`}
+      aria-label={`${t("Current time", "当前时间")} ${parts.hours24}:${parts.minutes}`}
     >
       <svg
         className="clock-analog__svg"
@@ -85,7 +87,7 @@ export function AnalogClock({ now, settings, variant, focus, density = "normal" 
           {focus ? (
             <span className="clock-analog__focus-line">
               <span className="clock-analog__focus-dot" aria-hidden="true" />
-              RUNNING · {focusElapsedClock(focus, now)}
+              {t("RUNNING ·", "进行中 ·")} {focusElapsedClock(focus, now)}
             </span>
           ) : (
             <span className="clock-analog__focus-line clock-analog__focus-line--idle">

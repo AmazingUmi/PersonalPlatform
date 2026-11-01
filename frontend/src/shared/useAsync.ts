@@ -1,3 +1,5 @@
+import { useI18n } from "./i18n";
+import { localizeError } from "./localizeError";
 import { useEffect, useState } from "react";
 
 interface AsyncState<T> {
@@ -10,7 +12,8 @@ interface AsyncState<T> {
 export function useAsync<T>(fn: () => Promise<T>, deps: readonly unknown[] = []): AsyncState<T> & {
   reload: () => void;
 } {
-  const [state, setState] = useState<AsyncState<T>>({ data: null, loading: true, error: null });
+  const { language } = useI18n();
+  const [state, setState] = useState<Omit<AsyncState<T>, "error"> & { error: unknown }>({ data: null, loading: true, error: null });
   const [tick, setTick] = useState(0);
 
   useEffect(() => {
@@ -21,7 +24,7 @@ export function useAsync<T>(fn: () => Promise<T>, deps: readonly unknown[] = [])
         if (active) setState({ data, loading: false, error: null });
       })
       .catch((error: unknown) => {
-        if (active) setState({ data: null, loading: false, error: error instanceof Error ? error.message : String(error) });
+        if (active) setState({ data: null, loading: false, error });
       });
     return () => {
       active = false;
@@ -29,5 +32,5 @@ export function useAsync<T>(fn: () => Promise<T>, deps: readonly unknown[] = [])
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, tick]);
 
-  return { ...state, reload: () => setTick((value) => value + 1) };
+  return { ...state, error: state.error === null ? null : localizeError(state.error, language), reload: () => setTick((value) => value + 1) };
 }

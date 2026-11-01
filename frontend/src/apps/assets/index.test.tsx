@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import AssetsApp from "./index";
+import { I18nProvider, useI18n } from "../../shared/i18n";
 
 interface TestCategory {
   id: string;
@@ -553,5 +554,75 @@ describe("AssetSummaryWidget density (Phase 10)", () => {
 describe("status provider (shell chips)", () => {
   it("deliberately registers none — inventory totals are not time-sensitive chips", () => {
     expect(AssetsApp.status).toBeUndefined();
+  });
+});
+
+function LanguageSwitch() {
+  const { setLanguage } = useI18n();
+  return <button onClick={() => setLanguage("en")}>Switch to English</button>;
+}
+
+it("switches asset UI language without translating user content or resetting a draft", async () => {
+  setupFetch({ items: [stripedItem] });
+  render(<I18nProvider initialLanguage="zh"><MemoryRouter initialEntries={["/assets"]}>
+    {AssetsApp.routes[0]!.element}<LanguageSwitch />
+  </MemoryRouter></I18nProvider>);
+  expect(await screen.findByText("Desk lamp")).toBeDefined();
+  expect(screen.getAllByText("Books").length).toBeGreaterThan(0);
+  fireEvent.click(screen.getByRole("button", { name: "新建物品" }));
+  fireEvent.change(screen.getByLabelText("物品名称"), { target: { value: "Draft 台灯" } });
+  fireEvent.click(screen.getByRole("button", { name: "切换分类 Books" }));
+  expect(screen.queryByText(/获取日期可选/)).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "帮助：获取日期" }));
+  expect(screen.getByRole("dialog", { name: "获取日期" }).textContent).toContain("添加时间会自动记录");
+  fireEvent.click(screen.getByRole("button", { name: "关闭帮助" }));
+  fireEvent.click(screen.getByRole("button", { name: "Switch to English" }));
+  expect((screen.getByLabelText("Item name") as HTMLInputElement).value).toBe("Draft 台灯");
+  expect(screen.getByRole("button", { name: "Toggle category Books" }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("button", { name: "Create item" })).toBeDefined();
+  expect(screen.getByText("Desk lamp")).toBeDefined();
+});
+
+it("localizes calendar dates and attachment size errors while preserving the day and filename", async () => {
+  const detail = { ...stripedItem, acquiredAt: "2026-01-01" };
+  const fetchMock = setupFetch({ detail });
+  render(<I18nProvider initialLanguage="zh"><MemoryRouter initialEntries={["/assets/items/item-1"]}>
+    <Routes><Route path="/assets/items/:id" element={AssetsApp.routes[1]!.element} /></Routes>
+    <LanguageSwitch />
+  </MemoryRouter></I18nProvider>);
+  await screen.findByText("Desk lamp");
+  const dateValue = screen.getByText("获取日期", { selector: "dt" }).nextElementSibling;
+  expect(dateValue?.textContent).toBe("2026/1/1");
+  const file = new File(["content"], "Original 文件.txt", { type: "text/plain" });
+  Object.defineProperty(file, "size", { value: 10 * 1024 * 1024 + 1 });
+  fireEvent.change(screen.getByLabelText("上传文件"), { target: { files: [file] } });
+  expect(await screen.findByText("Original 文件.txt 超过附件大小上限 10 MB")).toBeDefined();
+  fireEvent.click(screen.getByRole("button", { name: "Switch to English" }));
+  expect(screen.getByText("Original 文件.txt is larger than the 10 MB attachment limit")).toBeDefined();
+  expect(screen.getByText("Acquired", { selector: "dt" }).nextElementSibling?.textContent).toBe("1/1/2026");
+  expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
+});
+
+it("keeps category color tokens stable when selecting a Chinese label and switching language before saving", async () => {
+  const fetchMock = setupFetch({ items: [stripedItem] });
+  render(<I18nProvider initialLanguage="zh"><MemoryRouter initialEntries={["/assets"]}>
+    {AssetsApp.routes[0]!.element}<LanguageSwitch />
+  </MemoryRouter></I18nProvider>);
+  fireEvent.click(await screen.findByRole("button", { name: "管理分类 Tools" }));
+  fireEvent.click(screen.getByRole("button", { name: "重命名分类 Tools" }));
+  const mint = screen.getByRole("option", { name: "薄荷绿" }) as HTMLOptionElement;
+  expect(mint.value).toBe("mint");
+  fireEvent.change(screen.getByLabelText("分类颜色"), { target: { value: mint.value } });
+  expect((screen.getByLabelText("分类颜色") as HTMLSelectElement).value).toBe("mint");
+  fireEvent.click(screen.getByRole("button", { name: "Switch to English" }));
+  const color = screen.getByLabelText("Category color") as HTMLSelectElement;
+  expect(color.value).toBe("mint");
+  expect(color.selectedOptions[0]?.textContent?.trim()).toBe("mint");
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => {
+    const request = fetchMock.mock.calls.find(([url, init]) =>
+      String(url).endsWith("/categories/cat-2") && init?.method === "PATCH");
+    expect(request).toBeDefined();
+    expect(JSON.parse(String(request![1]!.body))).toEqual({ name: "Tools", color: "mint" });
   });
 });
