@@ -158,6 +158,108 @@ test("focus: foreground completion is visible without notification permission an
   await expect(completion).toHaveCount(0);
 });
 
+test("focus: Test sound plays three chimes with adjustable volume and a silent zero setting", async ({ page }) => {
+  // Observe the browser's real audio graph, not a mocked oscillator.start().
+  // Headless Chrome mutes its physical output; this measures generated samples.
+  await page.addInitScript(() => {
+    const NativeAudioContext = window.AudioContext;
+    window.AudioContext = class extends NativeAudioContext {
+      constructor(options?: AudioContextOptions) {
+        super(options);
+        const analyser = this.createAnalyser();
+        analyser.fftSize = 256;
+        const probe = { samples: [] as Array<{ time: number; peak: number }>, done: false };
+        Object.assign(window, { focusAudioProbe: probe });
+        const createGain = this.createGain.bind(this);
+        this.createGain = () => {
+          const gain = createGain();
+          const connect = gain.connect.bind(gain);
+          gain.connect = ((destination: AudioNode) => {
+            // Observe only the final output, after the user's volume control.
+            if (destination === this.destination) connect(analyser);
+            return connect(destination);
+          }) as typeof gain.connect;
+          return gain;
+        };
+        const createOscillator = this.createOscillator.bind(this);
+        this.createOscillator = () => {
+          const oscillator = createOscillator();
+          const start = oscillator.start.bind(oscillator);
+          oscillator.start = (when = 0) => {
+            start(when);
+            const began = when || this.currentTime;
+            probe.done = false;
+            probe.samples = [];
+            const values = new Float32Array(analyser.fftSize);
+            const timer = setInterval(() => {
+              analyser.getFloatTimeDomainData(values);
+              probe.samples.push({ time: this.currentTime - began, peak: Math.max(...values.map(Math.abs)) });
+            }, 20);
+            // Anchor to actual playback, so a slow Playwright click cannot
+            // truncate the sample window before the sound has started.
+            setTimeout(() => { clearInterval(timer); probe.done = true; }, 2800);
+          };
+          return oscillator;
+        };
+      }
+    };
+  });
+  await page.goto("/focus");
+  const volume = page.getByRole("slider", { name: "Alert volume", exact: true });
+  await expect(volume).toHaveValue("60");
+  await page.getByRole("button", { name: "Enable sound", exact: true }).click();
+  await expect(page.getByText(/Sound ready/)).toBeVisible();
+  async function play() {
+    await page.getByRole("button", { name: "Test sound", exact: true }).click();
+    await page.waitForFunction(() => (window as unknown as { focusAudioProbe: { done: boolean } }).focusAudioProbe.done);
+    return page.evaluate(() => (window as unknown as {
+      focusAudioProbe: { samples: Array<{ time: number; peak: number }> };
+    }).focusAudioProbe.samples);
+  }
+  const samples = await play();
+  for (const offset of [0, 0.7, 1.4]) {
+    const plateau = samples.filter((sample) => sample.time > offset + 0.04 && sample.time < offset + 0.17);
+    expect(plateau.length).toBeGreaterThan(0);
+    expect(Math.max(...plateau.map((sample) => sample.peak))).toBeGreaterThan(0.1);
+  }
+  for (const offset of [0.64, 1.34]) {
+    const gap = samples.filter((sample) => sample.time > offset && sample.time < offset + 0.05);
+    expect(gap.length).toBeGreaterThan(0);
+    expect(Math.max(...gap.map((sample) => sample.peak))).toBeLessThan(0.001);
+  }
+  expect(Math.max(...samples.map((sample) => sample.peak))).toBeGreaterThan(0.1);
+  expect(Math.max(...samples.map((sample) => sample.peak))).toBeLessThanOrEqual(0.121);
+  expect(samples.at(-1)!.time).toBeGreaterThan(2.2);
+  expect(samples.at(-1)!.peak).toBeLessThan(0.0001);
+  await volume.press("Home");
+  for (let i = 0; i < 30; i++) await volume.press("ArrowRight");
+  await expect(volume).toHaveAttribute("aria-valuetext", "30%");
+  const quieter = await play();
+  expect(Math.max(...quieter.map((sample) => sample.peak))).toBeGreaterThan(0.05);
+  expect(Math.max(...quieter.map((sample) => sample.peak))).toBeLessThanOrEqual(0.061);
+  await volume.press("End");
+  await expect(volume).toHaveValue("100");
+  const loudest = await play();
+  expect(Math.max(...loudest.map((sample) => sample.peak))).toBeGreaterThan(0.19);
+  expect(Math.max(...loudest.map((sample) => sample.peak))).toBeLessThanOrEqual(0.201);
+  await volume.press("Home");
+  await expect(volume).toHaveValue("0");
+  expect(Math.max(...(await play()).map((sample) => sample.peak))).toBeLessThan(0.0001);
+  // Changing the slider during playback also updates the current sound.
+  await volume.press("End");
+  await page.getByRole("button", { name: "Test sound", exact: true }).click();
+  await page.waitForFunction(() => (window as unknown as {
+    focusAudioProbe: { samples: Array<{ time: number; peak: number }> };
+  }).focusAudioProbe.samples.some((sample) => sample.time > 0.25));
+  await volume.press("Home");
+  await page.waitForFunction(() => (window as unknown as { focusAudioProbe: { done: boolean } }).focusAudioProbe.done);
+  const interrupted = await page.evaluate(() => (window as unknown as {
+    focusAudioProbe: { samples: Array<{ time: number; peak: number }> };
+  }).focusAudioProbe.samples);
+  expect(Math.max(...interrupted.filter((sample) => sample.time < 0.2).map((sample) => sample.peak))).toBeGreaterThan(0.19);
+  expect(Math.max(...interrupted.filter((sample) => sample.time > 1).map((sample) => sample.peak))).toBeLessThan(0.0001);
+});
+
 test("focus: default and minimum desktop widgets keep timer and completion controls inside the card", async ({ page, request }) => {
   test.setTimeout(45_000);
   await page.setViewportSize({ width: 1440, height: 1000 });
@@ -213,6 +315,12 @@ test("focus: default and minimum desktop widgets keep timer and completion contr
       const alerts = card.getByRole("button", { name: "Alert settings", exact: true });
       await alerts.click();
       await expect(alerts).toHaveAttribute("aria-expanded", "true");
+      const volume = card.getByRole("slider", { name: "Alert volume", exact: true });
+      await volume.scrollIntoViewIfNeeded();
+      await volume.press("Home");
+      await expect(volume).toHaveAttribute("aria-valuetext", "0%");
+      await volume.press("End");
+      await expect(volume).toHaveAttribute("aria-valuetext", "100%");
       await card.getByRole("button", { name: "Enable sound", exact: true }).scrollIntoViewIfNeeded();
       await expect(card.getByRole("button", { name: "Enable sound", exact: true })).toBeVisible();
       await alerts.click();

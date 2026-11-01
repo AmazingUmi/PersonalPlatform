@@ -6,6 +6,13 @@ type Alerts = ReturnType<typeof useFocusAlerts>;
 export function FocusAlertControls({ alerts }: { alerts: Alerts }) {
   return (
     <div className="focus-alerts">
+      <label className="focus-alerts__volume">
+        <span>Alert volume</span>
+        <input type="range" min="0" max="100" step="1" value={alerts.volume}
+          onChange={(event) => alerts.setVolume?.(Number(event.currentTarget.value))}
+          aria-valuetext={`${alerts.volume}%`} />
+        <output>{alerts.volume}%</output>
+      </label>
       <div className="focus-alerts__controls" aria-label="Completion alerts">
         <PixelButton size="sm" variant="secondary" onClick={alerts.sound ? alerts.muteSound : alerts.enableSound}>
           {alerts.sound ? "Mute sound" : "Enable sound"}

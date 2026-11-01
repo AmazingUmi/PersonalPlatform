@@ -3331,6 +3331,9 @@
 .focus-completion p { margin: 0.4rem 0 0.65rem; }
 .focus-alerts__controls { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 .focus-alerts__status { margin: 0; font-size: 0.75rem; line-height: 1.5; }
+.focus-alerts__volume { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; font-size: 0.75rem; }
+.focus-alerts__volume input { min-width: 0; width: 9rem; max-width: 100%; accent-color: var(--px-primary); }
+.focus-alerts__volume output { min-width: 3ch; font-variant-numeric: tabular-nums; }
 
 /* Optional widget alerts use a disclosure, keeping the timer actions usable
  * within the existing dashboard size contract. Expanded options scroll only

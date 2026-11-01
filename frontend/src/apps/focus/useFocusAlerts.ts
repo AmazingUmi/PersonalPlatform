@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { kindLabel, type FocusHistoryItem } from "./api";
 
-type AlertState = { sound: boolean; soundStatus: string; notifications: boolean; notificationStatus: string };
+type AlertState = { sound: boolean; volume: number; soundStatus: string; notifications: boolean; notificationStatus: string };
 function notificationStatus(): string {
   if (!globalThis.isSecureContext || typeof Notification === "undefined") return "Browser notifications unavailable";
   return `Browser permission: ${Notification.permission}`;
@@ -10,10 +10,11 @@ function notificationStatus(): string {
 /** One controller per authenticated user, shared by mounted page/widget observers.
  * No payloads leave this document and no preference is written to storage. */
 class AlertController {
-  state: AlertState = { sound: false, soundStatus: "Sound off", notifications: false, notificationStatus: notificationStatus() };
+  state: AlertState = { sound: false, volume: 60, soundStatus: "Sound off", notifications: false, notificationStatus: notificationStatus() };
   listeners = new Set<() => void>();
   claimed = new Set<string>();
   context: AudioContext | null = null;
+  outputGain: GainNode | null = null;
   audioEpoch = 0;
   permissionEpoch = 0;
   notices = new Set<Notification>();
@@ -37,6 +38,8 @@ class AlertController {
       this.permissionEpoch += 1;
       const context = this.context;
       this.context = null;
+      this.outputGain?.disconnect();
+      this.outputGain = null;
       if (context) { context.onstatechange = null; try { void context.close().catch(() => {}); } catch { /* unsupported close */ } }
       this.notices.forEach((notice) => { try { notice.close(); } catch { /* browser may have removed it */ } });
       this.notices.clear();
@@ -46,17 +49,27 @@ class AlertController {
   chime() {
     const context = this.context;
     try {
-      if (!context || context.state !== "running") throw new Error("inactive audio");
+      if (!context || context.state !== "running" || !this.outputGain) throw new Error("inactive audio");
       const oscillator = context.createOscillator();
       const gain = context.createGain();
       oscillator.connect(gain);
-      gain.connect(context.destination);
-      oscillator.frequency.setValueAtTime(880, context.currentTime);
-      gain.gain.setValueAtTime(0.12, context.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.45);
+      gain.connect(this.outputGain);
+      const start = context.currentTime + 0.02;
+      oscillator.frequency.setValueAtTime(880, start);
+      gain.gain.setValueAtTime(0, context.currentTime);
+      // Three distinct chimes over two seconds. The default master level of
+      // 60% preserves the previous output peak (0.2 * 0.6 = 0.12).
+      for (const offset of [0, 0.7, 1.4]) {
+        const at = start + offset;
+        gain.gain.setValueAtTime(0, at);
+        gain.gain.linearRampToValueAtTime(0.2, at + 0.015);
+        gain.gain.setValueAtTime(0.2, at + 0.18);
+        gain.gain.exponentialRampToValueAtTime(0.001, at + 0.55);
+        gain.gain.linearRampToValueAtTime(0, at + 0.6);
+      }
       oscillator.onended = () => { oscillator.disconnect(); gain.disconnect(); };
-      oscillator.start();
-      oscillator.stop(context.currentTime + 0.5);
+      oscillator.start(start);
+      oscillator.stop(start + 2);
       return true;
     } catch {
       this.update({ sound: false, soundStatus: "Sound unavailable — use Enable sound to retry" });
@@ -70,6 +83,11 @@ class AlertController {
       this.context ??= new AudioContext();
       // Called directly in a button gesture, before any awaited work.
       const context = this.context;
+      if (!this.outputGain) {
+        this.outputGain = context.createGain();
+        this.outputGain.gain.setValueAtTime(this.state.volume / 100, context.currentTime);
+        this.outputGain.connect(context.destination);
+      }
       context.onstatechange = () => {
         if (this.context === context && context.state !== "running") {
           this.update({ sound: false, soundStatus: "Sound inactive — use Enable sound to retry" });
@@ -91,6 +109,25 @@ class AlertController {
   muteSound = () => {
     this.audioEpoch += 1;
     this.update({ sound: false, soundStatus: "Sound off" });
+  };
+  setVolume = (value: number) => {
+    if (!Number.isFinite(value)) return;
+    const volume = Math.round(Math.max(0, Math.min(100, value)));
+    this.update({ volume });
+    const context = this.context;
+    const gain = this.outputGain?.gain;
+    if (context && gain) {
+      try {
+        // Smooth live adjustments without starting audio or changing mute state.
+        const now = context.currentTime;
+        const currentGain = gain.value;
+        gain.cancelScheduledValues(now);
+        gain.setValueAtTime(currentGain, now);
+        gain.linearRampToValueAtTime(volume / 100, now + 0.02);
+      } catch {
+        this.update({ sound: false, soundStatus: "Sound unavailable — use Enable sound to retry" });
+      }
+    }
   };
   testSound = () => { this.chime(); };
   enableNotifications = () => {
@@ -163,7 +200,8 @@ export function useFocusAlerts(userId: string | null) {
   }, [controller]);
   const announce = useCallback((session: FocusHistoryItem) => controller?.announce(session), [controller]);
   return {
-    ...(controller?.state ?? { sound: false, soundStatus: "Sound off", notifications: false, notificationStatus: "Sign in to enable alerts" }),
+    ...(controller?.state ?? { sound: false, volume: 60, soundStatus: "Sound off", notifications: false, notificationStatus: "Sign in to enable alerts" }),
+    setVolume: controller?.setVolume,
     enableSound: controller?.enableSound,
     muteSound: controller?.muteSound,
     testSound: controller?.testSound,

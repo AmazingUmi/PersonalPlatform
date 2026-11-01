@@ -20,7 +20,7 @@ class MockAudio {
   resume = resume;
   close = close;
   createOscillator() { return { connect: vi.fn(), disconnect: vi.fn(), frequency: { setValueAtTime: vi.fn() }, start: oscillatorStart, stop: vi.fn() }; }
-  createGain() { return { connect: vi.fn(), disconnect: vi.fn(), gain: { setValueAtTime: vi.fn(), exponentialRampToValueAtTime: vi.fn() } }; }
+  createGain() { return { connect: vi.fn(), disconnect: vi.fn(), gain: { value: 1, cancelScheduledValues: vi.fn(), setValueAtTime: vi.fn(), linearRampToValueAtTime: vi.fn(), exponentialRampToValueAtTime: vi.fn() } }; }
 }
 beforeEach(() => {
   user++; vi.clearAllMocks(); resume.mockResolvedValue(undefined); MockNotification.permission = "default";
@@ -96,6 +96,31 @@ describe("optional Focus alerts", () => {
     act(() => result.current.testSound?.()); expect(oscillatorStart).toHaveBeenCalledTimes(1);
     act(() => { result.current.muteSound?.(); result.current.announce(session); });
     expect(oscillatorStart).toHaveBeenCalledTimes(1);
+  });
+  it("shares volume within an account without enabling sound or changing another account", async () => {
+    const first = mount(); const second = mount();
+    const other = renderHook(() => useFocusAlerts(`other-volume-${user}`));
+    expect(first.result.current.volume).toBe(60);
+    act(() => first.result.current.setVolume?.(30));
+    expect(second.result.current.volume).toBe(30);
+    expect(other.result.current.volume).toBe(60);
+    expect(resume).not.toHaveBeenCalled(); expect(permission).not.toHaveBeenCalled();
+    expect(first.result.current.sound).toBe(false);
+    await act(async () => { first.result.current.enableSound?.(); });
+    act(() => { first.result.current.muteSound?.(); first.result.current.setVolume?.(0); });
+    expect(first.result.current.sound).toBe(false);
+    expect(second.result.current.volume).toBe(0);
+    act(() => first.result.current.announce(session));
+    expect(oscillatorStart).not.toHaveBeenCalled();
+    first.unmount(); second.unmount();
+    const remount = mount(); expect(remount.result.current.volume).toBe(0);
+    expect(remount.result.current.sound).toBe(false);
+  });
+  it("bounds volume and ignores invalid input", () => {
+    const { result } = mount();
+    act(() => result.current.setVolume?.(200)); expect(result.current.volume).toBe(100);
+    act(() => result.current.setVolume?.(-1)); expect(result.current.volume).toBe(0);
+    act(() => result.current.setVolume?.(NaN)); expect(result.current.volume).toBe(0);
   });
   for (const failure of ["missing", "suspended", "rejected", "playback"] as const) {
     it(`contains ${failure} audio failures`, async () => {
