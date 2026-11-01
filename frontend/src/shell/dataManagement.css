@@ -1,0 +1,19 @@
+.data-management { margin-bottom: 24px; }
+.data-management p { overflow-wrap: anywhere; }
+.data-management__actions { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-block: 12px; }
+.data-management__field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.data-management__field input, .data-management__field select { max-width: 100%; min-width: 0; }
+.data-management__field input[type="file"] { padding-block: 8px; }
+.data-management__form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-block: 16px; }
+.data-management__form > :first-child { grid-column: 1 / -1; }
+.data-management__section { margin-top: 24px; border-top: 2px solid var(--px-border-soft); padding-top: 16px; }
+.data-management__preview { margin-top: 16px; }
+.data-management__table-wrap { overflow-x: auto; }
+.data-management__table { border-collapse: collapse; width: 100%; }
+.data-management__table th, .data-management__table td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--px-border-soft); }
+.data-management__table th:first-child, .data-management__table td:first-child { padding-left: 0; }
+.data-management__history { list-style: none; margin: 0; padding: 0; }
+.data-management__history li { border-top: 1px solid var(--px-border-soft); padding-block: 12px; }
+.data-management__filename { overflow-wrap: anywhere; word-break: break-word; }
+.data-management__history .px-button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .data-management__form { grid-template-columns: minmax(0, 1fr); } }

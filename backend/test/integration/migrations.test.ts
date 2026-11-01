@@ -32,12 +32,12 @@ describe("core migration", () => {
     const tables = await db.context().query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables WHERE table_schema = 'core' ORDER BY table_name`,
     );
-    // Auth (AUTH-1) added core.users and core.sessions on top of the original
-    // apps/migrations/settings tables.
-    assert.deepEqual(
-      tables.rows.map((row) => row.table_name),
-      ["apps", "migrations", "sessions", "settings", "users"],
-    );
+    // Assert required platform tables without coupling this test to the total
+    // number of additive Core capabilities.
+    const names = new Set(tables.rows.map((row) => row.table_name));
+    for (const name of ["apps", "migrations", "sessions", "settings", "users", "backup_targets", "backup_history"]) {
+      assert.ok(names.has(name), `missing Core table ${name}`);
+    }
   });
 
   it("is idempotent when run twice", async () => {

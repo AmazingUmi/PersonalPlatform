@@ -3,6 +3,8 @@ import cookiePlugin from "@fastify/cookie";
 import Fastify, { type FastifyBaseLogger, type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { AppError, notFoundHandler, errorHandler } from "./api/errors.js";
 import { registerCoreRoutes } from "./api/routes.js";
+import { registerDataManagementRoutes } from "./data-management/routes.js";
+import { WebdavBackups } from "./data-management/webdav.js";
 import type { PlatformConfig } from "./config/index.js";
 import { resolveEnvironment, resolveSessionCookieSecure, resolveTrustProxy } from "./config/index.js";
 import type { Database } from "./database/index.js";
@@ -147,6 +149,11 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
   }
 
   const authDeps = { database, now: deps.clock };
+  const backups = database ? new WebdavBackups({ database, storageRoot, installedApps: () => registry.getApps().map(record => record.id) }) : null;
+  registerDataManagementRoutes(app, {
+    database, storageRoot, installedApps: () => registry.getApps().map(record => record.id),
+    requireAuth: createRequireAuth(authDeps), backups,
+  });
   registerAuthRoutes(app, {
     database,
     sessionCookieSecure: resolveSessionCookieSecure(config.platform.environment),
@@ -208,6 +215,10 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
   // Core-owned housekeeping: purge expired sessions hourly. Registered after
   // app activation and before scheduler.start(), so it runs on every boot.
   if (database) {
+    scheduler.register({
+      id: "core.data-backups.poll", owner: "core.data-backups",
+      schedule: { intervalMs: 60_000 }, run: () => backups!.tick(),
+    });
     scheduler.register({
       id: "core.sessions.cleanup",
       schedule: { cron: "23 * * * *", timezone: time.timezone() },
@@ -313,6 +324,8 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
 
   async function stop(): Promise<void> {
     await app.close();
+    scheduler.stopByOwner("core.data-backups");
+    await backups?.stop();
     for (const record of registry.getApps()) releaseAppResources(record.id);
     scheduler.stopAll();
     eventBus.close();

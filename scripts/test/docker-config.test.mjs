@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +11,27 @@ const temporary = mkdtempSync(resolve(tmpdir(), "pp-compose-config-"));
 const emptyEnv = resolve(temporary, "empty.env");
 writeFileSync(emptyEnv, "");
 after(() => rmSync(temporary, { recursive: true, force: true }));
+
+test("production proxy admits a maximum Settings snapshot envelope without raising other API limits", () => {
+  const nginx = readFileSync(resolve(root, "docker/nginx.conf"), "utf8");
+  const dataLocation = nginx.match(/location \^~ \/api\/core\/data\/ \{([^}]+)\}/)?.[1];
+  assert.ok(dataLocation, "Settings needs an explicit proxy upload budget");
+  assert.match(dataLocation, /client_max_body_size 33m;/);
+  assert.match(dataLocation, /proxy_read_timeout 180s;/);
+  assert.match(dataLocation, /proxy_pass \$backend\$request_uri;/);
+  assert.match(nginx, /client_max_body_size 12m;/);
+});
+
+test("WebDAV deployment policy and optional key reach the production backend", () => {
+  const result = config(["docker/docker-compose.prod.yml"], {
+    DATA_BACKUP_ALLOWED_ORIGINS: "https://nas.example:5006",
+    DATA_BACKUP_ENCRYPTION_KEY: "test-config-only-key",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const backend = JSON.parse(result.stdout).services.backend.environment;
+  assert.equal(backend.DATA_BACKUP_ALLOWED_ORIGINS, "https://nas.example:5006");
+  assert.equal(backend.DATA_BACKUP_ENCRYPTION_KEY, "test-config-only-key");
+});
 
 // Explicit values override the caller's development/production environment.
 const environment = {

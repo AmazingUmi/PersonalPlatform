@@ -7,6 +7,7 @@ import { PixelWindow } from "../shared/ui/PixelWindow";
 import { StatusMessage } from "../shared/ui/StatusMessage";
 import { useAsync } from "../shared/useAsync";
 import pkg from "../../package.json";
+import { DataManagementPanel } from "./DataManagementPanel";
 
 /**
  * System settings panel (guide §25). Shows only real platform facts —
@@ -22,6 +23,8 @@ export function Settings({ apps = [] }: { apps?: AppInfo[] }) {
         <h1 className="page-header__title">Settings</h1>
         <p className="page-header__subtitle">System configuration</p>
       </header>
+
+      <DataManagementPanel />
 
       <UsersPanel />
 
@@ -54,7 +57,7 @@ export function Settings({ apps = [] }: { apps?: AppInfo[] }) {
       <PixelWindow title="Configuration" icon="file">
         <p className="settings-text">
           Platform settings are stored in <code>config/platform.yaml</code> and{" "}
-          <code>core.settings</code>. Secrets always come from environment variables.
+          <code>core.settings</code>. WebDAV connections are managed above; other deployment secrets come from environment variables.
         </p>
       </PixelWindow>
     </div>

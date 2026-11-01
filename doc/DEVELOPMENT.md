@@ -25,6 +25,7 @@ npm run migration:create -- --scope assets --name add_items
 npm run create:app -- my_app "My App"   # 从模板创建新 App
 npm run bootstrap:admin -- --username admin   # 激活/创建首个管理员（隐藏密码输入）
 npm run backup              # 备份数据库（backup.sh backup|restore）
+npx tsx scripts/export-data.ts --database URL --storage PATH --user USER --scope own --output FILE # 显式目标离线导出
 npm run verify              # 本地完整验收（见 scripts/verify.sh）
 npm run test:docker:config   # 开发/生产 Compose 配置回归，不需 daemon
 npm run verify:docker        # 隔离项目内构建生产镜像、启动并验证持久化

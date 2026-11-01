@@ -56,6 +56,8 @@ services:
       PLATFORM_ENVIRONMENT: production
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
       TRUST_PROXY: ${TRUST_PROXY:-uniquelocal}
+      DATA_BACKUP_ALLOWED_ORIGINS: ${DATA_BACKUP_ALLOWED_ORIGINS:-}
+      DATA_BACKUP_ENCRYPTION_KEY: ${DATA_BACKUP_ENCRYPTION_KEY:-}
       # The entrypoint constructs DATABASE_URL inside the container so URL
       # delimiters in credentials cannot change the host, path or query.
       POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB for production}

@@ -38,6 +38,8 @@ services:
       # X-Forwarded-For honored for the login limiter. Empty = do not trust.
       # `uniquelocal` matches the compose network (172.16.0.0/12).
       TRUST_PROXY: ${TRUST_PROXY:-}
+      DATA_BACKUP_ALLOWED_ORIGINS: ${DATA_BACKUP_ALLOWED_ORIGINS:-}
+      DATA_BACKUP_ENCRYPTION_KEY: ${DATA_BACKUP_ENCRYPTION_KEY:-}
       # First-admin bootstrap (empty = skip; see README "身份认证" / .env.example).
       # Passed through so `docker compose` can activate the placeholder admin
       # on first boot. Never resets an already-activated password; once an
