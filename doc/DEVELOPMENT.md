@@ -116,6 +116,8 @@ DATABASE_URL=... npm run dev --workspace @personal-platform/backend
 npm run dev --workspace @personal-platform/frontend   # 另一个终端
 ```
 
+后端启动入口可通过 `DATABASE_POOL_MAX` 指定所有 App/用户共享的连接池上限（1–100，未设置为 10；显式空值或非法值拒绝启动）。生产 Compose 显式使用默认 4，其他运行资源参数见 [DEPLOYMENT.md](DEPLOYMENT.md#运行资源配置)。集成测试构造 `Database` 时可通过第三个参数 `{ max: 1 }` 验证小池排队和事务释放，构造函数不会隐式读取环境变量。
+
 ## Docker 网络默认值
 
 以下为开发配置。生产使用独立 `docker/docker-compose.prod.yml`，通过 `make prod` 启动；不与开发 Compose 合并。生产的环境、持久化和旧部署迁移见 [DEPLOYMENT.md](DEPLOYMENT.md)。

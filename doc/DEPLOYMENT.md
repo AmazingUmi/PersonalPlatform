@@ -32,6 +32,30 @@ Nginx 覆盖客户端传入的 `X-Forwarded-For`，后端默认信任内部私�
 
 自定义项目名、端口和凭据写在 `.env.production`；可用 `make PROD_ENV=/path/to/private.env prod` 指定其他文件。自定义 `config/` 在构建前修改并审阅，生产默认不挂载宿主源码或配置。构建上下文排除环境密钥、备份和测试认证文件。
 
+## 运行资源配置
+
+生产部署默认采用小规模自部署参数，VPS、Linux 服务器和 NAS 使用同一套配置。所有 App、用户共用一个数据库连接池，减少连接数不会移除账户隔离或更改事务行为。
+
+| 环境变量 | 生产默认值 | 含义 |
+|---|---|---|
+| `DATABASE_POOL_MAX` | `4` | 后端共享连接池上限；整数 1–100，显式空值或非法值会在启动时失败 |
+| `PG_SHARED_BUFFERS` | `64MB` | PostgreSQL 共享缓冲区 |
+| `PG_WORK_MEM` | `2MB` | PostgreSQL 单个排序/哈希等执行操作的基础工作内存，并非整个数据库上限 |
+| `PG_MAINTENANCE_WORK_MEM` | `32MB` | PostgreSQL 维护工作内存 |
+| `PG_MAX_CONNECTIONS` | `30` | 数据库连接上限，须为应用池之外的迁移、管理员和维护连接留余量 |
+| `HEALTHCHECK_INTERVAL` | `30s` | 三个容器的健康检查周期 |
+| `DATABASE_MEMORY_LIMIT` / `DATABASE_CPU_LIMIT` | `1G` / `1.0` | 数据库容器资源上限 |
+| `BACKEND_MEMORY_LIMIT` / `BACKEND_CPU_LIMIT` | `512M` / `1.0` | 后端容器资源上限 |
+| `FRONTEND_MEMORY_LIMIT` / `FRONTEND_CPU_LIMIT` | `256M` / `0.5` | 前端容器资源上限 |
+
+这些资源上限不是预留量或最低硬件要求。降低上限本身不代表内存优化；上限过低可能导致 OOM 或请求排队，需在目标机器和数据量下验证。PostgreSQL 的文件缓存、连接以及并发查询仍会消耗额外内存。`fsync`、`synchronous_commit` 和正常 WAL 恢复能力保持开启。
+
+需要恢复之前的连接/数据库配置时，可设置 `DATABASE_POOL_MAX=10`、`PG_SHARED_BUFFERS=128MB`、`PG_WORK_MEM=4MB`、`PG_MAINTENANCE_WORK_MEM=64MB`、`PG_MAX_CONNECTIONS=100`。修改这些运行参数后使用 `make prod` 重建/重建容器即可复用已有数据卷，无需 SQL 迁移。直接运行后端或构造 `Database` 而未配置池容量的调用方仍默认 10；`DATABASE_POOL_MAX` 仅由后端启动入口显式解析。
+
+后端探针使用镜像内 BusyBox `wget`，不再为每次探测启动 Node。HTTP 错误、连接失败和超时均判为失败。默认 30 秒周期、连续 10 次失败意味着故障判定名义窗口约 300 秒，原来 5 秒周期约 50 秒；实际还受超时和启动宽限期影响。可设置 `HEALTHCHECK_INTERVAL=5s` 恢复较快发现，代价是更频繁唤醒。首次启动仍使用 180 秒等待门禁，健康状态本身不会让 Docker 自动重启一个仍在运行的进程。
+
+三个生产服务均使用 `json-file` 日志轮转，每个文件最多 `10m`、保留 3 个文件。后端仍默认 `INFO`；希望减少请求日志写入时可以显式设置 `LOG_LEVEL=warn`，错误日志仍保留。开发配置保持原有热更新行为。多架构预构建镜像发布尚未包含在这一批，目前 `make prod` 仍在目标机器上构建镜像。
+
 ## 更新与停止
 
 ```bash

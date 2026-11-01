@@ -24,7 +24,9 @@
     "e2e": "npm run e2e --workspace @personal-platform/frontend --if-present",
     "test:docker:config": "node --test scripts/test/docker-config.test.mjs",
     "verify:docker": "node scripts/verify-docker.mjs",
-    "restore": "tsx scripts/backup.ts restore"
+    "restore": "tsx scripts/backup.ts restore",
+    "benchmark:runtime": "node scripts/benchmark-runtime/run.mjs",
+    "test:benchmark:runtime": "node --test scripts/test/benchmark-runtime.test.mjs"
   },
   "engines": {
     "node": ">=22"

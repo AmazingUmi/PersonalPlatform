@@ -25,6 +25,18 @@ const environment = {
   FRONTEND_PORT: "5173",
   SESSION_COOKIE_SECURE: "",
   TRUST_PROXY: "",
+  DATABASE_POOL_MAX: undefined,
+  PG_SHARED_BUFFERS: undefined,
+  PG_WORK_MEM: undefined,
+  PG_MAINTENANCE_WORK_MEM: undefined,
+  PG_MAX_CONNECTIONS: undefined,
+  HEALTHCHECK_INTERVAL: undefined,
+  DATABASE_MEMORY_LIMIT: undefined,
+  BACKEND_MEMORY_LIMIT: undefined,
+  FRONTEND_MEMORY_LIMIT: undefined,
+  DATABASE_CPU_LIMIT: undefined,
+  BACKEND_CPU_LIMIT: undefined,
+  FRONTEND_CPU_LIMIT: undefined,
 };
 
 function config(files, overrides = {}) {
@@ -75,6 +87,43 @@ test("production waits for PostgreSQL TCP readiness after the socket-only initia
   const probe = services.database.healthcheck.test.join(" ");
   assert.match(probe, /pg_isready\s+-h\s+127\.0\.0\.1\b/, "a Unix socket can become ready before the backend can connect over TCP");
   assert.equal(services.backend.depends_on.database.condition, "service_healthy");
+});
+
+test("production defaults bound connection overhead, probe processes and logs without lowering resource ceilings", () => {
+  const result = config(["docker/docker-compose.prod.yml"]);
+  assert.equal(result.status, 0, result.stderr);
+  const { services } = JSON.parse(result.stdout);
+  assert.equal(services.backend.environment.DATABASE_POOL_MAX, "4");
+  assert.deepEqual(services.database.command, ["postgres", "-c", "shared_buffers=64MB", "-c", "work_mem=2MB", "-c", "maintenance_work_mem=32MB", "-c", "max_connections=30"]);
+  for (const service of Object.values(services)) {
+    assert.equal(service.healthcheck.interval, "30s");
+    assert.equal(service.healthcheck.retries, 10);
+    assert.deepEqual(service.logging, { driver: "json-file", options: { "max-file": "3", "max-size": "10m" } });
+  }
+  assert.deepEqual(services.backend.healthcheck.test, ["CMD", "wget", "-q", "-T", "2", "-O", "/dev/null", "http://127.0.0.1:8000/api/core/health/ready"]);
+  assert.equal(services.database.deploy.resources.limits.memory, "1073741824");
+  assert.equal(services.backend.deploy.resources.limits.memory, "536870912");
+  assert.equal(services.frontend.deploy.resources.limits.memory, "268435456");
+});
+
+test("production resource settings can be overridden independently and empty pool overrides reach validation", () => {
+  const result = config(["docker/docker-compose.prod.yml"], {
+    DATABASE_POOL_MAX: "10", PG_SHARED_BUFFERS: "128MB", PG_WORK_MEM: "4MB", PG_MAINTENANCE_WORK_MEM: "64MB", PG_MAX_CONNECTIONS: "100",
+    HEALTHCHECK_INTERVAL: "5s", DATABASE_MEMORY_LIMIT: "768M", BACKEND_MEMORY_LIMIT: "384M", FRONTEND_MEMORY_LIMIT: "128M",
+    DATABASE_CPU_LIMIT: "0.75", BACKEND_CPU_LIMIT: "0.8", FRONTEND_CPU_LIMIT: "0.25",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const { services } = JSON.parse(result.stdout);
+  assert.equal(services.backend.environment.DATABASE_POOL_MAX, "10");
+  assert.deepEqual(services.database.command, ["postgres", "-c", "shared_buffers=128MB", "-c", "work_mem=4MB", "-c", "maintenance_work_mem=64MB", "-c", "max_connections=100"]);
+  for (const service of Object.values(services)) assert.equal(service.healthcheck.interval, "5s");
+  for (const [name, memory, cpus] of [["database", 768, "0.75"], ["backend", 384, "0.8"], ["frontend", 128, "0.25"]]) {
+    assert.equal(services[name].deploy.resources.limits.memory, String(memory * 1024 * 1024));
+    assert.equal(Number(services[name].deploy.resources.limits.cpus), Number(cpus));
+  }
+  const empty = config(["docker/docker-compose.prod.yml"], { DATABASE_POOL_MAX: "" });
+  assert.equal(empty.status, 0, empty.stderr);
+  assert.equal(JSON.parse(empty.stdout).services.backend.environment.DATABASE_POOL_MAX, "");
 });
 
 test("development retains live source mounts and private backend/database networking", () => {

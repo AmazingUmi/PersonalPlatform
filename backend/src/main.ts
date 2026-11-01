@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { createPlatform } from "./core/platform.js";
 import { createLogger } from "./core/logging/index.js";
 import { loadConfig, findRepoRoot } from "./core/config/index.js";
-import { Database } from "./core/database/index.js";
+import { Database, resolveDatabasePoolMax } from "./core/database/index.js";
 import { runCoreMigrations, runAppMigrations, singleAppMigrationTarget } from "./core/database/startup-migrations.js";
 import { runMigrations } from "./core/database/migrate.js";
 import { ensureBootstrapAdmin } from "./core/auth/service.js";
@@ -20,7 +20,7 @@ const log = createLogger(process.env.LOG_LEVEL?.toLowerCase() ?? "info");
 const config = loadConfig();
 const appsDir = join(root, config.apps.manifests_directory);
 
-const database = new Database(databaseUrl, log);
+const database = new Database(databaseUrl, log, { max: resolveDatabasePoolMax(process.env) });
 
 async function main(): Promise<void> {
   try {

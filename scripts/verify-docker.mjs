@@ -25,6 +25,18 @@ const values = {
   SESSION_COOKIE_SECURE: "true",
   TRUST_PROXY: "uniquelocal",
   LOG_LEVEL: "warn",
+  DATABASE_POOL_MAX: "4",
+  PG_SHARED_BUFFERS: "64MB",
+  PG_WORK_MEM: "2MB",
+  PG_MAINTENANCE_WORK_MEM: "32MB",
+  PG_MAX_CONNECTIONS: "30",
+  HEALTHCHECK_INTERVAL: "30s",
+  DATABASE_MEMORY_LIMIT: "1G",
+  BACKEND_MEMORY_LIMIT: "512M",
+  FRONTEND_MEMORY_LIMIT: "256M",
+  DATABASE_CPU_LIMIT: "1.0",
+  BACKEND_CPU_LIMIT: "1.0",
+  FRONTEND_CPU_LIMIT: "0.5",
 };
 const environment = { ...process.env, ...values };
 let composeStarted = false;
@@ -35,11 +47,16 @@ function saveEnvironment() {
   writeFileSync(envFile, Object.entries(values).map(([key, value]) => `${key}='${value}'`).join("\n") + "\n", { mode: 0o600 });
 }
 
-function run(command, args, { capture = false, allowFailure = false } = {}) {
+function run(command, args, { capture = false, allowFailure = false, expectFailure = false } = {}) {
   const result = spawnSync(command, args, {
     cwd: root, env: environment, encoding: "utf8",
     stdio: capture ? "pipe" : "inherit", maxBuffer: 8 * 1024 * 1024,
   });
+  if (expectFailure) {
+    assert.ifError(result.error);
+    assert.ok(result.status !== null && result.status !== 0, `${command} was expected to reject invalid configuration`);
+    return `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  }
   if (!allowFailure && (result.error || result.status !== 0)) {
     // Do not echo env vars or command arguments: they can contain secrets.
     throw new Error(`${command} failed (${result.error?.message ?? `exit ${result.status}`}): ${capture ? result.stderr : "see output above"}`);
@@ -110,6 +127,8 @@ try {
   console.log(`Building isolated production project ${project}`);
   composeStarted = true;
   compose(["build"]);
+  const invalidPool = compose(["run", "--rm", "--no-deps", "-e", "DATABASE_POOL_MAX=", "backend"], { capture: true, expectFailure: true });
+  assert.match(invalidPool, /DATABASE_POOL_MAX must be an integer from 1 to 100/, "startup rejects an explicitly empty pool before attempting database access");
   compose(["up", "-d", "--wait", "--wait-timeout", "180"]);
 
   const port = compose(["port", "frontend", "8080"], { capture: true });
@@ -120,6 +139,36 @@ try {
     const [container] = JSON.parse(run("docker", ["inspect", id], { capture: true }));
     assert.ok(container.Config.User && !["root", "0", "0:0"].includes(container.Config.User), `${service} runs non-root`);
     assert.ok(container.Mounts.every((mount) => mount.Type !== "bind"), `${service} has no host source mounts`);
+    const probe = container.Config.Healthcheck.Test;
+    assert.equal(probe[0], "CMD");
+    assert.equal(probe[1], "wget", `${service} uses the runtime lightweight HTTP probe`);
+    compose(["exec", "-T", service, ...probe.slice(1)]);
+    if (service === "backend") {
+      // Exercise the actual image's client/flags against HTTP failure and a
+      // stalled server; a successful TCP connection alone is insufficient.
+      compose(["exec", "-T", "backend", "node", "--input-type=module", "-e", `
+        import assert from 'node:assert/strict';
+        import {createServer} from 'node:http';
+        import {spawn} from 'node:child_process';
+        const probe=${JSON.stringify(probe.slice(1))};
+        const check=url=>new Promise((resolve,reject)=>{
+          const p=spawn(probe[0],[...probe.slice(1,-1),url],{stdio:'ignore'});
+          p.once('error',reject);p.once('exit',code=>resolve(code));
+        });
+        let mode='unavailable';
+        const server=createServer((req,res)=>{if(mode==='unavailable'){res.writeHead(503);res.end('unavailable');}});
+        await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+        const url='http://127.0.0.1:'+server.address().port+'/';
+        try {
+          assert.notEqual(await check(url),0,'HTTP 503 must fail');
+          mode='stalled';
+          const watchdog=setTimeout(()=>{console.error('probe timeout was not bounded');process.exit(1);},10000);
+          try { assert.notEqual(await check(url),0,'stalled HTTP response must time out'); }
+          finally {clearTimeout(watchdog);}
+        } finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
+        assert.notEqual(await check(url),0,'closed listener must fail');
+      `]);
+    }
   }
   compose(["exec", "-T", "backend", "node", "--input-type=module", "-e", `
     import assert from 'node:assert/strict';
@@ -183,6 +232,11 @@ try {
     const client=new pg.Client({connectionString:process.env.DATABASE_URL});
     await client.connect();
     try {
+      const settings={shared_buffers:'64MB',work_mem:'2MB',maintenance_work_mem:'32MB',max_connections:'30',fsync:'on',synchronous_commit:'on'};
+      for(const [name,value] of Object.entries(settings)) {
+        const {rows}=await client.query('SHOW '+name);
+        assert.equal(rows[0][name],value,name+' effective setting');
+      }
       for(const [scope,names] of Object.entries(expected)) {
         assert.match(scope,/^[a-z][a-z0-9_]*$/);
         const {rows}=await client.query('SELECT name FROM "'+scope+'".migrations');

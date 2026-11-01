@@ -16,6 +16,28 @@ export interface DatabaseContext {
   withTransaction<T>(fn: (tx: DatabaseContext) => Promise<T>): Promise<T>;
 }
 
+export interface DatabasePoolOptions {
+  /** Shared by all Apps and users; unrelated to PostgreSQL max_connections. */
+  max?: number;
+}
+
+function validatePoolMax(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > 100) {
+    throw new Error("DATABASE_POOL_MAX must be an integer from 1 to 100");
+  }
+  return value;
+}
+
+/** Startup-only parsing; constructors never implicitly read process.env. */
+export function resolveDatabasePoolMax(env: Record<string, string | undefined>): number {
+  const raw = env.DATABASE_POOL_MAX;
+  if (raw === undefined) return 10;
+  if (!/^[1-9]\d*$/.test(raw)) {
+    throw new Error("DATABASE_POOL_MAX must be an integer from 1 to 100");
+  }
+  return validatePoolMax(Number(raw));
+}
+
 /**
  * Single shared PostgreSQL pool owned by Core. Apps receive a `DatabaseContext`
  * and never construct their own connections.
@@ -26,8 +48,9 @@ export class Database {
   constructor(
     connectionString: string,
     private readonly log?: Logger,
+    options: DatabasePoolOptions = {},
   ) {
-    this.pool = new Pool({ connectionString, max: 10 });
+    this.pool = new Pool({ connectionString, max: validatePoolMax(options.max ?? 10) });
   }
 
   async connect(): Promise<void> {
