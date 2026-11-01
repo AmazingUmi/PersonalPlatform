@@ -115,8 +115,14 @@ test("Settings navigation and controls remain usable on desktop and mobile", asy
   await page.goto("/settings");
   for (const viewport of [{ width: 1280, height: 900 }, { width: 768, height: 1024 }, { width: 390, height: 844 }, { width: 320, height: 740 }]) {
     await page.setViewportSize(viewport);
-    for (const section of ["General", "Data", "WebDAV", "Users"]) {
-      await page.getByRole("navigation", { name: "Settings sections" }).getByRole("link", { name: new RegExp(`^${section}`) }).click();
+    for (const section of ["General", "Data", "WebDAV", "Users"] as const) {
+      const sectionLink = page.getByRole("navigation", { name: "Settings sections" }).getByRole("link", { name: section, exact: true });
+      await sectionLink.click();
+      // Link clicks can resolve before React commits the query-driven section.
+      // Wait for that section, rather than collecting locators for the previous view.
+      await expect(sectionLink).toHaveAttribute("aria-current", "page");
+      const heading = { General: "System", Data: "Data management", WebDAV: "WebDAV backup", Users: "Users" }[section];
+      await expect(page.getByRole("heading", { name: heading, exact: true })).toBeVisible();
       if (section === "WebDAV") await expect(page.getByLabel("WebDAV folder URL")).toBeVisible();
       if (section === "Data") {
         const chooser = page.getByRole("button", { name: "Choose file", exact: true });
@@ -124,9 +130,10 @@ test("Settings navigation and controls remain usable on desktop and mobile", asy
         await expect(page.getByLabel("Backup file")).toBeHidden();
       }
       const panels = page.locator(".px-window:visible");
-      expect(await panels.count()).toBeGreaterThan(0);
+      await expect(panels).toHaveCount(section === "General" ? 2 : 1);
       for (const panel of await panels.all()) {
         const bounds = await panel.boundingBox();
+        expect(bounds).not.toBeNull();
         expect(bounds!.x).toBeGreaterThanOrEqual(0);
         expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
         expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);

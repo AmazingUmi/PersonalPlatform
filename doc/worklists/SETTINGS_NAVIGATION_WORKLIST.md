@@ -47,3 +47,4 @@
 - 本地验收：`SKIP_INSTALL=1 ./scripts/verify.sh` PASS（check/build、219 后端单元、513 前端单元、398 集成、全新迁移与启动冒烟）；`npm run e2e` 52/52 PASS；`git diff --check` PASS。
 - 视觉验收：真实浏览器检查 1280/768/390/320px 的四个分区、手机文件选择和长文件名历史；无页面横向溢出，导航及操作保持像素样式。
 - 独立 final-reviewer：ACCEPTED，无实施阻塞项。提交后由对应 GitHub Actions 记录远端验收结果。
+- CI 后续修正：首次远端运行 51/52 E2E 通过，布局测试在导航 React 提交前枚举旧视图导致空边界。测试增加当前链接、目标标题与可见面板数量等待；不修改产品代码或放宽布局断言。
