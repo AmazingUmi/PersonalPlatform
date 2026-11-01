@@ -3,7 +3,8 @@
 .data-management__actions { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; margin-block: 12px; }
 .data-management__field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .data-management__field input, .data-management__field select { max-width: 100%; min-width: 0; }
-.data-management__field input[type="file"] { padding-block: 8px; }
+.data-management__file-picker { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-block: 16px; }
+.data-management__file-picker .data-management__filename { min-width: 0; flex: 1 1 180px; }
 .data-management__form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-block: 16px; }
 .data-management__form > :first-child { grid-column: 1 / -1; }
 .data-management__section { margin-top: 24px; border-top: 2px solid var(--px-border-soft); padding-top: 16px; }

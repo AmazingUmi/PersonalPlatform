@@ -1,0 +1,19 @@
+.settings-layout { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 24px; align-items: start; }
+.settings-nav { display: flex; flex-direction: column; gap: 12px; }
+.settings-nav__link { display: flex; flex-direction: column; align-items: start; text-align: left; gap: 6px; padding: 12px; }
+.settings-nav__link small { font-family: var(--font-ui); font-size: 11px; font-weight: normal; text-transform: none; }
+.settings-content { min-width: 0; }
+.settings-content > div > .px-window + .px-window { margin-top: 24px; }
+.settings-page [hidden], .data-management [hidden] { display: none !important; }
+.settings-subnav { display: flex; flex-wrap: wrap; gap: 12px; margin-block: 20px; }
+.settings-page .px-button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.settings-page .user-panel__form { gap: 16px; }
+.settings-page .user-panel__field { min-width: 0; flex: 1 1 180px; }
+.settings-page .user-panel__field input { width: 100%; min-width: 0; }
+.settings-page .user-panel__table { min-width: 480px; }
+.settings-focus-target:focus { outline: none; }
+@media (max-width: 768px) {
+  .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .settings-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-nav__link { align-items: center; text-align: center; }
+}

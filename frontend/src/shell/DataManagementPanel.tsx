@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { useAuth } from "./AuthContext";
 import { PixelWindow } from "../shared/ui/PixelWindow";
 import { PixelButton } from "../shared/ui/PixelButton";
@@ -15,7 +16,15 @@ const message = (error: unknown) => error instanceof Error ? error.message : "Th
 const dateLabel = (value: string | null) => value ? new Date(value).toLocaleString() : "—";
 const scopeLabel = (scope: DataScope) => scope === "all" ? "All users" : "My data";
 
-export function DataManagementPanel() {
+export function DataManagementPanel({ section }: { section: "data" | "webdav" | null }) {
+  const [, setParams] = useSearchParams();
+  const [webDavVisited, setWebDavVisited] = useState(section === "webdav");
+  const dataRef = useRef<HTMLDivElement>(null);
+  const focusData = useRef(false);
+  useEffect(() => {
+    if (section === "webdav") setWebDavVisited(true);
+    if (section === "data" && focusData.current) { const heading = dataRef.current?.querySelector("h2"); if (heading) { heading.tabIndex = -1; heading.focus(); } focusData.current = false; }
+  }, [section]);
   const { user } = useAuth();
   const admin = user?.role === "admin";
   const [scope, setScope] = useState<DataScope>("own");
@@ -42,16 +51,21 @@ export function DataManagementPanel() {
     await perform(async () => { setSnapshot(await parseBackup(file)); setSource(file.name); });
   }
   async function prepareRemote(record: BackupRecord) {
-    resetSelection();
+    focusData.current = true;
+    setParams((previous) => { const next = new URLSearchParams(previous); next.set("section", "data"); return next; });
     await perform(async () => {
       const downloaded = await downloadBackup(record.id);
       const data = await parseBackup(downloaded.blob);
+      const nextPreview = await previewMerge(record.scope, data);
       setScope(record.scope); setSource(record.filename); setSnapshot(data);
-      setPreview(await previewMerge(record.scope, data));
+      setPreview(nextPreview); setResult(null);
+      if (fileRef.current) fileRef.current.value = "";
     });
   }
 
   return <>
+    <div hidden={section !== "data"}>
+    <div ref={dataRef} tabIndex={-1} className="settings-focus-target" aria-label="Data management">
     <PixelWindow title="Data management" icon="file" className="data-management">
       <p>Export a full JSON backup of your app data and attachments, or merge a previous full backup into this installation.</p>
       <div className="data-management__actions">
@@ -70,13 +84,14 @@ export function DataManagementPanel() {
       <div className="data-management__section">
         <h3>Merge a previous backup</h3>
         <p>Current records are kept. Missing records and relationships are added. A conflict that cannot be merged safely stops the entire import.</p>
-        <label className="data-management__field" htmlFor="backup-file">Backup file
-          <input ref={fileRef} id="backup-file" type="file" accept=".json,application/json" disabled={busy} onChange={(event) => {
-            const file = event.target.files?.[0];
-            if (file) void readSelection(file); else resetSelection();
-          }} />
-        </label>
-        {source && <p className="data-management__filename">Selected: {source}</p>}
+        <input ref={fileRef} id="backup-file" aria-label="Backup file" type="file" hidden accept=".json,application/json" disabled={busy} onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) void readSelection(file);
+        }} />
+        <div className="data-management__file-picker">
+          <PixelButton variant="secondary" disabled={busy} onClick={() => fileRef.current?.click()}>Choose file</PixelButton>
+          <span className="data-management__filename" aria-live="polite">{source ? `Selected: ${source}` : "No file selected"}</span>
+        </div>
         <div className="data-management__actions">
           <PixelButton variant="secondary" disabled={busy || snapshot === null} onClick={() => void perform(async () => {
             setResult(null); setPreview(null); setPreview(await previewMerge(scope, snapshot));
@@ -100,7 +115,8 @@ export function DataManagementPanel() {
       {busy && <p role="status">Working…</p>}
       {error && <StatusMessage tone="error">{error}</StatusMessage>}
     </PixelWindow>
-    <WebDavPanel admin={admin} onPrepare={prepareRemote} importBusy={busy} />
+    </div></div>
+    {(webDavVisited || section === "webdav") && <div hidden={section !== "webdav"}><WebDavPanel admin={admin} onPrepare={prepareRemote} importBusy={busy} /></div>}
   </>;
 }
 
@@ -121,6 +137,10 @@ function MergeTable({ report }: { report: MergeReport }) {
 }
 
 function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepare: (record: BackupRecord) => Promise<void>; importBusy: boolean }) {
+  const [params, setParams] = useSearchParams();
+  const requestedView = params.get("view");
+  const view = requestedView === "backup" || requestedView === "history" ? requestedView : "connection";
+  function viewUrl(nextView: string) { const next = new URLSearchParams(params); next.set("section", "webdav"); next.set("view", nextView); return `?${next}`; }
   const [config, setConfig] = useState<WebDavConfig | null>(null);
   const [history, setHistory] = useState<BackupRecord[]>([]);
   const [endpoint, setEndpoint] = useState("");
@@ -152,6 +172,15 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
 
   const dirty = !config || endpoint !== config.endpoint || username !== config.username || scope !== config.scope || intervalHours !== config.intervalHours || password !== "";
   const disabled = busy || importBusy || loading;
+  const pageCount = Math.max(1, Math.ceil(history.length / 10));
+  const requestedPage = Number(params.get("page") ?? 1);
+  const page = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? Math.min(requestedPage, pageCount) : 1;
+  function changePage(nextPage: number) { setParams((previous) => { const next = new URLSearchParams(previous); next.set("page", String(nextPage)); return next; }); }
+  useEffect(() => {
+    if (!loading && params.has("page") && params.get("page") !== String(page)) {
+      setParams((previous) => { const next = new URLSearchParams(previous); next.set("page", String(page)); return next; }, { replace: true });
+    }
+  }, [loading, page, params, setParams]);
   async function perform(action: () => Promise<void>) {
     if (disabled) return;
     setBusy(true); setError(null); setNotice(null);
@@ -164,10 +193,14 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
   }
 
   return <PixelWindow title="WebDAV backup" icon="file" className="data-management">
-    <p>Save backups to your WebDAV drive. Each account has its own connection and backup history.</p>
+    <p>Save backups to your WebDAV drive.</p>
+    <nav className="settings-subnav" aria-label="WebDAV sections">
+      {["connection", "backup", "history"].map((item) => <Link key={item} to={viewUrl(item)} aria-current={view === item ? "page" : undefined} className={`px-button px-button--${view === item ? "primary" : "secondary"} px-button--md`}>{item === "connection" ? "Connection" : item === "backup" ? "Backup" : "History"}</Link>)}
+    </nav>
     {loading ? <p role="status">Loading backup settings…</p> : loadError ? <StatusMessage tone="error">
       <p>Could not load backup settings: {loadError}</p><PixelButton variant="secondary" onClick={() => void load()}>Retry backup settings</PixelButton>
     </StatusMessage> : <>
+      <div hidden={view !== "connection"}>
       <form className="data-management__form" onSubmit={(event) => { event.preventDefault(); void perform(async () => {
         applyConfig(await saveWebDav({ endpoint: endpoint.trim(), username, ...(password ? { password } : {}), scope, intervalHours }));
         setHistory((await getBackupHistory()).items); setNotice("Backup settings saved."); setConfirmDelete(false);
@@ -198,6 +231,17 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
       {endpoint.trim().startsWith("http:") && <StatusMessage tone="warning">HTTP sends your credentials and backup without transport encryption.</StatusMessage>}
       {scope === "all" && <StatusMessage tone="warning">All-users backups include account password hashes and everyone's app data. Only administrators can use this scope.</StatusMessage>}
       <p className="muted">Automatic backups are incremental. The first backup establishes a baseline; later backups upload changed data blocks and new attachments. Unchanged data creates no new backup. After downtime, one overdue backup runs when the server resumes. Existing remote files are not deleted automatically.</p>
+      {config?.configured && <div className="data-management__actions">
+        <PixelButton variant="secondary" disabled={disabled || dirty} onClick={() => void perform(async () => { await testWebDav(); setNotice("WebDAV connection successful."); })}>Test connection</PixelButton>
+        <PixelButton variant="danger" disabled={disabled} onClick={() => setConfirmDelete(true)}>Remove connection</PixelButton>
+      </div>}
+      {confirmDelete && <StatusMessage tone="warning"><p>Remove the saved connection and stop automatic backups? Files already on your drive remain there.</p>
+        <div className="data-management__actions"><PixelButton variant="danger" disabled={disabled} onClick={() => void perform(async () => { await deleteWebDav(); await refreshStatus(); setConfirmDelete(false); setNotice("Connection removed. Automatic backups are off."); })}>Confirm remove connection</PixelButton>
+        <PixelButton variant="secondary" disabled={disabled} onClick={() => setConfirmDelete(false)}>Cancel</PixelButton></div>
+      </StatusMessage>}
+      </div>
+      <div hidden={view !== "backup"}>
+      {!config?.configured && <p>Set up a connection to start backing up your data.</p>}
       {config?.configured && <>
         {dirty && <p className="muted">Save your changes before testing the connection or creating a backup.</p>}
         <label className="data-management__field" htmlFor="webdav-mode">Manual backup mode
@@ -208,7 +252,6 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
         </label>
         <p className="muted">Full mode uploads an independent complete file. It does not change the automatic incremental schedule.</p>
         <div className="data-management__actions">
-          <PixelButton variant="secondary" disabled={disabled || dirty} onClick={() => void perform(async () => { await testWebDav(); setNotice("WebDAV connection successful."); })}>Test connection</PixelButton>
           <PixelButton disabled={disabled || dirty} onClick={() => void perform(async () => {
             try {
               const result = await backupWebDav(backupMode);
@@ -223,12 +266,7 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
             finally { await refreshStatus(); }
           })}>Back up now</PixelButton>
           <PixelButton variant="ghost" disabled={disabled || dirty} onClick={() => void perform(refreshStatus)}>Refresh backup status</PixelButton>
-          <PixelButton variant="danger" disabled={disabled} onClick={() => setConfirmDelete(true)}>Remove connection</PixelButton>
         </div>
-        {confirmDelete && <StatusMessage tone="warning"><p>Remove the saved connection and stop automatic backups? Files already on your drive remain there.</p>
-          <div className="data-management__actions"><PixelButton variant="danger" disabled={disabled} onClick={() => void perform(async () => { await deleteWebDav(); await refreshStatus(); setConfirmDelete(false); setNotice("Connection removed. Automatic backups are off."); })}>Confirm remove connection</PixelButton>
-          <PixelButton variant="secondary" disabled={disabled} onClick={() => setConfirmDelete(false)}>Cancel</PixelButton></div>
-        </StatusMessage>}
         <dl className="px-deflist">
           <div><dt>Next automatic backup</dt><dd>{dateLabel(config.nextRunAt)}</dd></div>
           <div><dt>Last backup attempt</dt><dd>{dateLabel(config.lastRunAt)}</dd></div>
@@ -236,16 +274,24 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
         </dl>
         {config.lastError && <StatusMessage tone="error">Last backup failed: {config.lastError}</StatusMessage>}
       </>}
-      <div className="data-management__section">
+      </div>
+      <div hidden={view !== "history"}>
         <h3>Backup history</h3>
-        <p className="muted">Download and Review reconstruct an incremental backup as a full JSON file. Keep its remote manifest and all referenced objects together. For backups outside this history, a full JSON file can be imported above; incremental manifests need the offline reconstruction tool.</p>
-        {history.length === 0 ? <p>No backups recorded yet.</p> : <ul className="data-management__history">{history.map((record) => <li key={record.id}>
+        <p className="muted">Showing the latest {history.length} recorded backups (up to 100).</p>
+        <PixelButton variant="secondary" disabled={disabled || dirty} onClick={() => void perform(refreshStatus)}>Refresh history</PixelButton>
+        <p className="muted">Download and Review reconstruct an incremental backup as a full JSON file. Keep its remote manifest and all referenced objects together. For backups outside this history, a full JSON file can be imported in Data; incremental manifests need the offline reconstruction tool.</p>
+        {history.length === 0 ? <p>No backups recorded yet.</p> : <ul className="data-management__history">{history.slice((page - 1) * 10, page * 10).map((record) => <li key={record.id}>
           <div><strong className="data-management__filename">{record.filename}</strong><p className="muted">{record.kind === "incremental" ? "Incremental" : "Full"} · {scopeLabel(record.scope)} · {dateLabel(record.createdAt)} · Full data {(record.size / 1024).toFixed(1)} KiB · Uploaded {(record.uploadedBytes / 1024).toFixed(1)} KiB</p></div>
           {record.available ? <div className="data-management__actions">
-            <PixelButton variant="secondary" size="sm" disabled={disabled || dirty} onClick={() => void perform(async () => saveDownload(await downloadBackup(record.id)))}>Download {record.filename}</PixelButton>
-            <PixelButton variant="secondary" size="sm" disabled={disabled || dirty} onClick={() => void perform(async () => { await onPrepare(record); })}>Review {record.filename} for import</PixelButton>
+            <PixelButton variant="secondary" aria-label={`Download ${record.filename}`} disabled={disabled || dirty} onClick={() => void perform(async () => saveDownload(await downloadBackup(record.id)))}>Download</PixelButton>
+            <PixelButton variant="secondary" aria-label={`Review ${record.filename} for import`} disabled={disabled || dirty} onClick={() => void perform(async () => { await onPrepare(record); })}>Review</PixelButton>
           </div> : <p className="muted">Unavailable with the current connection or permissions.</p>}
         </li>)}</ul>}
+        {history.length > 0 && <nav className="data-management__actions" aria-label="Backup history pages">
+          <PixelButton variant="secondary" disabled={disabled || page === 1} onClick={() => changePage(page - 1)}>Previous page</PixelButton>
+          <span role="status">Page {page} of {pageCount} · {history.length} records</span>
+          <PixelButton variant="secondary" disabled={disabled || page === pageCount} onClick={() => changePage(page + 1)}>Next page</PixelButton>
+        </nav>}
       </div>
     </>}
     {busy && <p role="status">Working on WebDAV…</p>}
