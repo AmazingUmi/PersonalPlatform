@@ -32,7 +32,21 @@ make dev                   # 等价于 docker compose up --build
 
 ### 生产部署
 
-开发与生产使用独立 Compose 文件。生产运行编译后的 Node 后端和 Nginx 静态前端，不挂载开发源码。
+生产运行编译后的 Node 后端和 Nginx 静态前端，支持发行镜像与源码构建两种入口。首次公开镜像版本为 `v0.1.0`，目标平台为 `linux/amd64` 和 `linux/arm64`；是否已可下载，以 [Releases](https://github.com/AmazingUmi/PersonalPlatform/releases) 中完成发布的版本为准。
+
+**使用发行镜像**：服务器只需 Docker Engine 和 Compose v2.20+，不需要 Node、npm 或源码。在对应 Release 下载部署包及 `SHA256SUMS`，校验并解压，在解压目录执行：
+
+```bash
+cp .env.release.example .env.release
+chmod 600 .env.release
+# 编辑 .env.release，填写数据库密码和首个管理员密码。
+docker compose --env-file .env.release -f docker/docker-compose.release.yml pull
+docker compose --env-file .env.release -f docker/docker-compose.release.yml up -d --no-build --wait --wait-timeout 180
+```
+
+部署包使用配套的前后端镜像摘要，公开 GHCR 包可免登录拉取。正式浏览器访问须通过域名 HTTPS 反向代理，默认入口为服务器本机 `127.0.0.1:5173`。
+
+**在服务器上从源码构建**：在仓库根目录执行：
 
 ```bash
 cp .env.production.example .env.production
@@ -41,7 +55,7 @@ make prod
 make prod-ps
 ```
 
-生产默认项目与开发数据分离，数据库和附件使用命名卷；`make prod-down` 停止服务并保留数据。现有部署须先备份、停写并迁移数据，不能直接把全新生产卷当成旧数据。完整操作、HTTP 验证和迁移步骤见 [Docker 部署指南](doc/DEPLOYMENT.md)。
+开发与生产使用独立 Compose 文件。两个生产入口使用相同的默认项目名和数据卷；生产与开发数据分离。镜像不包含账号、笔记或附件，现有电脑数据需要单独迁移。更新前保存相匹配的数据库、附件、配置及私有密钥备份；保留数据卷，不能把换回旧镜像当作数据库回滚。完整操作、HTTP 验证、升级和恢复边界见 [Docker 部署指南](doc/DEPLOYMENT.md)。
 
 镜像构建和真实启动验收：`npm run verify:docker`（需要 Docker daemon，自动使用并清理独立临时项目）。
 

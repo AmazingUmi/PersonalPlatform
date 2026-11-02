@@ -1,0 +1,22 @@
+# Standalone pull-only production deployment; no source checkout or build.
+name: ${COMPOSE_PROJECT_NAME:-personal-platform-production}
+
+services:
+  database:
+    extends:
+      file: docker-compose.runtime.yml
+      service: database
+  backend:
+    extends:
+      file: docker-compose.runtime.yml
+      service: backend
+    image: ${BACKEND_IMAGE:?Set BACKEND_IMAGE to a pinned release image}
+  frontend:
+    extends:
+      file: docker-compose.runtime.yml
+      service: frontend
+    image: ${FRONTEND_IMAGE:?Set FRONTEND_IMAGE to a pinned release image}
+
+volumes:
+  postgres-data:
+  app-storage:

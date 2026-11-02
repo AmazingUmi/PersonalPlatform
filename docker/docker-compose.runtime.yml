@@ -1,0 +1,106 @@
+# Shared runtime service definitions; use the prod or release entry file.
+name: ${COMPOSE_PROJECT_NAME:-personal-platform-production}
+
+x-logging: &bounded-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  database:
+    image: postgres:17-alpine
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-64MB}
+      - -c
+      - work_mem=${PG_WORK_MEM:-2MB}
+      - -c
+      - maintenance_work_mem=${PG_MAINTENANCE_WORK_MEM:-32MB}
+      - -c
+      - max_connections=${PG_MAX_CONNECTIONS:-30}
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB for production}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER for production}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD for production}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    logging: *bounded-logging
+    healthcheck:
+      # initdb uses a temporary socket-only server; backend needs the final TCP server.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: ${HEALTHCHECK_INTERVAL:-30s}
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: ${DATABASE_MEMORY_LIMIT:-1G}
+          cpus: "${DATABASE_CPU_LIMIT:-1.0}"
+
+  backend:
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8000
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # An explicitly empty override is invalid, not a request for the default.
+      DATABASE_POOL_MAX: ${DATABASE_POOL_MAX-4}
+      PLATFORM_ROOT: /workspace
+      PLATFORM_ENVIRONMENT: production
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-true}
+      TRUST_PROXY: ${TRUST_PROXY:-uniquelocal}
+      DATA_BACKUP_ALLOWED_ORIGINS: ${DATA_BACKUP_ALLOWED_ORIGINS:-}
+      DATA_BACKUP_ENCRYPTION_KEY: ${DATA_BACKUP_ENCRYPTION_KEY:-}
+      # The entrypoint constructs DATABASE_URL inside the container so URL
+      # delimiters in credentials cannot change the host, path or query.
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB for production}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER for production}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD for production}
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:?Set BOOTSTRAP_ADMIN_USERNAME for production}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?Set BOOTSTRAP_ADMIN_PASSWORD for production}
+    volumes:
+      - app-storage:/workspace/storage
+    depends_on:
+      database:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+    logging: *bounded-logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "2", "-O", "/dev/null", "http://127.0.0.1:8000/api/core/health/ready"]
+      interval: ${HEALTHCHECK_INTERVAL:-30s}
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: ${BACKEND_MEMORY_LIMIT:-512M}
+          cpus: "${BACKEND_CPU_LIMIT:-1.0}"
+
+  frontend:
+    ports:
+      - "${BIND_IP:-127.0.0.1}:${FRONTEND_PORT:-5173}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *bounded-logging
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "2", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: ${HEALTHCHECK_INTERVAL:-30s}
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: ${FRONTEND_MEMORY_LIMIT:-256M}
+          cpus: "${FRONTEND_CPU_LIMIT:-0.5}"
+
+volumes:
+  postgres-data:
+  app-storage:

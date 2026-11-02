@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -58,6 +58,8 @@ const environment = {
   DATABASE_CPU_LIMIT: undefined,
   BACKEND_CPU_LIMIT: undefined,
   FRONTEND_CPU_LIMIT: undefined,
+  BACKEND_IMAGE: undefined,
+  FRONTEND_IMAGE: undefined,
 };
 
 function config(files, overrides = {}) {
@@ -99,6 +101,48 @@ test("production rejects missing database and bootstrap credentials", () => {
     assert.notEqual(result.status, 0, `${variable} must be explicit`);
     assert.ok(result.stderr.includes(variable));
   }
+});
+
+const releaseImages = {
+  BACKEND_IMAGE: "ghcr.io/amazingumi/personalplatform-backend:v0.1.0",
+  FRONTEND_IMAGE: "ghcr.io/amazingumi/personalplatform-frontend:v0.1.0",
+};
+
+test("pull-only release preserves every runtime setting and the same persistent volumes", () => {
+  const source = config(["docker/docker-compose.prod.yml"]);
+  const release = config(["docker/docker-compose.release.yml"], releaseImages);
+  assert.equal(source.status, 0, source.stderr);
+  assert.equal(release.status, 0, release.stderr);
+  const sourceConfig = JSON.parse(source.stdout);
+  const releaseConfig = JSON.parse(release.stdout);
+  for (const service of ["backend", "frontend"]) {
+    assert.equal(releaseConfig.services[service].image, releaseImages[`${service.toUpperCase()}_IMAGE`]);
+    assert.equal(releaseConfig.services[service].build, undefined);
+    delete sourceConfig.services[service].build;
+    delete releaseConfig.services[service].image;
+  }
+  assert.deepEqual(releaseConfig, sourceConfig, "changing deployment entry must not create empty replacement volumes or change security/runtime defaults");
+});
+
+test("release requires both image refs and all production credentials", () => {
+  for (const variable of [...Object.keys(releaseImages), "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_USERNAME", "BOOTSTRAP_ADMIN_PASSWORD"]) {
+    const result = config(["docker/docker-compose.release.yml"], { ...releaseImages, [variable]: "" });
+    assert.notEqual(result.status, 0, variable);
+    assert.ok(result.stderr.includes(variable));
+  }
+});
+
+test("downloaded release Compose resolves in a directory without repository source", () => {
+  const bundle = resolve(temporary, "bundle/docker");
+  mkdirSync(bundle, { recursive: true });
+  for (const file of ["docker-compose.release.yml", "docker-compose.runtime.yml"]) {
+    copyFileSync(resolve(root, "docker", file), resolve(bundle, file));
+  }
+  const result = config([resolve(bundle, "docker-compose.release.yml")], releaseImages);
+  assert.equal(result.status, 0, result.stderr);
+  const parsed = JSON.parse(result.stdout);
+  assert.ok(Object.values(parsed.services).every(service => !service.build));
+  assert.ok(Object.values(parsed.services).every(service => (service.volumes ?? []).every(mount => mount.type === "volume")));
 });
 
 test("production waits for PostgreSQL TCP readiness after the socket-only initialization server", () => {

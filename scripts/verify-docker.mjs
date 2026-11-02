@@ -3,13 +3,24 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, readdirSync, existsSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, existsSync, rmSync, writeFileSync, mkdirSync, copyFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { verificationOptions, verificationCleanupArgs } from "./docker-verification-options.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const options = verificationOptions(process.argv.slice(2), root);
 const temporary = mkdtempSync(join(tmpdir(), "pp-docker-verify-"));
+// Resolve a release stack in a directory with no source/build context.
+if (options.prebuilt && !options.composeFile) {
+  mkdirSync(join(temporary, "docker"));
+  for (const file of ["docker-compose.release.yml", "docker-compose.runtime.yml"]) {
+    copyFileSync(join(root, "docker", file), join(temporary, "docker", file));
+  }
+}
+const composeFile = options.composeFile ?? (options.prebuilt
+  ? join(temporary, "docker/docker-compose.release.yml") : join(root, "docker/docker-compose.prod.yml"));
 const project = `pp-docker-verify-${process.pid}-${randomBytes(4).toString("hex")}`;
 const envFile = join(temporary, "production.env");
 const values = {
@@ -37,6 +48,7 @@ const values = {
   DATABASE_CPU_LIMIT: "1.0",
   BACKEND_CPU_LIMIT: "1.0",
   FRONTEND_CPU_LIMIT: "0.5",
+  ...(options.prebuilt ? { BACKEND_IMAGE: options.backendImage, FRONTEND_IMAGE: options.frontendImage } : {}),
 };
 const environment = { ...process.env, ...values };
 let composeStarted = false;
@@ -68,15 +80,18 @@ function run(command, args, { capture = false, allowFailure = false, expectFailu
   return result.stdout?.trim() ?? "";
 }
 
-function compose(args, options) {
+function compose(args, runOptions) {
+  if (options.prebuilt && (args[0] === "up" || args[0] === "run")) {
+    args = [args[0], ...(args[0] === "up" ? ["--no-build"] : []), "--pull", "never", ...args.slice(1)];
+  }
   return run("docker", ["compose", "--project-name", project, "--env-file", envFile,
-    "-f", join(root, "docker/docker-compose.prod.yml"), ...args], options);
+    "-f", composeFile, ...args], runOptions);
 }
 
 function cleanup() {
   if (cleaned) return;
   cleaned = true;
-  if (composeStarted) compose(["down", "--volumes", "--remove-orphans", "--rmi", "local", "--timeout", "20"], { allowFailure: true });
+  if (composeStarted) compose(verificationCleanupArgs(options.prebuilt), { allowFailure: true });
   rmSync(temporary, { recursive: true, force: true });
 }
 
@@ -123,10 +138,23 @@ async function download(path, cookie, expectedHash) {
 try {
   saveEnvironment();
   run("docker", ["info"], { capture: true });
-  run(process.execPath, ["--test", "scripts/test/docker-config.test.mjs"]);
-  console.log(`Building isolated production project ${project}`);
+  if (!options.prebuilt) run(process.execPath, ["--test", "scripts/test/docker-config.test.mjs", "scripts/test/docker-verification.test.mjs"]);
+  console.log(`Verifying isolated ${options.prebuilt ? "prebuilt" : "source-build"} project ${project}`);
   composeStarted = true;
-  compose(["build"]);
+  if (options.prebuilt) {
+    const config = JSON.parse(compose(["config", "--format", "json"], { capture: true }));
+    assert.ok(Object.values(config.services).every(service => !service.build), "prebuilt mode must not have a build context");
+    if (options.pull) compose(["pull"]);
+  } else compose(["build"]);
+  const expectedImages = options.prebuilt ? Object.fromEntries(["backend", "frontend"].map(service => {
+    const ref = values[`${service.toUpperCase()}_IMAGE`];
+    const [image] = JSON.parse(run("docker", ["image", "inspect", ref], { capture: true }));
+    const host = run("docker", ["info", "--format", "{{.Architecture}}"], { capture: true });
+    const architecture = { aarch64: "arm64", x86_64: "amd64" }[host] ?? host;
+    assert.equal(image.Os, "linux");
+    assert.equal(image.Architecture, architecture, "release verification uses a native image");
+    return [service, image.Id];
+  })) : {};
   const invalidPool = compose(["run", "--rm", "--no-deps", "-e", "DATABASE_POOL_MAX=", "backend"], { capture: true, expectFailure: true });
   assert.match(invalidPool, /DATABASE_POOL_MAX must be an integer from 1 to 100/, "startup rejects an explicitly empty pool before attempting database access");
   compose(["up", "-d", "--wait", "--wait-timeout", "180"]);
@@ -137,6 +165,10 @@ try {
   for (const service of ["backend", "frontend"]) {
     const id = compose(["ps", "-q", service], { capture: true });
     const [container] = JSON.parse(run("docker", ["inspect", id], { capture: true }));
+    if (options.prebuilt) {
+      assert.equal(container.Config.Image, values[`${service.toUpperCase()}_IMAGE`], "requested image ref");
+      assert.equal(container.Image, expectedImages[service], "running image is the exact inspected candidate");
+    }
     assert.ok(container.Config.User && !["root", "0", "0:0"].includes(container.Config.User), `${service} runs non-root`);
     assert.ok(container.Mounts.every((mount) => mount.Type !== "bind"), `${service} has no host source mounts`);
     const probe = container.Config.Healthcheck.Test;

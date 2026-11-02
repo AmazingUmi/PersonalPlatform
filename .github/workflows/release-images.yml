@@ -1,0 +1,191 @@
+name: Release images
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-images-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_VERSION: ${{ github.ref_name }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: node --test scripts/test/release-images.test.mjs
+      - run: node scripts/release-images.mjs validate-tag "$RELEASE_VERSION"
+
+  canonical:
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+
+  candidates:
+    needs: canonical
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image names
+        id: names
+        shell: bash
+        run: |
+          echo "backend=ghcr.io/${GITHUB_REPOSITORY,,}-backend" >> "$GITHUB_OUTPUT"
+          echo "frontend=ghcr.io/${GITHUB_REPOSITORY,,}-frontend" >> "$GITHUB_OUTPUT"
+      - name: Build backend candidate
+        id: backend
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: docker/backend.prod.Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ steps.names.outputs.backend }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.RELEASE_VERSION }}
+      - name: Build frontend candidate
+        id: frontend
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: docker/frontend.prod.Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ steps.names.outputs.frontend }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.RELEASE_VERSION }}
+      - name: Verify exact native candidates and labels
+        env:
+          BACKEND_IMAGE: ${{ steps.names.outputs.backend }}@${{ steps.backend.outputs.digest }}
+          FRONTEND_IMAGE: ${{ steps.names.outputs.frontend }}@${{ steps.frontend.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+          BACKEND_DIGEST: ${{ steps.backend.outputs.digest }}
+          FRONTEND_DIGEST: ${{ steps.frontend.outputs.digest }}
+        run: |
+          node scripts/verify-docker.mjs --backend-image "$BACKEND_IMAGE" --frontend-image "$FRONTEND_IMAGE" --pull
+          node scripts/release-images.mjs verify-labels "$BACKEND_IMAGE" "$FRONTEND_IMAGE"
+          node scripts/release-images.mjs candidate-metadata "$ARCH" "$BACKEND_DIGEST" "$FRONTEND_DIGEST" "candidate-$ARCH.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-candidate-${{ matrix.arch }}
+          path: candidate-${{ matrix.arch }}.json
+          retention-days: 14
+
+  promote:
+    needs: candidates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-candidate-*
+          path: candidates
+          merge-multiple: true
+      - name: Promote verified digests without replacing existing versions
+        run: node scripts/release-images.mjs promote "$RELEASE_VERSION" candidates dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-bundle
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+            dist/release.json
+            dist/release-notes.md
+          retention-days: 14
+
+  public-pull:
+    needs: promote
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    # No registry login or package token: private packages must fail this gate.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-bundle
+          path: dist
+      - name: Verify anonymous pulls and a clean deployment bundle
+        env:
+          DOCKER_CONFIG: ${{ runner.temp }}/docker-anonymous
+        shell: bash
+        run: |
+          mkdir -p "$DOCKER_CONFIG"
+          printf '{}\n' > "$DOCKER_CONFIG/config.json"
+          (cd dist && sha256sum -c SHA256SUMS)
+          tar -xzf "dist/personalplatform-$RELEASE_VERSION.tar.gz" -C "$RUNNER_TEMP"
+          bundle="$RUNNER_TEMP/personalplatform-$RELEASE_VERSION"
+          node scripts/release-images.mjs verify-bundle "$bundle"
+          backend="$(jq -r .images.backend.reference "$bundle/release.json")"
+          frontend="$(jq -r .images.frontend.reference "$bundle/release.json")"
+          node scripts/verify-docker.mjs --backend-image "$backend" --frontend-image "$frontend" --compose-file "$bundle/docker/docker-compose.release.yml" --pull
+
+  publish:
+    needs: public-pull
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-bundle
+          path: dist
+      - name: Publish the verified release bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --title "PersonalPlatform $RELEASE_VERSION" --notes-file dist/release-notes.md "dist/personalplatform-$RELEASE_VERSION.tar.gz" dist/SHA256SUMS dist/release.json

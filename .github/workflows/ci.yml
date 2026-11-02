@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -74,6 +75,7 @@ jobs:
       - run: npm run build
       - run: npm test
       - run: npm run test:benchmark:runtime
+      - run: npm run test:release
       - run: npm run test:integration
       - name: Dependency security scan
         run: npm audit --audit-level=high

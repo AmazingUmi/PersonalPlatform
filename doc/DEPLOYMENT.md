@@ -1,15 +1,42 @@
 # Docker 开发与生产部署
 
-开发与生产使用独立的 Compose 文件。生产文件**单独运行**，不要与根目录开发文件合并。
+开发与生产使用独立的 Compose 文件。每个入口文件**单独运行**，不要与根目录开发文件合并。生产的源码构建和发行镜像入口共用 `docker/docker-compose.runtime.yml`；该文件只提供运行配置，不单独启动。
 
 | 场景 | 入口 | 运行方式与数据 |
 |---|---|---|
 | 开发 | `make dev` | `docker-compose.yml`；源码 bind mount、tsx/Vite 热更新；附件在宿主 `storage/` |
 | 开发调试端口 | `make dev-expose` | 额外发布数据库与后端回环端口，前端可供 LAN 访问 |
-| 生产 | `make prod` | `docker/docker-compose.prod.yml`；编译后 Node + Nginx；数据库、附件独立命名卷 |
+| 生产：发行镜像 | 见下文 | `docker/docker-compose.release.yml`；拉取配套镜像，无需源码、Node 或本机构建 |
+| 生产：源码构建 | `make prod` | `docker/docker-compose.prod.yml`；在目标机器构建编译后 Node + Nginx |
 | 本地开发 | 见 [DEVELOPMENT.md](DEVELOPMENT.md#本地无-docker-跑法) | Node 与 PostgreSQL 直接运行，Docker 可选 |
 
-## 首次生产启动
+## 首次使用发行镜像
+
+服务器需要 Docker Engine 与 Docker Compose v2.20+。在 [Releases](https://github.com/AmazingUmi/PersonalPlatform/releases) 选择已完成发布的版本，下载 `personalplatform-v0.1.0.tar.gz` 和该 Release 的 `SHA256SUMS`。首次镜像目标为 `v0.1.0`；发布工作流成功、GHCR 包已公开且匿名拉取验证通过后，才能视为可用发行版。
+
+以 Linux 服务器为例，在下载文件所在目录执行：
+
+```bash
+sha256sum -c SHA256SUMS
+tar -xzf personalplatform-v0.1.0.tar.gz
+cd personalplatform-v0.1.0
+sha256sum -c SHA256SUMS
+cp .env.release.example .env.release
+chmod 600 .env.release
+# 编辑 .env.release，填写数据库和首个管理员的密码。
+docker compose --env-file .env.release -f docker/docker-compose.release.yml config --quiet
+docker compose --env-file .env.release -f docker/docker-compose.release.yml pull
+docker compose --env-file .env.release -f docker/docker-compose.release.yml up -d --no-build --wait --wait-timeout 180
+docker compose --env-file .env.release -f docker/docker-compose.release.yml ps
+```
+
+外部校验文件检查部署包，包内校验文件检查解压后的配置和说明。不要把不同版本的 Compose 文件混在一起，也不要修改镜像摘要来绕过校验。包内 `release.json` 记录源代码提交、版本、支持架构及两个镜像的索引摘要；`.env.release.example` 已填入同一版配套镜像的 `BACKEND_IMAGE` / `FRONTEND_IMAGE` 摘要引用。公开 GHCR 包无需 `docker login` 即可拉取。源码仓库的示例使用明确版本标签，发行包则固定到索引摘要；镜像标签不使用 `latest`，已发布版本不覆盖。
+
+启动完成后，先在服务器检查容器健康，再通过已配置的域名 HTTPS 登录并检查常用 App、附件上传下载及重启后的数据。部署默认只绑定 `127.0.0.1:5173`，不会直接开放公网 HTTP；HTTPS 反向代理及客户端 IP 处理见下文。新安装是空数据库，镜像不带开发机器上的用户数据。
+
+发行镜像内包含固定版本的 `config/`。需要修改构建时平台配置或内层 Nginx 可信代理规则时，使用下面的源码构建入口生成自己的镜像；修改宿主仓库文件不会改变已经拉取的发行镜像。
+
+## 首次从源码构建生产环境
 
 要求 Docker Engine 与 Docker Compose v2.20+，以下命令均在仓库根目录执行。
 
@@ -30,7 +57,7 @@ make prod-logs
 
 Nginx 覆盖客户端传入的 `X-Forwarded-For`，后端默认信任内部私网代理。若前面还有 TLS 代理，默认看到的是该代理的地址；需要按真实拓扑在 Nginx 配置中指定可信代理 CIDR 和 real-IP 规则，再构建镜像，不能直接信任任意客户端提供的头。
 
-自定义项目名、端口和凭据写在 `.env.production`；可用 `make PROD_ENV=/path/to/private.env prod` 指定其他文件。自定义 `config/` 在构建前修改并审阅，生产默认不挂载宿主源码或配置。构建上下文排除环境密钥、备份和测试认证文件。
+自定义项目名、端口和凭据写在对应的私有环境文件：源码构建为 `.env.production`，发行镜像为 `.env.release`。源码构建可用 `make PROD_ENV=/path/to/private.env prod` 指定其他文件。自定义 `config/` 在构建前修改并审阅，生产默认不挂载宿主源码或配置。构建上下文排除环境密钥、备份和测试认证文件。
 
 ## 运行资源配置
 
@@ -54,9 +81,21 @@ Nginx 覆盖客户端传入的 `X-Forwarded-For`，后端默认信任内部私�
 
 后端探针使用镜像内 BusyBox `wget`，不再为每次探测启动 Node。HTTP 错误、连接失败和超时均判为失败。默认 30 秒周期、连续 10 次失败意味着故障判定名义窗口约 300 秒，原来 5 秒周期约 50 秒；实际还受超时和启动宽限期影响。可设置 `HEALTHCHECK_INTERVAL=5s` 恢复较快发现，代价是更频繁唤醒。首次启动仍使用 180 秒等待门禁，健康状态本身不会让 Docker 自动重启一个仍在运行的进程。
 
-三个生产服务均使用 `json-file` 日志轮转，每个文件最多 `10m`、保留 3 个文件。后端仍默认 `INFO`；希望减少请求日志写入时可以显式设置 `LOG_LEVEL=warn`，错误日志仍保留。开发配置保持原有热更新行为。多架构预构建镜像发布尚未包含在这一批，目前 `make prod` 仍在目标机器上构建镜像。
+三个生产服务均使用 `json-file` 日志轮转，每个文件最多 `10m`、保留 3 个文件。后端仍默认 `INFO`；希望减少请求日志写入时可以显式设置 `LOG_LEVEL=warn`，错误日志仍保留。开发配置保持原有热更新行为。`make prod` 继续在目标机器构建；需要避免目标机器构建开销时，使用已完成发布的多架构镜像和发行部署包。
 
 ## 更新与停止
+
+发行镜像更新时，先停止写入并完成与当前版本匹配的备份，再下载、校验并解压新版本部署包。保留原私有 `.env.release` 中的密码、项目名、端口、WebDAV origin 允许列表和密钥设置，只把 `BACKEND_IMAGE` / `FRONTEND_IMAGE` 更新为新包中配套的引用；不要用空白模板覆盖真实凭据。审阅新版本说明后执行：
+
+```bash
+docker compose --env-file .env.release -f docker/docker-compose.release.yml pull
+docker compose --env-file .env.release -f docker/docker-compose.release.yml up -d --no-build --wait --wait-timeout 180
+docker compose --env-file .env.release -f docker/docker-compose.release.yml ps
+# 停止并保留数据卷：
+docker compose --env-file .env.release -f docker/docker-compose.release.yml down
+```
+
+源码构建更新和停止仍使用：
 
 ```bash
 # 先完成与当前部署匹配的数据库、附件和配置备份，再更新源码。
@@ -66,7 +105,17 @@ make prod-down
 
 `make prod` 构建镜像并等待服务健康；后端自动执行 Core 和全部已安装 App 的前向迁移。`prod-down` 保留数据卷。**不要使用 `down -v` 更新或停止真实部署。**
 
-生产后端以 node 用户运行，镜像预建可写的 storage 目录；新命名卷继承其权限。运行镜像不含 tsx、构建工具或 pg_dump，不能把宿主的 `npm run backup` 命令原样当作容器内命令。数据库备份可使用 database 容器自带的 PostgreSQL 17 工具；附件和配置也必须一起保存。
+两个生产入口使用相同的 `COMPOSE_PROJECT_NAME` 默认值 `personal-platform-production`、`postgres-data` 与 `app-storage` 卷名。既有源码构建部署切换到发行镜像时，先备份并核对实际项目名、卷名和私有凭据，再使用相同项目和相同数据库、附件卷启动；不能改项目名后把新空卷当作原数据。自定义的构建时配置还须确认发行镜像是否适用。
+
+生产后端以 node 用户运行，镜像预建可写的 storage 目录；新命名卷继承其权限。运行镜像不含 tsx、构建工具或 pg_dump，不能把宿主的 `npm run backup` 命令原样当作容器内命令。数据库备份可使用 database 容器自带的 PostgreSQL 17 工具。完整灾难恢复需要同一停写窗口下相匹配的数据库、整个附件/存储卷、平台配置、版本/镜像摘要记录及另行安全保存的私有环境文件；存储卷含 WebDAV 加密密钥 `storage/.core/backup.key`，若使用环境变量密钥也必须保留原值。Settings JSON/WebDAV 逻辑备份不包含这些全部运行资料，不能代替整套部署备份。
+
+若更新失败，保留原备份、旧部署包和镜像摘要，先检查容器日志及迁移结果。迁移是前向执行；切回旧镜像不会撤回数据库变更。只有确认旧版本兼容当前 schema 时才可只换镜像；否则保持停写，按相匹配的旧版本数据库、存储和配置备份恢复，参见 [迁移与恢复运行手册](MIGRATION_RUNBOOK.md)。
+
+## 备份与持续同步的部署边界
+
+WebDAV 密码在本地加密保存，部署间搬迁需保留上述密钥或重新输入 WebDAV 密码。内网 NAS、HTTP 或特殊 DNS/Fake-IP 路由的精确 origin 允许列表按 [数据管理](DATA_MANAGEMENT.md) 配置，不随镜像公开。
+
+持续同步须在每台部署分别创建本地账号，再用配对码明确关联云端同步身份；它只处理当前账号的应用数据。同步由已登录且保持打开的平台页面触发，关闭页面或退出后没有服务器后台同步任务替用户继续运行。定时备份是独立的服务器任务。真实坚果云等供应商的创建、加入和条件写入尚未验收；同步的条件写入探测不通过时拒绝启用，不能把普通连接测试通过当成持续同步已兼容。完整使用和边界见 [数据管理](DATA_MANAGEMENT.md)。
 
 ## 从现有开发或旧 overlay 部署迁移
 
@@ -111,8 +160,10 @@ BASH
 ```bash
 npm run test:docker:config   # 仅需 Docker CLI/Compose，无需 daemon
 npm run verify:docker        # 或 make verify-docker；需 Docker daemon
+# 验证已有镜像，不重新构建（使用精确摘要时可校验对应发行候选）：
+node scripts/verify-docker.mjs --backend-image BACKEND_REFERENCE --frontend-image FRONTEND_REFERENCE --pull
 ```
 
 真实验证会用随机项目名、临时凭据、随机回环端口和全新数据卷构建镜像并启动：检查全部 App 迁移、非 root 运行、默认 Secure Cookie、HTTP 显式覆盖、真实登录、SPA/静态资源/API 错误、伪造转发头限速、大于 1 MiB 附件往返，以及全部容器重建后的数据库/附件保留。运行层同时检查开发源码和工具缺失。
 
-成功或失败后只删除该随机验证项目的容器、网络、卷和本地镜像；基础镜像与构建缓存保留。缺失 Docker、构建失败、健康等待失败或断言失败均返回非零，失败附容器日志。GitHub Actions 的 `docker-production` job 从干净 checkout 执行同一入口，不依赖宿主 `dist`、`node_modules` 或已有数据库。
+成功或失败后只删除该随机验证项目的容器、网络和卷；源码构建模式同时清理该项目构建的本地镜像，已有镜像模式保留传入镜像。基础镜像、构建缓存及其他项目不受影响。缺失 Docker/镜像、构建失败、健康等待失败或断言失败均返回非零，失败附容器日志。GitHub Actions 的 `docker-production` job 从干净 checkout 执行源码构建入口，不依赖宿主 `dist`、`node_modules` 或已有数据库；发行流程另在原生 amd64/arm64 runner 验证精确候选摘要后才发布版本索引和部署包。
