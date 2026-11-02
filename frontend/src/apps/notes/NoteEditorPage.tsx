@@ -1,6 +1,6 @@
 import { HelpPopover } from "../../shared/ui/HelpPopover";
 import { useI18n } from "../../shared/i18n";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useAppDisplayName } from "../../shared/PresentationContext";
 import { useMutation } from "../../shared/useMutation";
@@ -12,6 +12,7 @@ import { PixelInput } from "../../shared/ui/PixelInput";
 import { PixelWindow } from "../../shared/ui/PixelWindow";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { useAsync } from "../../shared/useAsync";
+import { SyncPendingNotice, armPendingIfSyncConflict, useCoherentDraft, useSyncModelRefresh } from "../../shared/sync-guard-client";
 import {
   MOODS,
   moodMeta,
@@ -81,15 +82,30 @@ function formStateFromNote(note: NoteView): NoteFormState {
  * three-state semantics: absent = keep, null = clear (or re-stamp for
  * occurredAt), value = update.
  */
-function NoteEditorForm({ note }: { note: NoteView | null }) {
+function NoteEditorForm({ note, onServerRefresh }: { note: NoteView | null; onServerRefresh: () => Promise<boolean> | boolean | void }) {
   const { t, language } = useI18n();
   const navigate = useNavigate();
   const isEdit = note !== null;
+  const baseHash = useRef(note?.baseHash);
   const [form, setForm] = useState<NoteFormState>(() =>
     note ? formStateFromNote(note) : emptyFormState(),
   );
-  const set = <K extends keyof NoteFormState>(key: K, value: NoteFormState[K]) =>
+  const [draftDirty, setDraftDirty] = useState(false);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = draftDirty;
+  const signature = note ? `${note.id}\0${note.baseHash ?? ""}\0${note.updatedAt}` : null;
+  const sync = useSyncModelRefresh(draftDirty, () => { void onServerRefresh(); });
+  const draft = useCoherentDraft(note, signature, draftDirty, (incoming) => {
+    baseHash.current = incoming.baseHash;
+    setForm(formStateFromNote(incoming));
+    setDraftDirty(false);
+  }, sync.dismiss);
+  const set = <K extends keyof NoteFormState>(key: K, value: NoteFormState[K]) => {
+    draft.cancelAdopt();
+    dirtyRef.current = true;
+    setDraftDirty(true);
     setForm((current) => ({ ...current, [key]: value }));
+  };
 
   // Existing tags for the chip toggles; extended locally when a tag is created.
   const tagList = useAsync(() => listTags(), []);
@@ -98,13 +114,16 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
     if (tagList.data) setAllTags(tagList.data.items);
   }, [tagList.data]);
 
-  const toggleTag = (tagId: string) =>
+  const toggleTag = (tagId: string) => {
+    draft.cancelAdopt();
+    setDraftDirty(true);
     setForm((current) => ({
       ...current,
       tagIds: current.tagIds.includes(tagId)
         ? current.tagIds.filter((id) => id !== tagId)
         : [...current.tagIds, tagId],
     }));
+  };
 
   // New tag: Enter posts the get-or-create upsert and selects the result.
   const [newTagName, setNewTagName] = useState("");
@@ -113,6 +132,8 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
     if (!name) return;
     const tag = await createTag(name);
     setAllTags((current) => (current.some((t) => t.id === tag.id) ? current : [...current, tag]));
+    draft.cancelAdopt();
+    setDraftDirty(true);
     setForm((current) =>
       current.tagIds.includes(tag.id) ? current : { ...current, tagIds: [...current.tagIds, tag.id] },
     );
@@ -135,7 +156,13 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
       if (form.content !== note.content) patch.content = form.content;
       if (form.pinned !== note.pinned) patch.pinned = form.pinned;
       if (!sameIdSet(form.tagIds, note.tags.map((tag) => tag.id))) patch.tagIds = form.tagIds;
-      await updateNote(note.id, patch);
+      if (baseHash.current) patch.baseHash = baseHash.current;
+      try {
+        await updateNote(note.id, patch);
+      } catch (error) {
+        armPendingIfSyncConflict(error, sync.markPending);
+        throw error;
+      }
     } else {
       await createNote({
         content: form.content,
@@ -156,13 +183,23 @@ function NoteEditorForm({ note }: { note: NoteView | null }) {
 
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const remove = useMutation(async () => {
-    if (note) await deleteNote(note.id);
+    if (note) await deleteNote(note.id, baseHash.current);
   });
 
   const contentBlank = form.content.trim() === "";
 
   return (
     <>
+      <SyncPendingNotice
+        pending={sync.pending || draft.stale}
+        discard={draftDirty}
+        onReload={() => {
+          draft.requestAdopt();
+          void Promise.resolve(onServerRefresh()).then((ok) => {
+            if (ok === false) draft.cancelAdopt();
+          });
+        }}
+      />
       <PixelWindow
         title={isEdit ? t("Edit Note", "编辑笔记") : t("New Note", "新笔记")}
         icon="file"
@@ -331,7 +368,7 @@ export function NoteEditorPage() {
   const displayName = useAppDisplayName({ id: "notes", name: "Notes" });
   const { id } = useParams();
   const isEdit = Boolean(id);
-  const note = useAsync(() => (id ? getNote(id) : Promise.resolve(null)), [id ?? "new"]);
+  const note = useAsync(() => (id ? getNote(id) : Promise.resolve(null)), [id ?? "new"], { retainOnReload: true });
 
   return (
     <div className="page" data-app="notes">
@@ -345,9 +382,9 @@ export function NoteEditorPage() {
         </div>
       </header>
 
-      {isEdit && note.loading ? (
+      {isEdit && note.loading && !note.data ? (
         <LoadingState label={t("Loading note…", "正在加载笔记…")} />
-      ) : isEdit && note.error ? (
+      ) : isEdit && note.error && !note.data ? (
         <StatusMessage tone="error">
           <p>{note.error}</p>
           <div className="page-header__actions">
@@ -360,7 +397,7 @@ export function NoteEditorPage() {
           </div>
         </StatusMessage>
       ) : (
-        <NoteEditorForm key={id ?? "new"} note={note.data} />
+        <NoteEditorForm key={id ?? "new"} note={note.data ?? null} onServerRefresh={() => note.reload()} />
       )}
     </div>
   );

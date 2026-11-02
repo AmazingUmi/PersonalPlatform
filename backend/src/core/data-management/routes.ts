@@ -4,12 +4,13 @@ import type { CoreRouteHook } from "../api/routes.js";
 import { AppError } from "../api/errors.js";
 import { exportSnapshot, importSnapshot, previewSnapshot, MAX_SNAPSHOT_BYTES } from "./snapshot.js";
 import { WebdavBackups, checkScope, type BackupScope, type WebdavInput, type BackupMode, type WebdavTestInput } from "./webdav.js";
+import type { ContinuousSync } from "./sync-service.js";
 
 const scopeSchema = { type: "string", enum: ["own", "all"] };
 
 export function registerDataManagementRoutes(app: FastifyInstance, deps: {
   database: Database | null; storageRoot: string; installedApps: () => string[];
-  requireAuth: CoreRouteHook; backups: WebdavBackups | null;
+  requireAuth: CoreRouteHook; backups: WebdavBackups | null; sync?: ContinuousSync | null;
 }): void {
   const hooks = { onRequest: [deps.requireAuth] };
   const database = () => {
@@ -20,6 +21,11 @@ export function registerDataManagementRoutes(app: FastifyInstance, deps: {
     if (!deps.backups) throw new AppError(503, "database_unavailable", "Database is not available.");
     return deps.backups;
   };
+  const sync = () => {
+    if (!deps.sync) throw new AppError(503, "database_unavailable", "Database is not available.");
+    return deps.sync;
+  };
+  const token = (request: { cookies?: Record<string, string | undefined> }) => request.cookies?.pp_session ?? "";
   app.get<{ Querystring: { scope?: BackupScope } }>("/api/core/data/export", {
     ...hooks, schema: { querystring: { type: "object", additionalProperties: false, properties: { scope: scopeSchema } } },
   }, async (request, reply) => {
@@ -65,4 +71,38 @@ export function registerDataManagementRoutes(app: FastifyInstance, deps: {
     const file = await backups().download(request.user!, request.params.id);
     return reply.header("cache-control", "no-store").header("content-disposition", `attachment; filename="${file.filename}"`).type("application/json").send(file.data);
   });
+  app.get("/api/core/data/sync", hooks, async (request, reply) => {
+    reply.header("cache-control", "no-store");
+    return sync().status(request.user!.id);
+  });
+  app.post<{ Body: { action?: string; pairingCode?: string } }>("/api/core/data/sync", {
+    ...hooks, schema: { body: { type: "object", required: ["action"], additionalProperties: true, properties: {
+      action: { type: "string", enum: ["create", "join"] }, pairingCode: { type: "string", minLength: 8, maxLength: 512 },
+    } } },
+  }, async request => {
+    if (request.body.action === "create") {
+      const extra = Object.keys(request.body).filter(key => key !== "action");
+      if (extra.length || request.body.pairingCode !== undefined) throw new AppError(400, "validation_error", "Create does not take a pairing code.");
+      return sync().create(request.user!.id, token(request));
+    }
+    if (!request.body.pairingCode) throw new AppError(422, "invalid_pairing_code", "Enter the pairing code from the account that created this sync identity.");
+    return sync().join(request.user!.id, token(request), request.body.pairingCode);
+  });
+  app.put<{ Body: { enabled?: boolean; intervalSeconds?: number } }>("/api/core/data/sync", {
+    ...hooks, schema: { body: { type: "object", additionalProperties: false, properties: {
+      enabled: { type: "boolean" }, intervalSeconds: { type: "integer", enum: [0, 60, 120] },
+    } } },
+  }, request => sync().configure(request.user!.id, token(request), request.body));
+  app.delete("/api/core/data/sync", hooks, async (request, reply) => {
+    await sync().unlink(request.user!.id, token(request)); return reply.code(204).send();
+  });
+  app.post("/api/core/data/sync/reveal", hooks, request => sync().reveal(request.user!.id, token(request)));
+  app.post("/api/core/data/sync/cycle", hooks, request => sync().cycle(request.user!.id, token(request)));
+  app.get("/api/core/data/sync/conflicts", hooks, request => sync().conflicts(request.user!.id));
+  app.post<{ Params: { id: string }; Body: { choice?: string } }>("/api/core/data/sync/conflicts/:id", {
+    ...hooks, schema: {
+      params: { type: "object", required: ["id"], properties: { id: { type: "string", format: "uuid" } } },
+      body: { type: "object", required: ["choice"], additionalProperties: false, properties: { choice: { type: "string", enum: ["keep-local", "keep-remote"] } } },
+    },
+  }, request => sync().resolve(request.user!.id, token(request), request.params.id, request.body.choice as "keep-local" | "keep-remote"));
 }

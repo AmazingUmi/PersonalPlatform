@@ -35,6 +35,21 @@ export function localizeError(error: unknown, language: Language): string {
     invalid_webdav_url: "请输入有效的 WebDAV 目录地址。", backup_too_large: "备份或响应超过大小限制。",
     webdav_not_configured: "请填写 WebDAV 连接信息后测试。", invalid_webdav_test: "测试连接需要地址、用户名以及可选的密码。",
     backup_not_found: "当前连接下无法找到该备份。", backup_integrity_error: "备份完整性校验失败。",
+    sync_already_linked: "此账号已关联。请先取消关联，再选择另一个同步身份。",
+    sync_not_linked: "尚未设置持续同步。",
+    invalid_pairing_code: "请输入创建该同步身份的设备上显示的配对码。",
+    sync_identity_taken: "该同步身份已关联到此服务器上的另一个账号。",
+    invalid_interval: "请选择 2 分钟、1 分钟或仅手动。",
+    sync_disabled: "请先开启同步，再选择版本或立即同步。",
+    sync_stale: "选择保存前记录已变化，请重新查看。冲突仍然保留。",
+    sync_busy: "此账号的同步已在进行。短暂停顿后会再试。",
+    sync_busy_local: "另一个打开的标签页正在同步。",
+    sync_destination_locked: "更换 WebDAV 目录或用户名之前，请先取消持续同步的关联。",
+    webdav_cas_unsupported: "此 WebDAV 目录无法安全保存同步数据，同步未保持开启。",
+    sync_remote_missing: "云端同步副本缺失，本机数据已保留。",
+    sync_remote_exists: "该文件夹已有同步数据。请使用配对码加入，不要新建一份。",
+    sync_stopped: "持续同步在这一步完成前已停止。",
+    sync_foreign_owner: "有一条记录属于其他账号，这次同步没有写入。",
   };
   if (codes[code]) return codes[code]!;
   const diagnostic: Record<string, string> = { webdav_origin_blocked: "WebDAV 地址在认证前被网络策略拦截。请检查 DNS / Fake-IP，或由管理员配置可信的精确 origin。", webdav_failed: "WebDAV 服务返回错误，请根据下方 HTTP 状态检查账号、应用密码或目录权限。", webdav_unreachable: "无法连接 WebDAV 服务。", backup_timeout: "备份连接超时。" };

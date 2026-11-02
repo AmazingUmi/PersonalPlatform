@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { AppError } from "../../core/api/errors.js";
+import {
+  assertPresentedHash, editorBaseHash, headerPresentedHash, lockOwnedTables, lockOwnerSet, parseSnapshotRow, parseSnapshotRows, readPresentedHash, syncWriteFenced,
+} from "../../core/data-management/sync-fence.js";
 import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-registry/types.js";
 import {
   DEFAULT_SORT_BY,
@@ -30,12 +33,6 @@ interface NoteRow {
   total_count?: number;
 }
 
-interface TagLinkRow {
-  note_id: string;
-  id: string;
-  name: string;
-}
-
 interface TagRow {
   id: string;
   name: string;
@@ -58,6 +55,7 @@ export interface NoteView {
   updatedAt: string;
   tags: NoteTagView[];
   dayKey: string;
+  baseHash: string;
 }
 
 export interface TagView {
@@ -78,7 +76,37 @@ function isForeignKeyViolation(error: unknown): boolean {
 }
 
 /** camelCase view boundary (mini_game toSave precedent — not assets' snake_case pass-through). */
-function toNoteView(row: NoteRow, tags: NoteTagView[]): NoteView {
+const NOTE_SNAPSHOT_SQL = `
+  row_to_json(n)::text AS note_snapshot,
+  COALESCE((SELECT json_agg(row_to_json(nt) ORDER BY nt.tag_id) FROM notes.note_tags nt WHERE nt.note_id = n.id), '[]'::json) AS link_snapshot,
+  COALESCE((SELECT json_agg(json_build_object('id', t.id, 'name', t.name) ORDER BY t.name, t.id)
+            FROM notes.note_tags nt JOIN notes.tags t ON t.id = nt.tag_id WHERE nt.note_id = n.id), '[]'::json) AS tag_views`;
+
+type Tx = AppContext["database"];
+
+/** Table locks, then one notes-wide advisory, then parent and link reads. */
+async function lockedNoteHash(tx: Tx, userId: string, noteId: string): Promise<string | null> {
+  await lockOwnerSet(tx, userId, "notes");
+  const note = await tx.query<{ snapshot: string }>(
+    "SELECT row_to_json(n)::text AS snapshot FROM notes.notes n WHERE n.id = $1 AND n.user_id = $2 FOR UPDATE",
+    [noteId, userId],
+  );
+  if (!note.rows[0]) return null;
+  const links = await tx.query<{ snapshot: string }>(
+    "SELECT row_to_json(nt)::text AS snapshot FROM notes.note_tags nt WHERE nt.note_id = $1 ORDER BY nt.tag_id FOR UPDATE",
+    [noteId],
+  );
+  return noteBaseHash(note.rows[0].snapshot, links.rows.map((row) => parseSnapshotRow(row.snapshot)));
+}
+
+function noteBaseHash(noteSnapshot: string, linkSnapshot: unknown): string {
+  return editorBaseHash([
+    { table: "notes.notes", row: parseSnapshotRow(noteSnapshot) },
+    ...parseSnapshotRows(linkSnapshot).map((row) => ({ table: "notes.note_tags", row })),
+  ]);
+}
+
+function toNoteView(row: NoteRow, tags: NoteTagView[], baseHash: string): NoteView {
   return {
     id: row.id,
     title: row.title,
@@ -90,6 +118,7 @@ function toNoteView(row: NoteRow, tags: NoteTagView[]): NoteView {
     updatedAt: row.updated_at.toISOString(),
     tags,
     dayKey: row.day_key,
+    baseHash,
   };
 }
 
@@ -110,26 +139,6 @@ function assertValidTagIds(tagIds: string[]): void {
   }
 }
 
-/** Tags for a batch of notes, ordered by name; empty ids → empty map. */
-async function tagsForNotes(db: Db, noteIds: string[]): Promise<Map<string, NoteTagView[]>> {
-  const map = new Map<string, NoteTagView[]>();
-  if (noteIds.length === 0) return map;
-  const { rows } = await db.query<TagLinkRow>(
-    `SELECT nt.note_id, t.id, t.name
-     FROM notes.note_tags nt
-     JOIN notes.tags t ON t.id = nt.tag_id
-     WHERE nt.note_id = ANY($1)
-     ORDER BY t.name, t.id`,
-    [noteIds],
-  );
-  for (const row of rows) {
-    const list = map.get(row.note_id) ?? [];
-    list.push({ id: row.id, name: row.name });
-    map.set(row.note_id, list);
-  }
-  return map;
-}
-
 /**
  * Single note with embedded tags and the server-computed dayKey. The dayKey
  * expression is the same parameterized `(occurred_at AT TIME ZONE $tz)::date`
@@ -143,14 +152,15 @@ async function findNoteView(
   timezone: string,
   userId: string,
 ): Promise<NoteView | null> {
-  const { rows } = await db.query<NoteRow>(
-    `SELECT ${NOTE_COLUMNS}, (occurred_at AT TIME ZONE $2)::date::text AS day_key
-     FROM notes.notes WHERE id = $1 AND user_id = $3`,
+  const { rows } = await db.query<NoteRow & { note_snapshot: string; link_snapshot: unknown; tag_views: NoteTagView[] | null }>(
+    `SELECT ${NOTE_COLUMNS}, (n.occurred_at AT TIME ZONE $2)::date::text AS day_key,
+            ${NOTE_SNAPSHOT_SQL}
+     FROM notes.notes n WHERE n.id = $1 AND n.user_id = $3`,
     [noteId, timezone, userId],
   );
-  if (!rows[0]) return null;
-  const tags = await tagsForNotes(db, [noteId]);
-  return toNoteView(rows[0], tags.get(noteId) ?? []);
+  const row = rows[0];
+  if (!row) return null;
+  return toNoteView(row, row.tag_views ?? [], noteBaseHash(row.note_snapshot, row.link_snapshot));
 }
 
 async function requireNoteView(
@@ -270,19 +280,19 @@ async function registerApi(ctx: AppContext): Promise<void> {
       // Stable tie-break per worklist §2.4.
       const orderBy = `${sortColumn} ${direction}, created_at DESC, id`;
 
-      const { rows } = await db.query<NoteRow>(
+      const { rows } = await db.query<NoteRow & { note_snapshot: string; link_snapshot: unknown; tag_views: NoteTagView[] | null }>(
         `SELECT ${NOTE_COLUMNS}, (n.occurred_at AT TIME ZONE ${tzParam})::date::text AS day_key,
-                (count(*) OVER ())::int AS total_count
+                (count(*) OVER ())::int AS total_count,
+                ${NOTE_SNAPSHOT_SQL}
          FROM notes.notes n
          ${where}
          ORDER BY ${orderBy}
          LIMIT ${LIST_LIMIT}`,
         params,
       );
-      const tags = await tagsForNotes(db, rows.map((row) => row.id));
       const keys = dayKeys(ctx.time.timezone(), ctx.time.todayRangeUtc().start);
       return {
-        items: rows.map((row) => toNoteView(row, tags.get(row.id) ?? [])),
+        items: rows.map((row) => toNoteView(row, row.tag_views ?? [], noteBaseHash(row.note_snapshot, row.link_snapshot))),
         total: rows[0]?.total_count ?? 0,
         todayKey: keys.todayKey,
         yesterdayKey: keys.yesterdayKey,
@@ -342,6 +352,8 @@ async function registerApi(ctx: AppContext): Promise<void> {
       const newId = randomUUID();
       try {
         await ctx.database.withTransaction(async (tx) => {
+          await lockOwnedTables(tx, ["notes.notes", "notes.note_tags", "notes.tags"]);
+          await lockOwnerSet(tx, user.id, "notes");
           await tx.query(
             `INSERT INTO notes.notes (id, user_id, title, content, mood, occurred_at, pinned)
              VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -382,6 +394,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
             pinned: { type: "boolean" },
             // Arrays only: `tagIds: null` fails this schema → 400 (use [] to clear).
             tagIds: { type: "array", items: { type: "string" } },
+            baseHash: { type: "string" },
           },
         },
       },
@@ -389,6 +402,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
     async (request) => {
       const user = await ctx.auth.requireUser(request);
       const body = request.body;
+      const presented = readPresentedHash(body.baseHash);
       const columns: Array<[string, string]> = [
         ["content", "content"],
         ["title", "title"],
@@ -421,6 +435,10 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
       try {
         await ctx.database.withTransaction(async (tx) => {
+          await lockOwnedTables(tx, ["notes.notes", "notes.note_tags"]);
+          const actual = await lockedNoteHash(tx, user.id, request.params.id);
+          if (actual === null) throw new AppError(404, "not_found", "note not found");
+          assertPresentedHash(await syncWriteFenced(tx, user.id), presented, actual);
           if (sets.length > 0) {
             sets.push("updated_at = now()");
             const updated = await tx.query(
@@ -428,12 +446,6 @@ async function registerApi(ctx: AppContext): Promise<void> {
               params,
             );
             if (!updated.rows[0]) throw new AppError(404, "not_found", "note not found");
-          } else {
-            const exists = await tx.query("SELECT id FROM notes.notes WHERE id = $1 AND user_id = $2", [
-              request.params.id,
-              user.id,
-            ]);
-            if (!exists.rows[0]) throw new AppError(404, "not_found", "note not found");
           }
           if (replaceTags) await replaceNoteTags(tx, request.params.id, tagIds, user.id);
         });
@@ -448,21 +460,34 @@ async function registerApi(ctx: AppContext): Promise<void> {
   // Deleting a note cascades its note_tags rows (FK ON DELETE CASCADE).
   ctx.api.delete<{ Params: { id: string } }>("/notes/:id", async (request, reply) => {
     const user = await ctx.auth.requireUser(request);
-    const result = await db.query("DELETE FROM notes.notes WHERE id = $1 AND user_id = $2", [
-      request.params.id,
-      user.id,
-    ]);
-    if (result.rowCount === 0) throw new AppError(404, "not_found", "note not found");
+    const presented = headerPresentedHash(request.headers["x-base-hash"]);
+    await db.withTransaction(async (tx) => {
+      await lockOwnedTables(tx, ["notes.notes", "notes.note_tags"]);
+      const actual = await lockedNoteHash(tx, user.id, request.params.id);
+      if (actual === null) throw new AppError(404, "not_found", "note not found");
+      assertPresentedHash(await syncWriteFenced(tx, user.id), presented, actual);
+      await tx.query("DELETE FROM notes.notes WHERE id = $1 AND user_id = $2", [request.params.id, user.id]);
+    });
     return reply.code(204).send();
   });
 
   ctx.api.get("/tags", async (request) => {
     const user = await ctx.auth.requireUser(request);
-    const { rows } = await db.query<TagRow>(
-      "SELECT id, name, created_at FROM notes.tags WHERE user_id = $1 ORDER BY name",
+    const { rows } = await db.query<TagRow & { snapshot: string; link_snapshot: unknown }>(
+      `SELECT t.id, t.name, t.created_at, row_to_json(t)::text AS snapshot,
+              COALESCE((SELECT json_agg(row_to_json(nt) ORDER BY nt.note_id) FROM notes.note_tags nt WHERE nt.tag_id = t.id), '[]'::json) AS link_snapshot
+       FROM notes.tags t WHERE t.user_id = $1 ORDER BY t.name`,
       [user.id],
     );
-    return { items: rows.map(toTagView) };
+    return {
+      items: rows.map((row) => ({
+        ...toTagView(row),
+        baseHash: editorBaseHash([
+          { table: "notes.tags", row: parseSnapshotRow(row.snapshot) },
+          ...parseSnapshotRows(row.link_snapshot).map((link) => ({ table: "notes.note_tags", row: link })),
+        ]),
+      })),
+    };
   });
 
   // Get-or-create upsert (worklist §2.3): the UNIQUE conflict is absorbed by
@@ -504,11 +529,26 @@ async function registerApi(ctx: AppContext): Promise<void> {
   // Deleting a tag keeps notes (only the note_tags links cascade away).
   ctx.api.delete<{ Params: { id: string } }>("/tags/:id", async (request, reply) => {
     const user = await ctx.auth.requireUser(request);
-    const result = await db.query("DELETE FROM notes.tags WHERE id = $1 AND user_id = $2", [
-      request.params.id,
-      user.id,
-    ]);
-    if (result.rowCount === 0) throw new AppError(404, "not_found", "tag not found");
+    const presented = headerPresentedHash(request.headers["x-base-hash"]);
+    await db.withTransaction(async (tx) => {
+      await lockOwnedTables(tx, ["notes.tags", "notes.note_tags"]);
+      await lockOwnerSet(tx, user.id, "notes");
+      const tag = await tx.query<{ snapshot: string }>(
+        "SELECT row_to_json(t)::text AS snapshot FROM notes.tags t WHERE t.id = $1 AND t.user_id = $2 FOR UPDATE",
+        [request.params.id, user.id],
+      );
+      if (!tag.rows[0]) throw new AppError(404, "not_found", "tag not found");
+      const links = await tx.query<{ snapshot: string }>(
+        "SELECT row_to_json(nt)::text AS snapshot FROM notes.note_tags nt WHERE nt.tag_id = $1 ORDER BY nt.note_id FOR UPDATE",
+        [request.params.id],
+      );
+      const actual = editorBaseHash([
+        { table: "notes.tags", row: parseSnapshotRow(tag.rows[0].snapshot) },
+        ...links.rows.map((link) => ({ table: "notes.note_tags", row: parseSnapshotRow(link.snapshot) })),
+      ]);
+      assertPresentedHash(await syncWriteFenced(tx, user.id), presented, actual);
+      await tx.query("DELETE FROM notes.tags WHERE id = $1 AND user_id = $2", [request.params.id, user.id]);
+    });
     return reply.code(204).send();
   });
 }

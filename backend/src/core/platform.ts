@@ -5,6 +5,7 @@ import { AppError, notFoundHandler, errorHandler } from "./api/errors.js";
 import { registerCoreRoutes } from "./api/routes.js";
 import { registerDataManagementRoutes } from "./data-management/routes.js";
 import { WebdavBackups } from "./data-management/webdav.js";
+import { ContinuousSync } from "./data-management/sync-service.js";
 import type { PlatformConfig } from "./config/index.js";
 import { resolveEnvironment, resolveSessionCookieSecure, resolveTrustProxy } from "./config/index.js";
 import type { Database } from "./database/index.js";
@@ -149,10 +150,12 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
   }
 
   const authDeps = { database, now: deps.clock };
-  const backups = database ? new WebdavBackups({ database, storageRoot, installedApps: () => registry.getApps().map(record => record.id) }) : null;
+  const installedApps = () => registry.getApps().map(record => record.id);
+  const backups = database ? new WebdavBackups({ database, storageRoot, installedApps }) : null;
+  const sync = database && backups ? new ContinuousSync({ database, storageRoot, installedApps, backups, now: deps.clock }) : null;
   registerDataManagementRoutes(app, {
-    database, storageRoot, installedApps: () => registry.getApps().map(record => record.id),
-    requireAuth: createRequireAuth(authDeps), backups,
+    database, storageRoot, installedApps,
+    requireAuth: createRequireAuth(authDeps), backups, sync,
   });
   registerAuthRoutes(app, {
     database,

@@ -22,12 +22,16 @@ import { randomUUID } from "node:crypto";
 import { AppError } from "../../core/api/errors.js";
 import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-registry/types.js";
 import {
+  assertPresentedHash, editorBaseHash, lockOwnedTables, lockOwnerSet, parseSnapshotRow, readPresentedHash, singletonBaseHash, syncWriteFenced,
+} from "../../core/data-management/sync-fence.js";
+import {
   SETTINGS_LIMITS,
   applyPause,
   applyResume,
   applyStop,
   localDateString,
   nextKind as nextKindAfter,
+  DEFAULT_SETTINGS,
   sanitizeSettings,
   toSessionView,
   type SessionKind,
@@ -53,7 +57,7 @@ import {
 const id = "focus";
 
 /** Exactly the three conflict codes the frontend knows how to self-heal from. */
-type ConflictCode = "session_already_active" | "no_active_session" | "revision_conflict";
+type ConflictCode = "session_already_active" | "no_active_session" | "revision_conflict" | "sync_stale" | "sync_base_required";
 
 const NO_ACTIVE_MESSAGE = "no active focus session";
 const ALREADY_ACTIVE_MESSAGE = "a focus session is already active";
@@ -74,7 +78,7 @@ interface FocusState {
   };
   /** Kind of the session that would run next: the active one, else the schedule pick. */
   nextKind: SessionKind;
-  settings: SettingsView;
+  settings: SettingsView & { baseHash: string };
 }
 
 /** GET /sessions item — a terminal session as history. */
@@ -93,6 +97,24 @@ interface HistoryItem {
 // state assembly (shared by every response, 200 and 409 alike)
 // ---------------------------------------------------------------------------
 
+/** Settings fields and baseHash from one snapshot, including the absent-row proof. */
+async function settingsProof(db: AppContext["database"], userId: string): Promise<SettingsView & { baseHash: string }> {
+  const { rows } = await db.query<{ value: unknown; snapshot: string }>(
+    "SELECT value, row_to_json(s)::text AS snapshot FROM focus.settings s WHERE id = $1 AND user_id = $2",
+    ["current", userId],
+  );
+  if (!rows[0]) {
+    return {
+      ...DEFAULT_SETTINGS,
+      baseHash: singletonBaseHash("focus.settings", { id: "current", value: DEFAULT_SETTINGS }),
+    };
+  }
+  return {
+    ...(sanitizeSettings(rows[0].value) ?? DEFAULT_SETTINGS),
+    baseHash: editorBaseHash([{ table: "focus.settings", row: parseSnapshotRow(rows[0].snapshot) }]),
+  };
+}
+
 /**
  * Build the FocusState around a KNOWN active row (read inside the just-
  * committed transaction): settings, today stats and cycle position are fetched
@@ -104,15 +126,16 @@ async function assembleState(
   userId: string,
   now: Date,
   active: SessionRow | null,
+  baseHash: string | null = null,
 ): Promise<FocusState> {
   const [settings, today, completedFocus] = await Promise.all([
-    getSettings(ctx.database, userId),
+    settingsProof(ctx.database, userId),
     todayStats(ctx.database, userId, ctx.time.todayRangeUtc(now)),
     completedFocusSinceLongBreak(ctx.database, userId),
   ]);
   return {
     now: now.toISOString(),
-    active: active === null ? null : toSessionView(active, now),
+    active: active === null ? null : { ...toSessionView(active, now), ...(baseHash ? { baseHash } : {}) },
     today,
     nextKind:
       active !== null ? active.kind : nextKindAfter(completedFocus, settings.longBreakInterval),
@@ -126,12 +149,23 @@ async function assembleState(
  * funnel through here so a naturally completed session is committed,
  * published and visible in a single request.
  */
-async function syncState(ctx: AppContext, userId: string, now: Date): Promise<FocusState> {
-  const { row: active, completed } = await ctx.database.withTransaction((tx) =>
-    reconcileActive(tx, userId, now),
+async function sessionBaseHash(tx: AppContext["database"], userId: string, sessionId: string): Promise<string | null> {
+  const { rows } = await tx.query<{ snapshot: string }>(
+    "SELECT row_to_json(s)::text AS snapshot FROM focus.sessions s WHERE id = $1 AND user_id = $2",
+    [sessionId, userId],
   );
+  return rows[0] ? editorBaseHash([{ table: "focus.sessions", row: parseSnapshotRow(rows[0].snapshot) }]) : null;
+}
+
+async function syncState(ctx: AppContext, userId: string, now: Date): Promise<FocusState> {
+  const { row: active, completed, baseHash } = await ctx.database.withTransaction(async (tx) => {
+    await lockOwnedTables(tx, ["focus.sessions"]);
+    const result = await reconcileActive(tx, userId, now);
+    const baseHash = result.row ? await sessionBaseHash(tx, userId, result.row.id) : null;
+    return { ...result, baseHash };
+  });
   if (completed !== null) publishCompleted(ctx, userId, completed);
-  return assembleState(ctx, userId, now, active);
+  return assembleState(ctx, userId, now, active, baseHash);
 }
 
 /**
@@ -196,6 +230,7 @@ interface TransitionOutcome {
   /** Cancelled by THIS request (stop). */
   cancelled: SessionRow | null;
   conflict: { code: ConflictCode; message: string } | null;
+  activeHash?: string | null;
 }
 
 async function finishTransition(
@@ -210,7 +245,7 @@ async function finishTransition(
   if (outcome.conflict !== null) {
     await stateConflict(ctx, userId, now, outcome.conflict.code, outcome.conflict.message);
   }
-  return { state: await assembleState(ctx, userId, now, outcome.activeAfter) };
+  return { state: await assembleState(ctx, userId, now, outcome.activeAfter, outcome.activeHash ?? null) };
 }
 
 /**
@@ -218,17 +253,35 @@ async function finishTransition(
  * optimistic request), so it is validated by hand instead of a JSON Schema —
  * Fastify would reject an absent body against `type: "object"`.
  */
-function readBaseRevision(body: unknown): number | undefined {
-  if (body === undefined || body === null) return undefined;
+function readGuard(body: unknown): { baseRevision?: number; baseHash?: string } {
+  if (body === undefined || body === null) return {};
   if (typeof body !== "object" || Array.isArray(body)) {
     throw new AppError(400, "validation_error", "body must be an object");
   }
   const { baseRevision } = body as { baseRevision?: unknown };
-  if (baseRevision === undefined) return undefined;
-  if (typeof baseRevision !== "number" || !Number.isInteger(baseRevision)) {
+  if (baseRevision !== undefined && (typeof baseRevision !== "number" || !Number.isInteger(baseRevision))) {
     throw new AppError(400, "validation_error", "baseRevision must be an integer");
   }
-  return baseRevision;
+  return {
+    baseRevision: baseRevision as number | undefined,
+    baseHash: readPresentedHash((body as { baseHash?: unknown }).baseHash),
+  };
+}
+
+function hashConflict(
+  fenced: boolean,
+  presented: string | undefined,
+  actual: string,
+): { code: ConflictCode; message: string } | null {
+  try {
+    assertPresentedHash(fenced, presented, actual);
+    return null;
+  } catch (error) {
+    if (error instanceof AppError && (error.code === "sync_stale" || error.code === "sync_base_required")) {
+      return { code: error.code, message: error.message };
+    }
+    throw error;
+  }
 }
 
 /** Stale-client guard: baseRevision, when given, must match the locked row. */
@@ -306,6 +359,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       let outcome: TransitionOutcome;
       try {
         outcome = await db.withTransaction(async (tx) => {
+          await lockOwnedTables(tx, ["focus.sessions", "focus.settings"]);
           const { row: active, completed } = await reconcileActive(tx, user.id, now);
           if (active !== null) {
             return {
@@ -335,7 +389,13 @@ async function registerApi(ctx: AppContext): Promise<void> {
             revision: 1,
           };
           await insertSession(tx, user.id, row);
-          return { activeAfter: row, completed, cancelled: null, conflict: null };
+          return {
+            activeAfter: row,
+            completed,
+            cancelled: null,
+            conflict: null,
+            activeHash: await sessionBaseHash(tx, user.id, row.id),
+          };
         });
       } catch (error) {
         // Lost the one-active-session race: a concurrent start committed first
@@ -355,9 +415,10 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
   ctx.api.post("/pause", async (request) => {
     const user = await ctx.auth.requireUser(request);
-    const baseRevision = readBaseRevision(request.body);
+    const guard = readGuard(request.body);
     const now = ctx.time.now();
     const outcome = await db.withTransaction(async (tx) => {
+      await lockOwnedTables(tx, ["focus.sessions"]);
       const { row: active, completed } = await reconcileActive(tx, user.id, now);
       if (active === null) {
         return {
@@ -365,16 +426,18 @@ async function registerApi(ctx: AppContext): Promise<void> {
           completed,
           cancelled: null,
           conflict: conflict("no_active_session", NO_ACTIVE_MESSAGE),
+          activeHash: null as string | null,
         };
       }
-      const stale = revisionConflict(active, baseRevision);
+      const stale = revisionConflict(active, guard.baseRevision);
       if (stale !== null) {
-        return { activeAfter: active, completed, cancelled: null, conflict: stale };
+        return { activeAfter: active, completed, cancelled: null, conflict: stale, activeHash: await sessionBaseHash(tx, user.id, active.id) };
       }
-      // Idempotent: already paused → no write, no revision bump, no event.
       if (active.status === "paused") {
-        return { activeAfter: active, completed, cancelled: null, conflict: null };
+        return { activeAfter: active, completed, cancelled: null, conflict: null, activeHash: await sessionBaseHash(tx, user.id, active.id) };
       }
+      const proved = hashConflict(await syncWriteFenced(tx, user.id), guard.baseHash, (await sessionBaseHash(tx, user.id, active.id)) ?? "");
+      if (proved) return { activeAfter: active, completed, cancelled: null, conflict: proved, activeHash: await sessionBaseHash(tx, user.id, active.id) };
       const paused = applyPause(active, now);
       const updated = await updateSessionRow(tx, user.id, paused);
       if (updated !== 1) {
@@ -383,18 +446,20 @@ async function registerApi(ctx: AppContext): Promise<void> {
           completed,
           cancelled: null,
           conflict: conflict("revision_conflict", "session changed during pause"),
+          activeHash: await sessionBaseHash(tx, user.id, active.id),
         };
       }
-      return { activeAfter: paused, completed, cancelled: null, conflict: null };
+      return { activeAfter: paused, completed, cancelled: null, conflict: null, activeHash: await sessionBaseHash(tx, user.id, paused.id) };
     });
     return finishTransition(ctx, user.id, now, outcome);
   });
 
   ctx.api.post("/resume", async (request) => {
     const user = await ctx.auth.requireUser(request);
-    const baseRevision = readBaseRevision(request.body);
+    const guard = readGuard(request.body);
     const now = ctx.time.now();
     const outcome = await db.withTransaction(async (tx) => {
+      await lockOwnedTables(tx, ["focus.sessions"]);
       const { row: active, completed } = await reconcileActive(tx, user.id, now);
       if (active === null) {
         return {
@@ -402,16 +467,18 @@ async function registerApi(ctx: AppContext): Promise<void> {
           completed,
           cancelled: null,
           conflict: conflict("no_active_session", NO_ACTIVE_MESSAGE),
+          activeHash: null as string | null,
         };
       }
-      const stale = revisionConflict(active, baseRevision);
+      const stale = revisionConflict(active, guard.baseRevision);
       if (stale !== null) {
-        return { activeAfter: active, completed, cancelled: null, conflict: stale };
+        return { activeAfter: active, completed, cancelled: null, conflict: stale, activeHash: await sessionBaseHash(tx, user.id, active.id) };
       }
-      // Idempotent: already running → no write, no revision bump, no event.
       if (active.status === "running") {
-        return { activeAfter: active, completed, cancelled: null, conflict: null };
+        return { activeAfter: active, completed, cancelled: null, conflict: null, activeHash: await sessionBaseHash(tx, user.id, active.id) };
       }
+      const proved = hashConflict(await syncWriteFenced(tx, user.id), guard.baseHash, (await sessionBaseHash(tx, user.id, active.id)) ?? "");
+      if (proved) return { activeAfter: active, completed, cancelled: null, conflict: proved, activeHash: await sessionBaseHash(tx, user.id, active.id) };
       const resumed = applyResume(active, now);
       const updated = await updateSessionRow(tx, user.id, resumed);
       if (updated !== 1) {
@@ -420,18 +487,20 @@ async function registerApi(ctx: AppContext): Promise<void> {
           completed,
           cancelled: null,
           conflict: conflict("revision_conflict", "session changed during resume"),
+          activeHash: await sessionBaseHash(tx, user.id, active.id),
         };
       }
-      return { activeAfter: resumed, completed, cancelled: null, conflict: null };
+      return { activeAfter: resumed, completed, cancelled: null, conflict: null, activeHash: await sessionBaseHash(tx, user.id, resumed.id) };
     });
     return finishTransition(ctx, user.id, now, outcome);
   });
 
   ctx.api.post("/stop", async (request) => {
     const user = await ctx.auth.requireUser(request);
-    const baseRevision = readBaseRevision(request.body);
+    const guard = readGuard(request.body);
     const now = ctx.time.now();
     const outcome = await db.withTransaction(async (tx) => {
+      await lockOwnedTables(tx, ["focus.sessions"]);
       const { row: active, completed } = await reconcileActive(tx, user.id, now);
       // reconcile may have JUST completed the session naturally — that
       // completion commits with this transaction, and the 409's details.state
@@ -442,12 +511,15 @@ async function registerApi(ctx: AppContext): Promise<void> {
           completed,
           cancelled: null,
           conflict: conflict("no_active_session", NO_ACTIVE_MESSAGE),
+          activeHash: null as string | null,
         };
       }
-      const stale = revisionConflict(active, baseRevision);
+      const stale = revisionConflict(active, guard.baseRevision);
       if (stale !== null) {
-        return { activeAfter: active, completed, cancelled: null, conflict: stale };
+        return { activeAfter: active, completed, cancelled: null, conflict: stale, activeHash: await sessionBaseHash(tx, user.id, active.id) };
       }
+      const proved = hashConflict(await syncWriteFenced(tx, user.id), guard.baseHash, (await sessionBaseHash(tx, user.id, active.id)) ?? "");
+      if (proved) return { activeAfter: active, completed, cancelled: null, conflict: proved, activeHash: await sessionBaseHash(tx, user.id, active.id) };
       const stopped = applyStop(active, now);
       const updated = await updateSessionRow(tx, user.id, stopped);
       if (updated !== 1) {
@@ -456,9 +528,10 @@ async function registerApi(ctx: AppContext): Promise<void> {
           completed,
           cancelled: null,
           conflict: conflict("revision_conflict", "session changed during stop"),
+          activeHash: await sessionBaseHash(tx, user.id, active.id),
         };
       }
-      return { activeAfter: null, completed, cancelled: stopped, conflict: null };
+      return { activeAfter: null, completed, cancelled: stopped, conflict: null, activeHash: null };
     });
     return finishTransition(ctx, user.id, now, outcome);
   });
@@ -532,7 +605,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
   ctx.api.get("/settings", async (request) => {
     const user = await ctx.auth.requireUser(request);
-    return getSettings(ctx.database, user.id);
+    return settingsProof(ctx.database, user.id);
   });
 
   ctx.api.put<{ Body: SettingsView }>(
@@ -569,12 +642,14 @@ async function registerApi(ctx: AppContext): Promise<void> {
               minimum: SETTINGS_LIMITS.longBreakInterval.min,
               maximum: SETTINGS_LIMITS.longBreakInterval.max,
             },
+            baseHash: { type: "string" },
           },
         },
       },
     },
     async (request) => {
       const user = await ctx.auth.requireUser(request);
+      const presented = readPresentedHash((request.body as { baseHash?: unknown }).baseHash);
       // Defense in depth: the schema already guarantees shape and range, but
       // every later read runs through sanitizeSettings — never persist
       // anything it would reject (a poisoned row would silently fall back to
@@ -587,8 +662,20 @@ async function registerApi(ctx: AppContext): Promise<void> {
           "settings fields must be integers within their allowed ranges",
         );
       }
-      await saveSettings(ctx.database, user.id, settings);
-      return settings;
+      return ctx.database.withTransaction(async (tx) => {
+        await lockOwnedTables(tx, ["focus.settings"]);
+        await lockOwnerSet(tx, user.id, "focus.settings");
+        const { rows } = await tx.query<{ snapshot: string }>(
+          "SELECT row_to_json(s)::text AS snapshot FROM focus.settings s WHERE id = $1 AND user_id = $2 FOR UPDATE",
+          ["current", user.id],
+        );
+        const actual = rows[0]
+          ? editorBaseHash([{ table: "focus.settings", row: parseSnapshotRow(rows[0].snapshot) }])
+          : singletonBaseHash("focus.settings", { id: "current", value: DEFAULT_SETTINGS });
+        assertPresentedHash(await syncWriteFenced(tx, user.id), presented, actual);
+        await saveSettings(tx, user.id, settings);
+        return settingsProof(tx, user.id);
+      });
     },
   );
 }

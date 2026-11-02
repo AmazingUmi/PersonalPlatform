@@ -38,6 +38,7 @@ export interface NoteView {
   updatedAt: string;
   tags: NoteTagView[];
   dayKey: string;
+  baseHash?: string;
 }
 
 /** List response; day keys are server-computed so the frontend never does
@@ -120,7 +121,7 @@ export function createNote(input: NoteInput): Promise<NoteView> {
  * clear (title/mood) / re-stamp now (occurredAt), value = update. `tagIds` is
  * an all-or-nothing set replacement — never send `tagIds: null` (400).
  */
-export type NotePatch = Partial<Omit<NoteInput, "tagIds">> & { tagIds?: string[] };
+export type NotePatch = Partial<Omit<NoteInput, "tagIds">> & { tagIds?: string[]; baseHash?: string };
 
 export function updateNote(id: string, patch: NotePatch): Promise<NoteView> {
   return api<NoteView>(`/api/apps/notes/notes/${id}`, {
@@ -130,8 +131,11 @@ export function updateNote(id: string, patch: NotePatch): Promise<NoteView> {
   });
 }
 
-export function deleteNote(id: string): Promise<void> {
-  return api(`/api/apps/notes/notes/${id}`, { method: "DELETE" });
+export function deleteNote(id: string, baseHash?: string): Promise<void> {
+  return api(`/api/apps/notes/notes/${id}`, {
+    method: "DELETE",
+    headers: baseHash ? { "x-base-hash": baseHash } : undefined,
+  });
 }
 
 export function listTags(): Promise<{ items: TagView[] }> {

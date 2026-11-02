@@ -5,6 +5,8 @@ import { AppError } from '../api/errors.js';
 import type { Database, DatabaseContext } from '../database/index.js';
 import { createAppStorage } from '../storage/local.js';
 import { sanitizeKey } from '../storage/index.js';
+import { dataLockNames } from './data-lock.js';
+import { columnSignature } from './sync-validate.js';
 import { APP_IDS, SETTINGS_KEYS, TABLES, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ROWS, authorize, digest, exactKeys, fail, keyOf, validateEnvelope, validateRow, type Actor, type Column, type Row, type Scope, type Snapshot, type TableSpec } from './snapshot-schema.js';
 export { MAX_SNAPSHOT_BYTES } from './snapshot-schema.js';
 export type { Actor, Scope, Snapshot } from './snapshot-schema.js';
@@ -14,6 +16,9 @@ export interface SnapshotReport { scope: Scope; createdAt: string; files: number
 interface Catalog { tables: TableSpec[]; columns: Map<string, Column[]>; signatures: Record<string,string> }
 const quoted = (name: string): string => name.split('.').map(p => '"' + p + '"').join('.');
 
+export async function readDataCatalog(tx: DatabaseContext, installedApps: string[] = []): Promise<Catalog> {
+  return catalog(tx, installedApps);
+}
 async function catalog(tx: DatabaseContext, installedApps: string[] = []): Promise<Catalog> {
   const schemas = [...new Set(['core', ...APP_IDS, ...installedApps])];
   const actual = (await tx.query<{schema: string; table: string}>(
@@ -31,7 +36,7 @@ async function catalog(tx: DatabaseContext, installedApps: string[] = []): Promi
       'SELECT column_name AS name, data_type AS type, is_nullable = \'YES\' AS nullable FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 ORDER BY column_name', [schema,name])).rows;
     if (rows.map(r => r.name).join('|') !== [...table.columns].sort().join('|')) fail('Unsupported database schema for ' + table.name + '; upgrade or update its backup adapter.');
     columns.set(table.name, rows);
-    signatures[table.name] = digest(Buffer.from(JSON.stringify(rows)));
+    signatures[table.name] = columnSignature(rows);
   }
   return { tables, columns, signatures };
 }
@@ -49,15 +54,24 @@ async function recheckActor(tx: DatabaseContext, actor: Actor, scope: Scope): Pr
   if (!user || user.status !== 'active' || (scope === 'all' && user.role !== 'admin')) fail('Account is inactive or no longer permitted to manage this scope.',403);
   return {id:user.id,username:user.username};
 }
+export async function captureOwnSnapshot(tx: DatabaseContext, options: SnapshotOptions): Promise<Snapshot> {
+  authorize(options.actor, options.scope);
+  const source = await recheckActor(tx, options.actor, options.scope);
+  const cat = await catalog(tx, options.installedApps);
+  return readSnapshot(tx, options, source, cat);
+}
 export async function exportSnapshot(options: SnapshotOptions): Promise<Snapshot> {
-  const {database,storageRoot,actor,scope} = options;
+  const {database,actor,scope} = options;
   authorize(actor,scope);
   return database.withTransaction(async tx => {
     await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
     await tx.query("SET LOCAL statement_timeout = '30s'");
     await tx.query("SET LOCAL transaction_timeout = '120s'");
-    const source = await recheckActor(tx,actor,scope);
-    const cat = await catalog(tx,options.installedApps);
+    return captureOwnSnapshot(tx, options);
+  });
+}
+async function readSnapshot(tx: DatabaseContext, options: SnapshotOptions, source: {id:string;username:string}, cat: Catalog): Promise<Snapshot> {
+  const {storageRoot,actor,scope} = options;
     const snapshot: Snapshot = {type:'personal-platform-data',formatVersion:1,createdAt:new Date().toISOString(),scope,source,schema:{},tables:{},files:[]};
     let bytes=0, count=0;
     for (const table of cat.tables.filter(t => relevant(t,scope))) {
@@ -83,7 +97,6 @@ export async function exportSnapshot(options: SnapshotOptions): Promise<Snapshot
     if(Buffer.byteLength(JSON.stringify(snapshot))>MAX_SNAPSHOT_BYTES) fail('Backup exceeds the 32 MiB limit.',413);
     validateSourceRelations(snapshot);
     return snapshot;
-  });
 }
 
 function validateSourceRelations(snapshot: Snapshot): void {
@@ -112,19 +125,19 @@ function validateSourceRelations(snapshot: Snapshot): void {
 
 class PreviewRollback extends Error { constructor(readonly report:SnapshotReport){super('preview rollback');} }
 /** New files use unpredictable keys and exclusive create. Check every descendant for symlinks. */
-async function saveNewFile(root:string,userId:string,data:Buffer):Promise<{key:string;path:string}> {
-  const key='imports/'+randomUUID();
+export async function stageOwnedFile(root: string, userId: string, data: Buffer, folder: "imports" | "sync"): Promise<{key:string;path:string}> {
+  const key = folder + "/" + randomUUID();
   let current=resolve(root);
   await mkdir(current,{recursive:true});
   // Configured storage root can be an operator-provided mount/symlink, but no
   // descendant (including a user/app root) may redirect the write.
-  for(const part of ['users',userId,'apps','assets','imports']) {
+  for(const part of ['users',userId,'apps','assets',folder]) {
     current=join(current,part);
     try {await mkdir(current);} catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST') throw error;}
     const info=await lstat(current);
     if(!info.isDirectory()||info.isSymbolicLink()) fail('Unsafe attachment storage directory.');
   }
-  const path=join(current,key.split('/')[1]!);
+  const path=join(current, key.slice(folder.length + 1));
   const handle=await open(path,'wx',0o600);
   try {await handle.writeFile(data);} catch(error){await handle.close(); await unlink(path).catch(()=>undefined); throw error;}
   await handle.close(); return {key,path};
@@ -172,7 +185,7 @@ async function merge(options:ImportOptions,preview:boolean):Promise<SnapshotRepo
       validateSourceRelations(snapshot);
       // Stable lock order blocks ordinary App writes too, so preserved rows,
       // unique names and parent ownership cannot change between check/insert.
-      const locks=[...new Set(['core.users',...requested.map(t=>t.name)])].sort();
+      const locks=dataLockNames(['core.users',...requested.map(t=>t.name)]);
       await tx.query('LOCK TABLE '+locks.map(quoted).join(',')+' IN SHARE ROW EXCLUSIVE MODE');
       await recheckActor(tx,options.actor,options.scope);
       const report:SnapshotReport={scope:snapshot.scope,createdAt:snapshot.createdAt,files:snapshot.files.length,tables:[],inserted:0,skipped:0};
@@ -214,7 +227,7 @@ async function merge(options:ImportOptions,preview:boolean):Promise<SnapshotRepo
           if(table.name==='focus.sessions'&&['running','paused'].includes(String(row.status))&&[...targets.values()].some(r=>r.user_id===row.user_id&&['running','paused'].includes(String(r.status)))) fail('An active Focus session already exists; finish it before merging this backup.',409);
           if(table.name==='assets.attachments') {
             if(preview)row.storage_key='imports/'+randomUUID();
-            else {const file=await saveNewFile(options.storageRoot,String(row.user_id),Buffer.from(fileMap.get(String(row.id))!.data,'base64'));row.storage_key=file.key;createdFiles.push(file.path);}
+            else {const file=await stageOwnedFile(options.storageRoot,String(row.user_id),Buffer.from(fileMap.get(String(row.id))!.data,'base64'),'imports');row.storage_key=file.key;createdFiles.push(file.path);}
           }
           const columns=table.columns;
           const types=cat.columns.get(table.name)!;

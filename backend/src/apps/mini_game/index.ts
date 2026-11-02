@@ -1,5 +1,8 @@
 import { AppError } from "../../core/api/errors.js";
 import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-registry/types.js";
+import {
+  assertPresentedHash, editorBaseHash, lockOwnedTables, lockOwnerSet, parseSnapshotRow, readPresentedHash, singletonBaseHash, syncWriteFenced,
+} from "../../core/data-management/sync-fence.js";
 
 interface SaveRow {
   id: string;
@@ -11,6 +14,14 @@ interface SaveRow {
 }
 
 const SAVE_ID = "current";
+
+function absentSaveHash(): string {
+  return singletonBaseHash("mini_game.saves", { id: SAVE_ID, absent: true });
+}
+
+function saveHash(snapshot: string): string {
+  return editorBaseHash([{ table: "mini_game.saves", row: parseSnapshotRow(snapshot) }]);
+}
 
 const id = "mini_game";
 
@@ -39,6 +50,18 @@ function isValidBoardShape(board: unknown): board is number[][] {
   );
 }
 
+function saveFromSnapshot(snapshot: string): SaveRow {
+  const row = parseSnapshotRow(snapshot);
+  return {
+    id: String(row.id),
+    score: Number(row.score),
+    high_score: Number(row.high_score),
+    board: row.board,
+    revision: Number(row.revision),
+    updated_at: typeof row.updated_at === "string" ? row.updated_at : String(row.updated_at),
+  };
+}
+
 function toSave(row: SaveRow) {
   return {
     id: row.id,
@@ -55,17 +78,18 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
   ctx.api.get("/saves", async (request) => {
     const user = await ctx.auth.requireUser(request);
-    const { rows } = await db.query<SaveRow>(
-      "SELECT id, score, high_score, board, revision, updated_at FROM mini_game.saves WHERE id = $1 AND user_id = $2",
+    const { rows } = await db.query<SaveRow & { snapshot: string }>(
+      `SELECT id, score, high_score, board, revision, updated_at, row_to_json(s)::text AS snapshot
+       FROM mini_game.saves s WHERE id = $1 AND user_id = $2`,
       [SAVE_ID, user.id],
     );
-    // Defensive read (FP-13.2): a poisoned/stale row is reported as "no save"
-    // instead of feeding the client a broken board.
-    if (!rows[0] || !isValidBoardShape(rows[0].board)) return { save: null };
-    return { save: toSave(rows[0]) };
+    if (!rows[0]) return { save: null, baseHash: absentSaveHash() };
+    const baseHash = saveHash(rows[0].snapshot);
+    if (!isValidBoardShape(rows[0].board)) return { save: null, baseHash };
+    return { save: toSave(rows[0]), baseHash };
   });
 
-  ctx.api.put<{ Body: { score: number; board: unknown; revision: number } }>(
+  ctx.api.put<{ Body: { score: number; board: unknown; revision: number; baseHash?: string } }>(
     "/saves",
     {
       schema: {
@@ -77,6 +101,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
             score: { type: "integer", minimum: 0 },
             board: BOARD_SCHEMA,
             revision: { type: "integer", minimum: 0 },
+            baseHash: { type: "string" },
           },
         },
       },
@@ -84,6 +109,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
     async (request) => {
       const user = await ctx.auth.requireUser(request);
       const body = request.body;
+      const presented = readPresentedHash(body.baseHash);
 
       // Business validation on top of the JSON shape (FP-13.2): shape errors
       // answer 400 validation_error, semantically impossible boards answer a
@@ -101,41 +127,64 @@ async function registerApi(ctx: AppContext): Promise<void> {
       // board back to an older state (FP-2A.4). The row lock makes the
       // previous-high-score read and the upsert atomic for concurrent moves.
       // The save slot is per-user (AUTH-3): (user_id, id) is the conflict key.
-      const { row, prevHigh, existed } = await db.withTransaction(async (tx) => {
-        const prev = await tx.query<{ high_score: number }>(
-          "SELECT high_score FROM mini_game.saves WHERE id = $1 AND user_id = $2 FOR UPDATE",
+      const { row, rejected, prevHigh, existed, baseHash } = await db.withTransaction(async (tx) => {
+        await lockOwnedTables(tx, ["mini_game.saves"]);
+        await lockOwnerSet(tx, user.id, "mini_game.saves");
+        const prev = await tx.query<{ high_score: number; snapshot: string }>(
+          "SELECT high_score, row_to_json(s)::text AS snapshot FROM mini_game.saves s WHERE id = $1 AND user_id = $2 FOR UPDATE",
           [SAVE_ID, user.id],
         );
-        const { rows } = await tx.query<SaveRow>(
-          `INSERT INTO mini_game.saves (id, user_id, score, high_score, board, revision, updated_at)
+        const fenced = await syncWriteFenced(tx, user.id);
+        if (!prev.rows[0]) {
+          assertPresentedHash(fenced, presented, absentSaveHash());
+          const inserted = await tx.query<SaveRow & { snapshot: string }>(
+            `INSERT INTO mini_game.saves AS s (id, user_id, score, high_score, board, revision, updated_at)
+             VALUES ($1, $2, $3, $3, $4::jsonb, $5, now())
+             RETURNING id, score, high_score, board, revision, updated_at, row_to_json(s)::text AS snapshot`,
+            [SAVE_ID, user.id, body.score, JSON.stringify(body.board), body.revision],
+          );
+          const insertedRow = inserted.rows[0];
+          if (!insertedRow) throw new AppError(500, "save_failed", "save state could not be read back");
+          return { row: insertedRow, rejected: undefined, prevHigh: undefined, existed: false, baseHash: saveHash(insertedRow.snapshot) };
+        }
+        const lockedHash = saveHash(prev.rows[0].snapshot);
+        assertPresentedHash(fenced, presented, lockedHash);
+        const { rows } = await tx.query<SaveRow & { snapshot: string }>(
+          `INSERT INTO mini_game.saves AS s (id, user_id, score, high_score, board, revision, updated_at)
            VALUES ($1, $2, $3, $3, $4::jsonb, $5, now())
            ON CONFLICT (user_id, id) DO UPDATE
              SET score = EXCLUDED.score,
-                 high_score = GREATEST(mini_game.saves.high_score, EXCLUDED.score),
+                 high_score = GREATEST(s.high_score, EXCLUDED.score),
                  board = EXCLUDED.board,
                  revision = EXCLUDED.revision,
                  updated_at = now()
-           WHERE mini_game.saves.revision < EXCLUDED.revision
-           RETURNING id, score, high_score, board, revision, updated_at`,
+           WHERE s.revision < EXCLUDED.revision
+           RETURNING id, score, high_score, board, revision, updated_at, row_to_json(s)::text AS snapshot`,
           [SAVE_ID, user.id, body.score, JSON.stringify(body.board), body.revision],
         );
+        if (!rows[0]) {
+          return {
+            row: undefined,
+            rejected: saveFromSnapshot(prev.rows[0].snapshot),
+            prevHigh: prev.rows[0].high_score,
+            existed: true,
+            baseHash: lockedHash,
+          };
+        }
         return {
           row: rows[0],
-          prevHigh: prev.rows[0]?.high_score,
-          existed: prev.rows.length > 0,
+          rejected: undefined,
+          prevHigh: prev.rows[0].high_score,
+          existed: true,
+          baseHash: saveHash(rows[0].snapshot),
         };
       });
 
       const accepted = row !== undefined;
-      // Either the write was stale or it repeated the current revision
-      // (idempotent no-op); return the authoritative server state.
+      // Stale or repeated revision: the locked snapshot and its hash travel together.
       if (!row) {
-        const existing = await db.query<SaveRow>(
-          "SELECT id, score, high_score, board, revision, updated_at FROM mini_game.saves WHERE id = $1 AND user_id = $2",
-          [SAVE_ID, user.id],
-        );
-        if (!existing.rows[0]) throw new AppError(500, "save_failed", "save state could not be read back");
-        return { save: toSave(existing.rows[0]), accepted: false };
+        if (!rejected) throw new AppError(500, "save_failed", "save state could not be read back");
+        return { save: toSave(rejected), accepted: false, baseHash };
       }
 
       // The historical high score is monotonic: resetting the run (New Game)
@@ -148,7 +197,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
           "mini_game",
         );
       }
-      return { save: toSave(row), accepted };
+      return { save: toSave(row), accepted, baseHash };
     },
   );
 

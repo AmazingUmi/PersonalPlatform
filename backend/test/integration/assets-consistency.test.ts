@@ -280,51 +280,107 @@ describe("upload compensation: DB failure after storage save (FP-12.1)", () => {
   });
 });
 
-describe("delete compensation: DB failure after storage removal (FP-12.1)", () => {
-  it("queues and later drains the dangling metadata drop", async () => {
+async function clearAttachmentDeleteBlock(): Promise<void> {
+  await db.context().query("DROP TRIGGER IF EXISTS test_block_delete ON assets.attachments");
+  await db.context().query("DROP FUNCTION IF EXISTS assets._test_block_delete()");
+}
+
+describe("delete compensation: DB failure before storage removal (FP-12.1)", () => {
+  it("keeps metadata and the file when the row delete fails, then deletes both after the fault clears", async () => {
     const itemId = await createItem("Dangling target");
     const uploaded = await upload(itemId, "gone.txt", "about-to-vanish");
     assert.equal(uploaded.statusCode, 201);
-    const attachmentId = uploaded.json().id;
+    const attachmentId = uploaded.json().id as string;
+    const file = attachmentFile(itemId, attachmentId);
 
-    // Block the metadata DELETE; storage delete succeeds first.
-    await db.context().query(`
-      CREATE OR REPLACE FUNCTION assets._test_block_delete() RETURNS trigger AS $$
-        BEGIN RAISE EXCEPTION 'delete blocked'; END
-      $$ LANGUAGE plpgsql`);
-    await db.context().query(
-      "CREATE TRIGGER test_block_delete BEFORE DELETE ON assets.attachments FOR EACH ROW EXECUTE FUNCTION assets._test_block_delete()",
-    );
-
-    const response = await platform.app.inject({
-      method: "DELETE",
-      url: `/api/apps/assets/items/${itemId}/attachments/${attachmentId}`,
-      headers: { cookie },
-    });
-    assert.equal(response.statusCode, 500, "metadata delete fails");
-    assert.ok(!existsSync(attachmentFile(itemId, attachmentId)), "file already removed");
-
-    // The dangling row is queued; inline processing could not drain it (the
-    // trigger still blocks), so it stays pending for the scheduler/reconcile.
-    const pending = await db
-      .context()
-      .query<{ status: string; attempts: number }>(
-        "SELECT status, attempts FROM assets.cleanup_jobs WHERE attachment_id = $1",
-        [attachmentId],
+    try {
+      // The row delete is inside the guarded transaction. Blocking it must
+      // roll that transaction back before the storage object is touched.
+      await db.context().query(`
+        CREATE OR REPLACE FUNCTION assets._test_block_delete() RETURNS trigger AS $$
+          BEGIN RAISE EXCEPTION 'delete blocked'; END
+        $$ LANGUAGE plpgsql`);
+      await db.context().query(
+        "CREATE TRIGGER test_block_delete BEFORE DELETE ON assets.attachments FOR EACH ROW EXECUTE FUNCTION assets._test_block_delete()",
       );
-    assert.equal(pending.rows[0]!.status, "pending");
-    assert.ok(pending.rows[0]!.attempts >= 1, "at least one failed attempt recorded");
 
-    // Fault clears: reconciliation drains the queue and drops the metadata.
-    await db.context().query("DROP TRIGGER test_block_delete ON assets.attachments");
-    await db.context().query("DROP FUNCTION assets._test_block_delete");
+      const response = await platform.app.inject({
+        method: "DELETE",
+        url: `/api/apps/assets/items/${itemId}/attachments/${attachmentId}`,
+        headers: { cookie },
+      });
+      assert.equal(response.statusCode, 500, "metadata delete fails");
+      assert.ok(existsSync(file), "file preserved when the metadata delete rolls back");
+      const meta = await db
+        .context()
+        .query<{ storage_key: string }>("SELECT storage_key FROM assets.attachments WHERE id = $1", [attachmentId]);
+      assert.equal(meta.rows.length, 1, "metadata preserved when the metadata delete rolls back");
+      const queued = await db.context().query(
+        "SELECT id FROM assets.cleanup_jobs WHERE attachment_id = $1 OR storage_key = $2",
+        [attachmentId, meta.rows[0]!.storage_key],
+      );
+      assert.equal(queued.rows.length, 0, "a rolled-back delete does not enqueue compensation");
+
+      await clearAttachmentDeleteBlock();
+      const retry = await platform.app.inject({
+        method: "DELETE",
+        url: `/api/apps/assets/items/${itemId}/attachments/${attachmentId}`,
+        headers: { cookie },
+      });
+      assert.equal(retry.statusCode, 204, "delete succeeds after the fault clears");
+      assert.ok(!existsSync(file), "file removed on the successful retry");
+      const gone = await db.context().query("SELECT id FROM assets.attachments WHERE id = $1", [attachmentId]);
+      assert.equal(gone.rows.length, 0, "metadata removed on the successful retry");
+    } finally {
+      await clearAttachmentDeleteBlock();
+    }
+  });
+
+  it("queues delete_storage for the owner when storage delete fails after the DB commit, then drains", async () => {
+    const itemId = await createItem("Storage fault target");
+    const uploaded = await upload(itemId, "stuck.txt", "still-on-disk");
+    assert.equal(uploaded.statusCode, 201);
+    const attachmentId = uploaded.json().id as string;
+    const file = attachmentFile(itemId, attachmentId);
+    const { rows } = await db.context().query<{ storage_key: string }>(
+      "SELECT storage_key FROM assets.attachments WHERE id = $1",
+      [attachmentId],
+    );
+    const storageKey = rows[0]!.storage_key;
+
+    await withStorageFacade((_userId, driver) => storageFacade(driver, {
+      delete: async () => {
+        throw new StorageError("disk unavailable", "io_error");
+      },
+    }), async () => {
+      const response = await platform.app.inject({
+        method: "DELETE",
+        url: `/api/apps/assets/items/${itemId}/attachments/${attachmentId}`,
+        headers: { cookie },
+      });
+      assert.equal(response.statusCode, 204, "metadata commit is not rolled back by the later storage failure");
+      assert.ok(existsSync(file), "file stays until delete_storage succeeds");
+      const meta = await db.context().query("SELECT id FROM assets.attachments WHERE id = $1", [attachmentId]);
+      assert.equal(meta.rows.length, 0, "metadata is already gone");
+      const pending = await db.context().query<{ kind: string; status: string; user_id: string; storage_key: string }>(
+        "SELECT kind, status, user_id, storage_key FROM assets.cleanup_jobs WHERE storage_key = $1",
+        [storageKey],
+      );
+      assert.equal(pending.rows.length, 1);
+      assert.equal(pending.rows[0]!.kind, "delete_storage");
+      assert.equal(pending.rows[0]!.user_id, adminId, "compensation is owned by the attachment owner");
+      assert.equal(pending.rows[0]!.storage_key, storageKey);
+      assert.equal(pending.rows[0]!.status, "pending", "inline drain hits the same storage failure");
+    });
+
     const result = await reconcile();
-    assert.ok(result.queue.processed >= 1);
-
-    const meta = await db
-      .context()
-      .query("SELECT id FROM assets.attachments WHERE id = $1", [attachmentId]);
-    assert.equal(meta.rows.length, 0, "dangling metadata dropped");
+    assert.ok(result.queue.processed >= 1, "reconcile drains the queued storage delete");
+    assert.ok(!existsSync(file), "file removed once storage accepts the delete");
+    const done = await db.context().query<{ status: string }>(
+      "SELECT status FROM assets.cleanup_jobs WHERE storage_key = $1",
+      [storageKey],
+    );
+    assert.equal(done.rows[0]!.status, "done");
   });
 });
 

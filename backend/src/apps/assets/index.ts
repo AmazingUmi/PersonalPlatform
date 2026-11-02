@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 import multipart from "@fastify/multipart";
 import { AppError } from "../../core/api/errors.js";
 import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-registry/types.js";
+import {
+  assertPresentedHash, editorBaseHash, headerPresentedHash, lockOwnedTables, lockOwnerSet, parseSnapshotRow, parseSnapshotRows, readPresentedHash, syncWriteFenced,
+  type HashPart,
+} from "../../core/data-management/sync-fence.js";
+import { digest } from "../../core/data-management/snapshot-schema.js";
 import type { JobHandle } from "../../core/scheduler/index.js";
 import { StorageError } from "../../core/storage/index.js";
 
@@ -83,6 +88,7 @@ export interface ItemView {
   updatedAt: string;
   /** Ordered by name (UNIQUE — naturally stable); empty = uncategorized. */
   categories: ItemCategoryView[];
+  baseHash?: string;
 }
 
 export interface CategoryView {
@@ -298,20 +304,87 @@ async function categoriesForItems(db: Db, itemIds: string[]): Promise<Map<string
   return map;
 }
 
-async function findItemView(db: Db, userId: string, itemId: string): Promise<ItemView | null> {
-  const { rows } = await db.query<ItemRow>(
-    `SELECT ${ITEM_COLUMNS} FROM assets.items WHERE id = $1 AND user_id = $2`,
-    [itemId, userId],
-  );
-  if (!rows[0]) return null;
-  const categories = await categoriesForItems(db, [itemId]);
-  return toItemView(rows[0], categories.get(itemId) ?? []);
+async function attachmentSha(ctx: AppContext, userId: string, storageKey: string): Promise<string> {
+  try {
+    return digest(await ctx.storage.forUser(userId).read(storageKey));
+  } catch {
+    throw new AppError(409, "sync_stale", "An attachment could not be verified. Reload the item.");
+  }
 }
 
-async function requireItemView(db: Db, userId: string, itemId: string): Promise<ItemView> {
-  const view = await findItemView(db, userId, itemId);
-  if (!view) throw new AppError(404, "not_found", "item not found");
-  return view;
+async function itemProof(
+  tx: AppContext["database"],
+  ctx: AppContext,
+  userId: string,
+  itemId: string,
+  lockRows: boolean,
+): Promise<{ hash: string; files: { id: string; storageKey: string }[]; view: ItemView } | null> {
+  if (lockRows) await lockOwnerSet(tx, userId, "assets");
+  const lock = lockRows ? " FOR UPDATE" : "";
+  const itemSql = lockRows
+    ? `SELECT ${ITEM_COLUMNS}, row_to_json(i)::text AS item_snapshot FROM assets.items i WHERE i.id = $1 AND i.user_id = $2${lock}`
+    : `SELECT ${ITEM_COLUMNS}, row_to_json(i)::text AS item_snapshot,
+            COALESCE((SELECT json_agg(row_to_json(ic) ORDER BY ic.category_id) FROM assets.item_categories ic WHERE ic.item_id = i.id), '[]'::json) AS link_snapshot,
+            COALESCE((SELECT json_agg(json_build_object('id', c.id, 'name', c.name, 'color', c.color) ORDER BY c.name)
+                      FROM assets.item_categories ic JOIN assets.categories c ON c.id = ic.category_id WHERE ic.item_id = i.id), '[]'::json) AS category_views,
+            COALESCE((SELECT json_agg(row_to_json(a) ORDER BY a.created_at, a.id) FROM assets.attachments a WHERE a.item_id = i.id AND a.user_id = i.user_id), '[]'::json) AS attachment_snapshot
+       FROM assets.items i WHERE i.id = $1 AND i.user_id = $2`;
+  const { rows } = await tx.query<{
+    item_snapshot: string;
+    link_snapshot?: unknown;
+    category_views?: ItemCategoryView[] | null;
+    attachment_snapshot?: unknown;
+    id: string;
+    name: string;
+    description: string | null;
+    quantity: number;
+    acquired_at: string | null;
+    target_location: string | null;
+    created_at: Date;
+    updated_at: Date;
+  }>(itemSql, [itemId, userId]);
+  const row = rows[0];
+  if (!row) return null;
+  let linkRows = parseSnapshotRows(row.link_snapshot);
+  let categoryViews = row.category_views ?? [];
+  let attachments = parseSnapshotRows(row.attachment_snapshot);
+  if (lockRows) {
+    const links = await tx.query<{ snapshot: string }>(
+      "SELECT row_to_json(ic)::text AS snapshot FROM assets.item_categories ic WHERE ic.item_id = $1 ORDER BY ic.category_id FOR UPDATE",
+      [itemId],
+    );
+    linkRows = links.rows.map((link) => parseSnapshotRow(link.snapshot));
+    const named = await tx.query<ItemCategoryView>(
+      `SELECT c.id, c.name, c.color FROM assets.item_categories ic
+       JOIN assets.categories c ON c.id = ic.category_id WHERE ic.item_id = $1 ORDER BY c.name`,
+      [itemId],
+    );
+    categoryViews = named.rows;
+    const files = await tx.query<{ snapshot: string }>(
+      "SELECT row_to_json(a)::text AS snapshot FROM assets.attachments a WHERE a.item_id = $1 AND a.user_id = $2 ORDER BY a.created_at, a.id FOR UPDATE",
+      [itemId, userId],
+    );
+    attachments = files.rows.map((file) => parseSnapshotRow(file.snapshot));
+  }
+  const stored: { id: string; storageKey: string }[] = [];
+  const parts: HashPart[] = [
+    { table: "assets.items", row: parseSnapshotRow(row.item_snapshot) },
+    ...linkRows.map((link) => ({ table: "assets.item_categories", row: link })),
+  ];
+  for (const attachment of attachments) {
+    const storageKey = String(attachment.storage_key ?? "");
+    const sha = await attachmentSha(ctx, userId, storageKey);
+    stored.push({ id: String(attachment.id), storageKey });
+    parts.push({ table: "assets.attachments", row: attachment, contentSha256: sha });
+  }
+  const hash = editorBaseHash(parts);
+  return { hash, files: stored, view: { ...toItemView(row, categoryViews), baseHash: hash } };
+}
+
+async function requireItemView(ctx: AppContext, userId: string, itemId: string): Promise<ItemView> {
+  const proof = await itemProof(ctx.database, ctx, userId, itemId, false);
+  if (!proof) throw new AppError(404, "not_found", "item not found");
+  return { ...proof.view, baseHash: proof.hash };
 }
 
 // ---------------------------------------------------------------------------
@@ -543,11 +616,21 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
   ctx.api.get("/categories", async (request) => {
     const user = await ctx.auth.requireUser(request);
-    const { rows } = await db.query<CategoryRow>(
-      "SELECT id, name, color, created_at FROM assets.categories WHERE user_id = $1 ORDER BY name",
+    const { rows } = await db.query<CategoryRow & { snapshot: string; link_snapshot: unknown }>(
+      `SELECT c.id, c.name, c.color, c.created_at, row_to_json(c)::text AS snapshot,
+              COALESCE((SELECT json_agg(row_to_json(ic) ORDER BY ic.item_id) FROM assets.item_categories ic WHERE ic.category_id = c.id), '[]'::json) AS link_snapshot
+       FROM assets.categories c WHERE c.user_id = $1 ORDER BY c.name`,
       [user.id],
     );
-    return { items: rows.map(toCategoryView) };
+    return {
+      items: rows.map((row) => ({
+        ...toCategoryView(row),
+        baseHash: editorBaseHash([
+          { table: "assets.categories", row: parseSnapshotRow(row.snapshot) },
+          ...parseSnapshotRows(row.link_snapshot).map((link) => ({ table: "assets.item_categories", row: link })),
+        ]),
+      })),
+    };
   });
 
   ctx.api.post<{ Body: { name: string; color?: string } }>(
@@ -584,7 +667,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
   );
 
   // Partial update: absent fields stay unchanged, explicit null clears color.
-  ctx.api.patch<{ Params: { id: string }; Body: { name?: string; color?: string | null } }>(
+  ctx.api.patch<{ Params: { id: string }; Body: { name?: string; color?: string | null; baseHash?: string } }>(
     "/categories/:id",
     {
       schema: {
@@ -594,6 +677,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
           properties: {
             name: { type: "string", minLength: 1, maxLength: 200 },
             color: { enum: [...CATEGORY_COLORS, null] },
+            baseHash: { type: "string" },
           },
         },
       },
@@ -619,13 +703,31 @@ async function registerApi(ctx: AppContext): Promise<void> {
         if (!current.rows[0]) throw new AppError(404, "not_found", "category not found");
         return toCategoryView(current.rows[0]);
       }
+      const presented = readPresentedHash(body.baseHash);
       try {
-        const { rows } = await db.query<CategoryRow>(
-          `UPDATE assets.categories SET ${sets.join(", ")} WHERE id = $1 AND user_id = $2 RETURNING id, name, color, created_at`,
-          params,
-        );
-        if (!rows[0]) throw new AppError(404, "not_found", "category not found");
-        return toCategoryView(rows[0]);
+        return await db.withTransaction(async (tx) => {
+          await lockOwnedTables(tx, ["assets.categories", "assets.item_categories"]);
+          await lockOwnerSet(tx, user.id, "assets");
+          const current = await tx.query<CategoryRow & { snapshot: string }>(
+            "SELECT id, name, color, created_at, row_to_json(c)::text AS snapshot FROM assets.categories c WHERE c.id = $1 AND c.user_id = $2 FOR UPDATE",
+            [request.params.id, user.id],
+          );
+          if (!current.rows[0]) throw new AppError(404, "not_found", "category not found");
+          const links = await tx.query<{ snapshot: string }>(
+            "SELECT row_to_json(ic)::text AS snapshot FROM assets.item_categories ic WHERE ic.category_id = $1 ORDER BY ic.item_id FOR UPDATE",
+            [request.params.id],
+          );
+          assertPresentedHash(await syncWriteFenced(tx, user.id), presented, editorBaseHash([
+            { table: "assets.categories", row: parseSnapshotRow(current.rows[0].snapshot) },
+            ...links.rows.map((link) => ({ table: "assets.item_categories", row: parseSnapshotRow(link.snapshot) })),
+          ]));
+          const { rows } = await tx.query<CategoryRow>(
+            `UPDATE assets.categories SET ${sets.join(", ")} WHERE id = $1 AND user_id = $2 RETURNING id, name, color, created_at`,
+            params,
+          );
+          if (!rows[0]) throw new AppError(404, "not_found", "category not found");
+          return toCategoryView(rows[0]);
+        });
       } catch (error) {
         if (isUniqueViolation(error)) {
           throw new AppError(422, "category_name_taken", `a category named "${body.name}" already exists`);
@@ -640,11 +742,26 @@ async function registerApi(ctx: AppContext): Promise<void> {
   // items with no other category become uncategorized.
   ctx.api.delete<{ Params: { id: string } }>("/categories/:id", async (request, reply) => {
     const user = await ctx.auth.requireUser(request);
-    const result = await db.query("DELETE FROM assets.categories WHERE id = $1 AND user_id = $2", [
-      request.params.id,
-      user.id,
-    ]);
-    if (result.rowCount === 0) throw new AppError(404, "not_found", "category not found");
+    const presented = headerPresentedHash(request.headers["x-base-hash"]);
+    await db.withTransaction(async (tx) => {
+      await lockOwnedTables(tx, ["assets.categories", "assets.item_categories"]);
+      await lockOwnerSet(tx, user.id, "assets");
+      const current = await tx.query<{ snapshot: string }>(
+        "SELECT row_to_json(c)::text AS snapshot FROM assets.categories c WHERE c.id = $1 AND c.user_id = $2 FOR UPDATE",
+        [request.params.id, user.id],
+      );
+      if (!current.rows[0]) throw new AppError(404, "not_found", "category not found");
+      const links = await tx.query<{ snapshot: string }>(
+        "SELECT row_to_json(ic)::text AS snapshot FROM assets.item_categories ic WHERE ic.category_id = $1 ORDER BY ic.item_id FOR UPDATE",
+        [request.params.id],
+      );
+      const actual = editorBaseHash([
+        { table: "assets.categories", row: parseSnapshotRow(current.rows[0].snapshot) },
+        ...links.rows.map((link) => ({ table: "assets.item_categories", row: parseSnapshotRow(link.snapshot) })),
+      ]);
+      assertPresentedHash(await syncWriteFenced(tx, user.id), presented, actual);
+      await tx.query("DELETE FROM assets.categories WHERE id = $1 AND user_id = $2", [request.params.id, user.id]);
+    });
     return reply.code(204).send();
   });
 
@@ -771,13 +888,13 @@ async function registerApi(ctx: AppContext): Promise<void> {
         { userId: user.id, id: newId, name: b.name, categoryIds },
         "assets",
       );
-      return reply.code(201).send(await requireItemView(db, user.id, newId));
+      return reply.code(201).send(await requireItemView(ctx, user.id, newId));
     },
   );
 
   ctx.api.get<{ Params: { id: string } }>("/items/:id", async (request) => {
     const user = await ctx.auth.requireUser(request);
-    return requireItemView(db, user.id, request.params.id);
+    return requireItemView(ctx, user.id, request.params.id);
   });
 
   // Partial update with real nullable semantics (FP-2B.1): a missing property
@@ -798,6 +915,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
             acquiredAt: { type: ["string", "null"], format: "date" },
             categoryIds: { type: "array", items: { type: "string" } },
             targetLocation: { type: ["string", "null"], maxLength: 300 },
+            baseHash: { type: "string" },
           },
         },
       },
@@ -805,6 +923,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
     async (request) => {
       const user = await ctx.auth.requireUser(request);
       const body = request.body as Record<string, unknown>;
+      const presented = readPresentedHash(body.baseHash);
       const columns: Array<[string, string]> = [
         ["name", "name"],
         ["description", "description"],
@@ -824,11 +943,15 @@ async function registerApi(ctx: AppContext): Promise<void> {
       if (replaceCategories) assertValidCategoryIds(categoryIds);
 
       if (sets.length === 0 && !replaceCategories) {
-        return requireItemView(db, user.id, request.params.id);
+        return requireItemView(ctx, user.id, request.params.id);
       }
 
       try {
         await ctx.database.withTransaction(async (tx) => {
+          await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments"]);
+          const proof = await itemProof(tx, ctx, user.id, request.params.id, true);
+          if (!proof) throw new AppError(404, "not_found", "item not found");
+          assertPresentedHash(await syncWriteFenced(tx, user.id), presented, proof.hash);
           if (sets.length > 0) {
             sets.push("updated_at = now()");
             const updated = await tx.query(
@@ -849,58 +972,36 @@ async function registerApi(ctx: AppContext): Promise<void> {
         if (isForeignKeyViolation(error)) throw categoryNotFoundError(categoryIds);
         throw error;
       }
-      return requireItemView(db, user.id, request.params.id);
+      return requireItemView(ctx, user.id, request.params.id);
     },
   );
 
   ctx.api.delete<{ Params: { id: string } }>("/items/:id", async (request, reply) => {
     const user = await ctx.auth.requireUser(request);
-    // Collect attachment metadata first, remove the physical objects, then
-    // drop the row. Storage failures abort with metadata intact. If the DB
-    // delete fails after files are gone, the dangling metadata rows are
-    // enqueued for compensation (FP-12.1). All file operations run inside
-    // the OWNER's storage root (AUTH-4).
-    const attachments = await db.query<AttachmentRow>(
-      "SELECT id, item_id, filename, content_type, size, storage_key, created_at FROM assets.attachments WHERE item_id = $1 AND user_id = $2",
-      [request.params.id, user.id],
-    );
-    const deletedFiles: AttachmentRow[] = [];
-    for (const row of attachments.rows) {
+    // Drop the item row first, under the stale-hash guard, then remove files.
+    // A database failure rolls back with every file still in place. A storage
+    // failure after that commit enqueues delete_storage for this owner
+    // (FP-12.1). All file operations run inside the owner's storage root (AUTH-4).
+    const presented = headerPresentedHash(request.headers["x-base-hash"]);
+    const proof = await db.withTransaction(async (tx) => {
+      await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments"]);
+      const current = await itemProof(tx, ctx, user.id, request.params.id, true);
+      if (!current) throw new AppError(404, "not_found", "item not found");
+      assertPresentedHash(await syncWriteFenced(tx, user.id), presented, current.hash);
+      await tx.query("DELETE FROM assets.items WHERE id = $1 AND user_id = $2", [request.params.id, user.id]);
+      return current;
+    });
+    for (const row of proof.files) {
       try {
-        await ctx.storage.forUser(user.id).delete(row.storage_key);
-        deletedFiles.push(row);
-      } catch (error) {
-        // Files already removed above must not keep dangling metadata, but
-        // the row stays (the item delete aborted), so enqueue the drop.
-        for (const done of deletedFiles) {
-          await compensate(ctx, user.id, {
-            kind: "drop_dangling_attachment",
-            storage_key: null,
-            attachment_id: done.id,
-            reason: "item delete aborted mid-file-removal",
-          });
-        }
-        throw error;
-      }
-    }
-    try {
-      const result = await db.query("DELETE FROM assets.items WHERE id = $1 AND user_id = $2", [
-        request.params.id,
-        user.id,
-      ]);
-      if (result.rowCount === 0) throw new AppError(404, "not_found", "item not found");
-    } catch (error) {
-      if (error instanceof AppError) throw error;
-      // Files are gone but the row remains: queue metadata drops.
-      for (const done of deletedFiles) {
+        await ctx.storage.forUser(user.id).delete(row.storageKey);
+      } catch {
         await compensate(ctx, user.id, {
-          kind: "drop_dangling_attachment",
-          storage_key: null,
-          attachment_id: done.id,
-          reason: "item row delete failed after storage removal",
+          kind: "delete_storage",
+          storage_key: row.storageKey,
+          attachment_id: null,
+          reason: "item file delete failed after metadata removal",
         });
       }
-      throw error;
     }
     return reply.code(204).send();
   });
@@ -943,16 +1044,27 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
       const attachmentId = randomUUID();
       const storageKey = `attachments/${request.params.id}/${attachmentId}`;
-      // User-owned data lands inside the OWNER's storage root (AUTH-4);
-      // guessing ids or keys cannot cross into another user's tree.
+      const presented = headerPresentedHash(request.headers["x-base-hash"]);
+      await db.withTransaction(async (tx) => {
+        await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments"]);
+        const current = await itemProof(tx, ctx, user.id, request.params.id, true);
+        if (!current) throw new AppError(404, "not_found", "item not found");
+        assertPresentedHash(await syncWriteFenced(tx, user.id), presented, current.hash);
+      });
       await ctx.storage.forUser(user.id).save(storageKey, data);
       try {
-        const { rows } = await db.query<AttachmentViewRow>(
-          `INSERT INTO assets.attachments (id, user_id, item_id, filename, content_type, size, storage_key)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           RETURNING id, item_id, filename, content_type, size, created_at`,
-          [attachmentId, user.id, request.params.id, filename, file.mimetype || null, data.length, storageKey],
-        );
+        const { rows } = await db.withTransaction(async (tx) => {
+          await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments"]);
+          const current = await itemProof(tx, ctx, user.id, request.params.id, true);
+          if (!current) throw new AppError(404, "not_found", "item not found");
+          assertPresentedHash(await syncWriteFenced(tx, user.id), presented, current.hash);
+          return tx.query<AttachmentViewRow>(
+            `INSERT INTO assets.attachments (id, user_id, item_id, filename, content_type, size, storage_key)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING id, item_id, filename, content_type, size, created_at`,
+            [attachmentId, user.id, request.params.id, filename, file.mimetype || null, data.length, storageKey],
+          );
+        });
         if (!rows[0]) throw new Error("attachment metadata row vanished after insert");
         return reply.code(201).send(toAttachmentView(rows[0]));
       } catch (error) {
@@ -1003,32 +1115,33 @@ async function registerApi(ctx: AppContext): Promise<void> {
     },
   );
 
-  // Delete one attachment: storage object first, metadata second. If the DB
-  // delete fails after the file is gone, the dangling row is queued for
-  // compensation instead of silently pointing at nothing (FP-12.1).
+  // Delete one attachment: metadata first, under the stale-hash guard, then
+  // the storage object. A database failure leaves the file in place. A storage
+  // failure after that commit enqueues delete_storage for this owner (FP-12.1).
   ctx.api.delete<{ Params: { id: string; attachmentId: string } }>(
     "/items/:id/attachments/:attachmentId",
     async (request, reply) => {
       const user = await ctx.auth.requireUser(request);
-      const { rows } = await db.query<{ id: string; storage_key: string }>(
-        "SELECT id, storage_key FROM assets.attachments WHERE id = $1 AND item_id = $2 AND user_id = $3",
-        [request.params.attachmentId, request.params.id, user.id],
-      );
-      if (!rows[0]) throw new AppError(404, "not_found", "attachment not found");
-      await ctx.storage.forUser(user.id).delete(rows[0].storage_key);
+      const presented = headerPresentedHash(request.headers["x-base-hash"]);
+      const removed = await db.withTransaction(async (tx) => {
+        await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments"]);
+        const current = await itemProof(tx, ctx, user.id, request.params.id, true);
+        if (!current) throw new AppError(404, "not_found", "item not found");
+        const file = current.files.find((entry) => entry.id === request.params.attachmentId);
+        if (!file) throw new AppError(404, "not_found", "attachment not found");
+        assertPresentedHash(await syncWriteFenced(tx, user.id), presented, current.hash);
+        await tx.query("DELETE FROM assets.attachments WHERE id = $1 AND user_id = $2", [request.params.attachmentId, user.id]);
+        return file;
+      });
       try {
-        await db.query("DELETE FROM assets.attachments WHERE id = $1 AND user_id = $2", [
-          request.params.attachmentId,
-          user.id,
-        ]);
-      } catch (error) {
+        await ctx.storage.forUser(user.id).delete(removed.storageKey);
+      } catch {
         await compensate(ctx, user.id, {
-          kind: "drop_dangling_attachment",
-          storage_key: null,
-          attachment_id: rows[0].id,
-          reason: "attachment row delete failed after storage removal",
+          kind: "delete_storage",
+          storage_key: removed.storageKey,
+          attachment_id: null,
+          reason: "attachment file delete failed after metadata removal",
         });
-        throw error;
       }
       return reply.code(204).send();
     },

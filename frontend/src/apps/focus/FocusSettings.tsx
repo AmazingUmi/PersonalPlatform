@@ -1,11 +1,12 @@
 import { useI18n } from "../../shared/i18n";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../../shared/api";
 import { PixelButton } from "../../shared/ui/PixelButton";
 import { PixelInput } from "../../shared/ui/PixelInput";
 import { PixelWindow } from "../../shared/ui/PixelWindow";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { useMutation } from "../../shared/useMutation";
+import { SyncPendingNotice, armPendingIfSyncConflict, useSyncModelRefresh } from "../../shared/sync-guard-client";
 import type { FocusSettings } from "./api";
 
 /** Minutes for the three durations; `longBreakInterval` is a round count. */
@@ -48,7 +49,7 @@ function formToPayload(form: SettingsForm): FocusSettings {
 }
 
 /** Settings zone (APP-1 F07): durations in minutes, PUT as seconds. */
-export function FocusSettings({ settings, onSaved }: { settings: FocusSettings; onSaved?: () => void }) {
+export function FocusSettings({ settings, onSaved }: { settings: FocusSettings; onSaved?: () => Promise<boolean> | boolean | void }) {
   const { t } = useI18n();
   const [form, setForm] = useState<SettingsForm>(() => ({
     focusMinutes: String(Math.round(settings.focusDurationSeconds / 60)),
@@ -57,20 +58,64 @@ export function FocusSettings({ settings, onSaved }: { settings: FocusSettings; 
     longBreakInterval: String(settings.longBreakInterval),
   }));
   const [saved, setSaved] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const dirtyRef = useRef(false);
+  const baseHash = useRef(settings.baseHash);
+  const adopt = useRef(false);
+  const writing = useRef(false);
+  const typedDuringWrite = useRef(false);
+  dirtyRef.current = dirty;
+  const sync = useSyncModelRefresh(dirty, () => undefined);
+  useEffect(() => {
+    if (dirtyRef.current && !adopt.current) return;
+    adopt.current = false;
+    baseHash.current = settings.baseHash;
+    setDirty(false);
+    setForm({
+      focusMinutes: String(Math.round(settings.focusDurationSeconds / 60)),
+      shortBreakMinutes: String(Math.round(settings.shortBreakDurationSeconds / 60)),
+      longBreakMinutes: String(Math.round(settings.longBreakDurationSeconds / 60)),
+      longBreakInterval: String(settings.longBreakInterval),
+    });
+    sync.dismiss();
+  }, [settings]);
 
   const set = (key: FieldKey, value: string) => {
+    adopt.current = false;
+    if (writing.current) typedDuringWrite.current = true;
+    dirtyRef.current = true;
+    setDirty(true);
     setSaved(false);
     setForm((current) => ({ ...current, [key]: value }));
   };
 
-  // NOTE: settings are read once at mount on purpose — the 15s background
-  // poll replaces the state object, and re-syncing would clobber user edits.
   const save = useMutation(async () => {
-    await api<FocusSettings>("/api/apps/focus/settings", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(formToPayload(form)),
-    });
+    writing.current = true;
+    typedDuringWrite.current = false;
+    try {
+      const result = await api<FocusSettings>("/api/apps/focus/settings", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...formToPayload(form), ...(baseHash.current ? { baseHash: baseHash.current } : {}) }),
+      });
+      if (result.baseHash) baseHash.current = result.baseHash;
+      if (!typedDuringWrite.current) {
+        dirtyRef.current = false;
+        setDirty(false);
+        setForm({
+          focusMinutes: String(Math.round(result.focusDurationSeconds / 60)),
+          shortBreakMinutes: String(Math.round(result.shortBreakDurationSeconds / 60)),
+          longBreakMinutes: String(Math.round(result.longBreakDurationSeconds / 60)),
+          longBreakInterval: String(result.longBreakInterval),
+        });
+        sync.dismiss();
+      }
+    } catch (error) {
+      armPendingIfSyncConflict(error, sync.markPending);
+      throw error;
+    } finally {
+      writing.current = false;
+    }
   });
 
   const submit = async (event: React.FormEvent) => {
@@ -84,6 +129,16 @@ export function FocusSettings({ settings, onSaved }: { settings: FocusSettings; 
 
   return (
     <PixelWindow title={t("Settings", "设置")} icon="settings" className="focus-window">
+      <SyncPendingNotice
+        pending={sync.pending}
+        discard={dirty}
+        onReload={() => {
+          adopt.current = true;
+          void Promise.resolve(onSaved?.()).then((ok) => {
+            if (ok === false) adopt.current = false;
+          });
+        }}
+      />
       <form className="px-form" onSubmit={submit} aria-label={t("Focus settings", "专注设置")}>
         <div className="px-form__grid">
           {FIELDS.map((field) => (

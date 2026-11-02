@@ -8,6 +8,7 @@ import { PixelButton } from "../../shared/ui/PixelButton";
 import { PixelWindow } from "../../shared/ui/PixelWindow";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { useAsync } from "../../shared/useAsync";
+import { useSyncModelRefresh } from "../../shared/sync-guard-client";
 import {
   fetchFocusSessions,
   fetchFocusStats,
@@ -63,6 +64,10 @@ export function FocusHistory() {
 
   const stats = useAsync(() => fetchFocusStats(STATS_DAYS));
   const sessions = useAsync(() => fetchFocusSessions({ limit: PAGE_SIZE, offset }), [offset]);
+  useSyncModelRefresh(false, () => {
+    stats.reload();
+    sessions.reload();
+  });
 
   // useAsync replaces its data per page; accumulate pages locally and dedupe
   // by id so a shifting server list can never double-render a row.

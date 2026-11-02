@@ -12,6 +12,7 @@ import { FocusSettings } from "./FocusSettings";
 import { FocusTimer } from "./FocusTimer";
 import { FocusToday } from "./FocusToday";
 import { useFocusState } from "./useFocusState";
+import { SyncPendingNotice } from "../../shared/sync-guard-client";
 
 /**
  * Focus app main page (APP-1 F07): single-page, four stacked PixelWindow
@@ -21,10 +22,11 @@ import { useFocusState } from "./useFocusState";
 export function FocusPage() {
   const { t } = useI18n();
   const displayName = useAppDisplayName({ id: "focus", name: "Focus" });
-  const { state, loading, error, busy, remainingSeconds, dispatch, reload, completion, dismissCompletion, alerts } = useFocusState();
+  const { state, loading, error, busy, remainingSeconds, dispatch, reload, completion, dismissCompletion, alerts, syncPending, acceptServerSync } = useFocusState();
 
   return (
     <div className="page" data-app="focus">
+      <SyncPendingNotice pending={syncPending} onReload={acceptServerSync} />
       <header className="page-header">
         <div className="px-inline-help">
           <h1 className="page-header__title">

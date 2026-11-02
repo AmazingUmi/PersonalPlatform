@@ -11,6 +11,7 @@ import { PixelIcon } from "../shared/ui/PixelIcon";
 import { PixelWindow } from "../shared/ui/PixelWindow";
 import { StatusMessage } from "../shared/ui/StatusMessage";
 import { AuthProvider, useAuth } from "./AuthContext";
+import { SyncProvider } from "./SyncContext";
 import { AppCenter } from "./AppCenter";
 import { AppDock } from "./AppDock";
 import { AppStatusProvider } from "./AppStatusContext";
@@ -24,11 +25,11 @@ import { enabledAppModules, resolveRoutes } from "./routes";
 
 export function App() {
   return (
-    <I18nProvider><AuthProvider>
+    <I18nProvider><AuthProvider><SyncProvider>
       <BrowserRouter>
         <SessionGate />
       </BrowserRouter>
-    </AuthProvider></I18nProvider>
+    </SyncProvider></AuthProvider></I18nProvider>
   );
 }
 

@@ -10,6 +10,14 @@ import * as data from "../shared/dataManagement";
 let role = "admin";
 vi.mock("../shared/api", async (original) => ({ ...await original<typeof import("../shared/api")>(), listUsers: vi.fn(), createUser: vi.fn() }));
 vi.mock("./AuthContext", () => ({ useAuth: () => ({ user: { id: "user-1", role } }) }));
+vi.mock("./SyncContext", () => ({
+  useSync: () => ({
+    status: { linked: false, enabled: false, phase: "unlinked", intervalSeconds: 120, identityId: null, openConflicts: 0, lastError: null, backoffUntil: null, baseline: false, pending: false },
+    loadError: null, actionError: null, busy: false, pairingCode: null, conflicts: [], conflictsError: null,
+    refresh: vi.fn(), createIdentity: vi.fn(), joinIdentity: vi.fn(), setEnabled: vi.fn(), setIntervalSeconds: vi.fn(),
+    syncNow: vi.fn(), revealPairing: vi.fn(), hidePairing: vi.fn(), unlink: vi.fn(), reloadConflicts: vi.fn(), resolveConflict: vi.fn(),
+  }),
+}));
 vi.mock("../shared/dataManagement", async (original) => ({
   ...await original<typeof import("../shared/dataManagement")>(),
   getWebDav: vi.fn(), getBackupHistory: vi.fn(), saveWebDav: vi.fn(), deleteWebDav: vi.fn(),
@@ -399,6 +407,22 @@ describe("Settings data management", () => {
     expect(screen.getByText("Selected: previous-backup.json")).toBeVisible();
     expect(screen.getByTestId("merge-preview")).toBeVisible();
     expect(screen.getByRole("button", { name: "Choose file" })).toBeEnabled();
+  });
+
+  it("opens sync from the WebDAV subnav and keeps connection drafts across that tab and a language change", async () => {
+    render(<I18nProvider><MemoryRouter initialEntries={["/settings?section=webdav&view=sync"]}><Settings /><LocationControls /></MemoryRouter></I18nProvider>);
+    const heading = await screen.findByRole("heading", { name: "Continuous sync" });
+    expect(screen.getByRole("link", { name: "Sync" })).toHaveAttribute("aria-current", "page");
+    expect(heading.parentElement).toContainElement(screen.getByRole("button", { name: "Help: About continuous sync" }));
+    expect(screen.getByRole("button", { name: "Create cloud sync identity" })).toBeVisible();
+    expect(screen.getByTestId("location")).toHaveTextContent("view=sync");
+    fireEvent.change(document.getElementById("webdav-endpoint")!, { target: { value: "https://drive.example.com/draft/" } });
+    goView("Connection");
+    expect(screen.getByLabelText("WebDAV folder URL")).toHaveValue("https://drive.example.com/draft/");
+    fireEvent.change(document.getElementById("interface-language")!, { target: { value: "zh" } });
+    expect(screen.getByLabelText("WebDAV 目录地址")).toHaveValue("https://drive.example.com/draft/");
+    expect(data.saveWebDav).not.toHaveBeenCalled();
+    expect(data.getWebDav).toHaveBeenCalledTimes(1);
   });
 
   it("falls back to Connection for an unknown WebDAV view", async () => {

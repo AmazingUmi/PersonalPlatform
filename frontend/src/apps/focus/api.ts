@@ -9,6 +9,7 @@ export interface FocusSettings {
   shortBreakDurationSeconds: number;
   longBreakDurationSeconds: number;
   longBreakInterval: number;
+  baseHash?: string;
 }
 
 export interface ActiveSessionView {
@@ -22,6 +23,7 @@ export interface ActiveSessionView {
   startedAt: string;
   pausedAt: string | null;
   revision: number;
+  baseHash?: string;
 }
 
 export interface FocusState {
@@ -77,20 +79,23 @@ function postTransition(action: string, body: unknown): Promise<FocusState> {
   }).then((envelope) => envelope.state);
 }
 
-function postSessionAction(action: "pause" | "resume" | "stop", baseRevision?: number): Promise<FocusState> {
-  return postTransition(action, { baseRevision });
+function postSessionAction(
+  action: "pause" | "resume" | "stop",
+  proof?: { baseRevision?: number; baseHash?: string },
+): Promise<FocusState> {
+  return postTransition(action, proof ?? {});
 }
 
-export function pauseFocusSession(baseRevision?: number): Promise<FocusState> {
-  return postSessionAction("pause", baseRevision);
+export function pauseFocusSession(proof?: { baseRevision?: number; baseHash?: string }): Promise<FocusState> {
+  return postSessionAction("pause", proof);
 }
 
-export function resumeFocusSession(baseRevision?: number): Promise<FocusState> {
-  return postSessionAction("resume", baseRevision);
+export function resumeFocusSession(proof?: { baseRevision?: number; baseHash?: string }): Promise<FocusState> {
+  return postSessionAction("resume", proof);
 }
 
-export function stopFocusSession(baseRevision?: number): Promise<FocusState> {
-  return postSessionAction("stop", baseRevision);
+export function stopFocusSession(proof?: { baseRevision?: number; baseHash?: string }): Promise<FocusState> {
+  return postSessionAction("stop", proof);
 }
 
 export async function fetchFocusSessions({

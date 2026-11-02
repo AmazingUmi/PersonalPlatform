@@ -5,7 +5,10 @@ import * as api from "./api";
 import { useFocusState } from "./useFocusState";
 
 const auth = vi.hoisted(() => ({ user: { id: "completion-user" } as { id: string } | null }));
-vi.mock("../../shell/AuthContext", () => ({ useAuth: () => auth }));
+vi.mock("../../shell/AuthContext", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../shell/AuthContext")>();
+  return { ...actual, useAuth: () => auth, useOptionalAuth: () => auth };
+});
 vi.mock("./api", async (original) => ({ ...await original<typeof api>(), fetchFocusState: vi.fn(), fetchFocusSession: vi.fn(), startFocusSession: vi.fn(), pauseFocusSession: vi.fn(), resumeFocusSession: vi.fn(), stopFocusSession: vi.fn() }));
 const now = Date.parse("2026-11-01T12:00:00.000Z");
 function state(id: string | null = "current", end = now + 1500): api.FocusState {

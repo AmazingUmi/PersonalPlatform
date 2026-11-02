@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { AppError } from "../../core/api/errors.js";
 import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-registry/types.js";
+import {
+  assertPresentedHash, editorBaseHash, headerPresentedHash, lockOwnedTables, parseSnapshotRow, readPresentedHash, syncWriteFenced,
+} from "../../core/data-management/sync-fence.js";
 import type { JobHandle } from "../../core/scheduler/index.js";
 
 interface TaskRow {
@@ -32,11 +35,35 @@ const TASK_COLUMNS =
 
 const id = "tasks";
 
+type Tx = AppContext["database"];
+
+function taskHash(snapshot: string): string {
+  return editorBaseHash([{ table: "tasks.tasks", row: parseSnapshotRow(snapshot) }]);
+}
+
+function withTaskHash<T extends TaskRow>(row: T & { snapshot: string }): TaskRow & { baseHash: string } {
+  const { snapshot, ...task } = row;
+  return { ...task, baseHash: taskHash(snapshot) };
+}
+
 /** Reject dueAt earlier than startAt unless both are absent/unchanged (FP-4.2). */
 function assertValidInterval(startAt: string | null | undefined, dueAt: string | null | undefined): void {
   if (startAt && dueAt && new Date(dueAt).getTime() < new Date(startAt).getTime()) {
     throw new AppError(422, "invalid_time_interval", "dueAt must not be earlier than startAt");
   }
+}
+
+async function lockedTask(
+  tx: Tx,
+  taskId: string,
+  userId: string,
+): Promise<(TaskRow & { baseHash: string }) | null> {
+  const { rows } = await tx.query<TaskRow & { snapshot: string }>(
+    `SELECT ${TASK_COLUMNS}, row_to_json(t)::text AS snapshot
+     FROM tasks.tasks t WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+    [taskId, userId],
+  );
+  return rows[0] ? withTaskHash(rows[0]) : null;
 }
 
 async function registerApi(ctx: AppContext): Promise<void> {
@@ -103,11 +130,12 @@ async function registerApi(ctx: AppContext): Promise<void> {
       const direction = query.order === "asc" ? "ASC" : "DESC";
       const orderBy = `${sortColumn} ${direction} NULLS LAST, created_at DESC, id`;
 
-      const { rows } = await db.query<TaskRow>(
-        `SELECT ${TASK_COLUMNS} FROM tasks.tasks ${where} ORDER BY ${orderBy}`,
+      const { rows } = await db.query<TaskRow & { snapshot: string }>(
+        `SELECT ${TASK_COLUMNS}, row_to_json(t)::text AS snapshot
+         FROM tasks.tasks t ${where} ORDER BY ${orderBy}`,
         params,
       );
-      return { items: rows };
+      return { items: rows.map(withTaskHash) };
     },
   );
 
@@ -134,33 +162,38 @@ async function registerApi(ctx: AppContext): Promise<void> {
       const user = await ctx.auth.requireUser(request);
       const b = request.body;
       assertValidInterval(b.startAt ?? null, b.dueAt ?? null);
-      const { rows } = await db.query<TaskRow>(
-        `INSERT INTO tasks.tasks (id, user_id, title, description, status, start_at, due_at, priority, completed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CASE WHEN $5 = 'done' THEN now() ELSE NULL END)
-         RETURNING ${TASK_COLUMNS}`,
-        [
-          randomUUID(),
-          user.id,
-          b.title,
-          b.description ?? null,
-          b.status ?? "todo",
-          b.startAt ?? null,
-          b.dueAt ?? null,
-          b.priority ?? 1,
-        ],
-      );
-      return reply.code(201).send(rows[0]);
+      const created = await db.withTransaction(async (tx) => {
+        await lockOwnedTables(tx, ["tasks.tasks"]);
+        const { rows } = await tx.query<TaskRow & { snapshot: string }>(
+          `INSERT INTO tasks.tasks AS t (id, user_id, title, description, status, start_at, due_at, priority, completed_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CASE WHEN $5 = 'done' THEN now() ELSE NULL END)
+           RETURNING ${TASK_COLUMNS}, row_to_json(t)::text AS snapshot`,
+          [
+            randomUUID(),
+            user.id,
+            b.title,
+            b.description ?? null,
+            b.status ?? "todo",
+            b.startAt ?? null,
+            b.dueAt ?? null,
+            b.priority ?? 1,
+          ],
+        );
+        return withTaskHash(rows[0]!);
+      });
+      return reply.code(201).send(created);
     },
   );
 
   ctx.api.get<{ Params: { id: string } }>("/tasks/:id", async (request) => {
     const user = await ctx.auth.requireUser(request);
-    const { rows } = await db.query<TaskRow>(
-      `SELECT ${TASK_COLUMNS} FROM tasks.tasks WHERE id = $1 AND user_id = $2`,
+    const { rows } = await db.query<TaskRow & { snapshot: string }>(
+      `SELECT ${TASK_COLUMNS}, row_to_json(t)::text AS snapshot
+       FROM tasks.tasks t WHERE id = $1 AND user_id = $2`,
       [request.params.id, user.id],
     );
     if (!rows[0]) throw new AppError(404, "not_found", "task not found");
-    return rows[0];
+    return withTaskHash(rows[0]);
   });
 
   // Partial update with real nullable semantics: a missing property leaves the
@@ -179,6 +212,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
             startAt: { type: ["string", "null"], format: "date-time" },
             dueAt: { type: ["string", "null"], format: "date-time" },
             priority: { type: "integer", minimum: 0, maximum: 3 },
+            baseHash: { type: "string" },
           },
         },
       },
@@ -186,74 +220,73 @@ async function registerApi(ctx: AppContext): Promise<void> {
     async (request) => {
       const user = await ctx.auth.requireUser(request);
       const body = request.body as Record<string, unknown>;
-      const prev = await db.query<TaskRow>(
-        `SELECT ${TASK_COLUMNS} FROM tasks.tasks WHERE id = $1 AND user_id = $2`,
-        [request.params.id, user.id],
-      );
-      if (!prev.rows[0]) throw new AppError(404, "not_found", "task not found");
-      const previous = prev.rows[0];
-
-      assertValidInterval(
-        ("startAt" in body ? (body.startAt as string | null) : previous.start_at),
-        ("dueAt" in body ? (body.dueAt as string | null) : previous.due_at),
-      );
-
-      // Completion timestamp transitions (FP-2C.1):
-      //   todo -> done  => completed_at = now()
-      //   done -> done  => completed_at unchanged (no refresh on repeat)
-      //   done -> todo  => completed_at = null
-      const nextStatus = ("status" in body ? body.status : undefined) as string | undefined;
-      const completedAt =
-        nextStatus === "done" && previous.status !== "done"
-          ? "now()"
-          : nextStatus === "todo"
-            ? "NULL"
-            : "completed_at";
-
-      const columns: Array<[string, string]> = [
-        ["title", "title"],
-        ["description", "description"],
-        ["status", "status"],
-        ["startAt", "start_at"],
-        ["dueAt", "due_at"],
-        ["priority", "priority"],
-      ];
-      const sets: string[] = [];
-      const params: unknown[] = [request.params.id, user.id];
-      for (const [key, column] of columns) {
-        if (!(key in body)) continue;
-        params.push(body[key]);
-        sets.push(`${column} = $${params.length}`);
-      }
-      if (sets.length === 0) return previous;
-      sets.push(`completed_at = ${completedAt}`, "updated_at = now()");
-
-      const { rows } = await db.query<TaskRow>(
-        `UPDATE tasks.tasks SET ${sets.join(", ")}
-         WHERE id = $1 AND user_id = $2
-         RETURNING ${TASK_COLUMNS}`,
-        params,
-      );
-
-      const updated = rows[0]!;
-      if (nextStatus === "done" && previous.status !== "done") {
+      const presented = readPresentedHash(body.baseHash);
+      const outcome = await db.withTransaction(async (tx) => {
+        await lockOwnedTables(tx, ["tasks.tasks"]);
+        const previous = await lockedTask(tx, request.params.id, user.id);
+        if (!previous) throw new AppError(404, "not_found", "task not found");
+        assertValidInterval(
+          ("startAt" in body ? (body.startAt as string | null) : previous.start_at),
+          ("dueAt" in body ? (body.dueAt as string | null) : previous.due_at),
+        );
+        const nextStatus = ("status" in body ? body.status : undefined) as string | undefined;
+        const completedAt =
+          nextStatus === "done" && previous.status !== "done"
+            ? "now()"
+            : nextStatus === "todo"
+              ? "NULL"
+              : "completed_at";
+        const columns: Array<[string, string]> = [
+          ["title", "title"],
+          ["description", "description"],
+          ["status", "status"],
+          ["startAt", "start_at"],
+          ["dueAt", "due_at"],
+          ["priority", "priority"],
+        ];
+        const sets: string[] = [];
+        const params: unknown[] = [request.params.id, user.id];
+        for (const [key, column] of columns) {
+          if (!(key in body) || key === "baseHash") continue;
+          params.push(body[key]);
+          sets.push(`${column} = $${params.length}`);
+        }
+        if (sets.length === 0) return { updated: previous, completed: false };
+        assertPresentedHash(await syncWriteFenced(tx, user.id), presented, previous.baseHash);
+        sets.push(`completed_at = ${completedAt}`, "updated_at = now()");
+        const { rows } = await tx.query<TaskRow & { snapshot: string }>(
+          `UPDATE tasks.tasks AS t SET ${sets.join(", ")}
+           WHERE id = $1 AND user_id = $2
+           RETURNING ${TASK_COLUMNS}, row_to_json(t)::text AS snapshot`,
+          params,
+        );
+        if (!rows[0]) throw new AppError(404, "not_found", "task not found");
+        return {
+          updated: withTaskHash(rows[0]),
+          completed: nextStatus === "done" && previous.status !== "done",
+        };
+      });
+      if (outcome.completed) {
         ctx.events.publish(
           "tasks.task.completed.v1",
-          { userId: user.id, id: updated.id, title: updated.title },
+          { userId: user.id, id: outcome.updated.id, title: outcome.updated.title },
           "tasks",
         );
       }
-      return updated;
+      return outcome.updated;
     },
   );
 
   ctx.api.delete<{ Params: { id: string } }>("/tasks/:id", async (request, reply) => {
     const user = await ctx.auth.requireUser(request);
-    const result = await db.query("DELETE FROM tasks.tasks WHERE id = $1 AND user_id = $2", [
-      request.params.id,
-      user.id,
-    ]);
-    if (result.rowCount === 0) throw new AppError(404, "not_found", "task not found");
+    const presented = headerPresentedHash(request.headers["x-base-hash"]);
+    await db.withTransaction(async (tx) => {
+      await lockOwnedTables(tx, ["tasks.tasks"]);
+      const current = await lockedTask(tx, request.params.id, user.id);
+      if (!current) throw new AppError(404, "not_found", "task not found");
+      assertPresentedHash(await syncWriteFenced(tx, user.id), presented, current.baseHash);
+      await tx.query("DELETE FROM tasks.tasks WHERE id = $1 AND user_id = $2", [request.params.id, user.id]);
+    });
     return reply.code(204).send();
   });
 

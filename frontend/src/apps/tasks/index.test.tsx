@@ -1,8 +1,10 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import TasksApp from "./index";
 import { I18nProvider, useI18n } from "../../shared/i18n";
+import { AuthProvider } from "../../shell/AuthContext";
+import { SYNC_DATA_CHANGED } from "../../shared/sync";
 
 function jsonResponse(body: unknown, ok = true, status = 200): Response {
   return { ok, status, json: async () => body } as unknown as Response;
@@ -119,6 +121,206 @@ describe("TasksPage", () => {
     expect(screen.getByText(/Due /, { selector: ".px-badge" }).className).toContain("px-badge--danger");
   });
 });
+
+const HASH_A = "a".repeat(64);
+const HASH_B = "b".repeat(64);
+const AUTH_USER = { id: "user-1", username: "ada", displayName: null, role: "user" as const };
+
+function emitOwnSync() {
+  act(() => {
+    window.dispatchEvent(new CustomEvent(SYNC_DATA_CHANGED, {
+      detail: { userId: "user-1", identityId: "replica-1", result: "committed", baseline: false, openConflicts: 0 },
+    }));
+  });
+}
+
+function renderSignedInTasks() {
+  const page = TasksApp.routes[0]!.element;
+  return render(
+    <I18nProvider initialLanguage="en">
+      <AuthProvider>
+        <MemoryRouter initialEntries={["/tasks"]}>{page}</MemoryRouter>
+      </AuthProvider>
+    </I18nProvider>,
+  );
+}
+
+describe("TasksPage sync draft", () => {
+  it("applies a clean background fetch as fields and hash together", async () => {
+    let items = [{ ...sampleTask, title: "Ship release", baseHash: HASH_A }];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/core/auth/me") return jsonResponse(AUTH_USER);
+      if (url.includes("/summary")) return jsonResponse({ today: 1, overdue: 0, done: 0 });
+      if (url.startsWith("/api/apps/tasks/tasks")) {
+        if (init?.method === "PATCH") return jsonResponse(items[0]);
+        return jsonResponse({ items });
+      }
+      return jsonResponse(null, false, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSignedInTasks();
+    fireEvent.click(await screen.findByRole("button", { name: /edit task "ship release"/i }));
+    expect(await screen.findByTestId("task-editor")).toBeDefined();
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/core/auth/me")).toBe(true));
+    items = [{ ...sampleTask, title: "Server title", baseHash: HASH_B }];
+    emitOwnSync();
+    await waitFor(() => expect(screen.getByLabelText("Task title")).toHaveValue("Server title"));
+    fireEvent.change(screen.getByLabelText("Task title"), { target: { value: "Server title!" } });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "PATCH");
+      expect(call).toBeDefined();
+      expect(JSON.parse(String((call![1] as RequestInit).body))).toMatchObject({ title: "Server title!", baseHash: HASH_B });
+    });
+  });
+
+  it("keeps a draft and the old hash when the user types during a fetch", async () => {
+    let items = [{ ...sampleTask, title: "Ship release", baseHash: HASH_A }];
+    let hold: ((value: Response) => void) | null = null;
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/core/auth/me") return jsonResponse(AUTH_USER);
+      if (url.includes("/summary")) return jsonResponse({ today: 1, overdue: 0, done: 0 });
+      if (url.startsWith("/api/apps/tasks/tasks") && (!init?.method || init.method === "GET")) {
+        if (hold) return new Promise<Response>((resolve) => { hold = resolve; });
+        return jsonResponse({ items });
+      }
+      if (url.startsWith("/api/apps/tasks/tasks") && init?.method === "PATCH") return jsonResponse(items[0]);
+      return jsonResponse(null, false, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSignedInTasks();
+    fireEvent.click(await screen.findByRole("button", { name: /edit task "ship release"/i }));
+    await screen.findByTestId("task-editor");
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/core/auth/me")).toBe(true));
+    hold = () => undefined;
+    items = [{ ...sampleTask, title: "Server title", baseHash: HASH_B }];
+    emitOwnSync();
+    await waitFor(() => expect(hold).not.toBeNull());
+    fireEvent.change(screen.getByLabelText("Task title"), { target: { value: "Kept draft" } });
+    act(() => { hold?.(jsonResponse({ items }) as Response); });
+    await waitFor(() => expect(screen.getByLabelText("Task title")).toHaveValue("Kept draft"));
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "PATCH");
+      expect(JSON.parse(String((call![1] as RequestInit).body))).toMatchObject({ title: "Kept draft", baseHash: HASH_A });
+    });
+  });
+
+  it("keeps the draft after a failed discard reload and does not auto-adopt later", async () => {
+    let items = [{ ...sampleTask, title: "Ship release", baseHash: HASH_A }];
+    let failGet = false;
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/core/auth/me") return jsonResponse(AUTH_USER);
+      if (url.includes("/summary")) return jsonResponse({ today: 1, overdue: 0, done: 0 });
+      if (url.startsWith("/api/apps/tasks/tasks") && (!init?.method || init.method === "GET")) {
+        if (failGet) return jsonResponse({ error: { message: "offline" } }, false, 500);
+        return jsonResponse({ items });
+      }
+      return jsonResponse(null, false, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSignedInTasks();
+    fireEvent.click(await screen.findByRole("button", { name: /edit task "ship release"/i }));
+    await screen.findByTestId("task-editor");
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/core/auth/me")).toBe(true));
+    fireEvent.change(screen.getByLabelText("Task title"), { target: { value: "Local draft" } });
+    emitOwnSync();
+    expect(await screen.findByRole("button", { name: "Discard draft and reload" })).toBeTruthy();
+    failGet = true;
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft and reload" }));
+    await waitFor(() => expect(screen.getByLabelText("Task title")).toHaveValue("Local draft"));
+    failGet = false;
+    items = [{ ...sampleTask, title: "Remote title", baseHash: HASH_B }];
+    const gets = fetchMock.mock.calls.filter(([url, init]) =>
+      String(url).startsWith("/api/apps/tasks/tasks") && (!init?.method || (init as RequestInit).method === "GET"),
+    ).length;
+    emitOwnSync();
+    expect(fetchMock.mock.calls.filter(([url, init]) =>
+      String(url).startsWith("/api/apps/tasks/tasks") && (!init?.method || (init as RequestInit).method === "GET"),
+    ).length).toBe(gets);
+    expect(screen.getByLabelText("Task title")).toHaveValue("Local draft");
+  });
+
+  it("adopts fields and hash on a successful discard reload", async () => {
+    let items = [{ ...sampleTask, title: "Ship release", baseHash: HASH_A }];
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/core/auth/me") return jsonResponse(AUTH_USER);
+      if (url.includes("/summary")) return jsonResponse({ today: 1, overdue: 0, done: 0 });
+      if (url.startsWith("/api/apps/tasks/tasks") && init?.method === "PATCH") return jsonResponse(items[0]);
+      if (url.startsWith("/api/apps/tasks/tasks")) return jsonResponse({ items });
+      return jsonResponse(null, false, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSignedInTasks();
+    fireEvent.click(await screen.findByRole("button", { name: /edit task "ship release"/i }));
+    await screen.findByTestId("task-editor");
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/core/auth/me")).toBe(true));
+    fireEvent.change(screen.getByLabelText("Task title"), { target: { value: "Local draft" } });
+    emitOwnSync();
+    items = [{ ...sampleTask, title: "Remote title", baseHash: HASH_B }];
+    fireEvent.click(await screen.findByRole("button", { name: "Discard draft and reload" }));
+    await waitFor(() => expect(screen.getByLabelText("Task title")).toHaveValue("Remote title"));
+    expect(screen.queryByRole("button", { name: "Discard draft and reload" })).toBeNull();
+    expect(screen.queryByText("Server data changed. Your unsaved edits are kept.")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Task title"), { target: { value: "Remote title!" } });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "PATCH");
+      expect(JSON.parse(String((call![1] as RequestInit).body))).toMatchObject({ title: "Remote title!", baseHash: HASH_B });
+    });
+  });
+
+  it("keeps the draft and offers reload when save returns 409 sync_stale without an event", async () => {
+    let items = [{ ...sampleTask, title: "Ship release", baseHash: HASH_A }];
+    let patchConflict = true;
+    let failGet = false;
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/core/auth/me") return jsonResponse(AUTH_USER);
+      if (url.includes("/summary")) return jsonResponse({ today: 1, overdue: 0, done: 0 });
+      if (url.startsWith("/api/apps/tasks/tasks") && init?.method === "PATCH") {
+        if (patchConflict) return jsonResponse({ error: { code: "sync_stale", message: "stale" } }, false, 409);
+        return jsonResponse(items[0]);
+      }
+      if (url.startsWith("/api/apps/tasks/tasks")) {
+        if (failGet) return jsonResponse({ error: { message: "offline" } }, false, 500);
+        return jsonResponse({ items });
+      }
+      return jsonResponse(null, false, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSignedInTasks();
+    fireEvent.click(await screen.findByRole("button", { name: /edit task "ship release"/i }));
+    await screen.findByTestId("task-editor");
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/core/auth/me")).toBe(true));
+    fireEvent.change(screen.getByLabelText("Task title"), { target: { value: "Local draft" } });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    expect(await screen.findByRole("button", { name: "Discard draft and reload" })).toBeTruthy();
+    expect(screen.getByLabelText("Task title")).toHaveValue("Local draft");
+    failGet = true;
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft and reload" }));
+    await waitFor(() => expect(screen.getByLabelText("Task title")).toHaveValue("Local draft"));
+    expect(screen.getByRole("button", { name: "Discard draft and reload" })).toBeTruthy();
+    failGet = false;
+    patchConflict = false;
+    items = [{ ...sampleTask, title: "Remote title", baseHash: HASH_B }];
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft and reload" }));
+    await waitFor(() => expect(screen.getByLabelText("Task title")).toHaveValue("Remote title"));
+    expect(screen.queryByRole("button", { name: "Discard draft and reload" })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Task title"), { target: { value: "Remote title!" } });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() => {
+      const patches = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === "PATCH");
+      const last = patches[patches.length - 1];
+      expect(JSON.parse(String((last![1] as RequestInit).body))).toMatchObject({ title: "Remote title!", baseHash: HASH_B });
+    });
+  });
+});
+
 
 describe("TasksTodayWidget density (Phase 10)", () => {
   const widget = TasksApp.widgets![0]!;

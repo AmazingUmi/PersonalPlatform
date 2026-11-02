@@ -1,5 +1,9 @@
 import { I18nProvider, useI18n } from "../../shared/i18n";
-vi.mock("../../shell/AuthContext", () => ({ useAuth: () => ({ user: { id: "focus-test-user" } }) }));
+vi.mock("../../shell/AuthContext", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../shell/AuthContext")>();
+  const value = { user: { id: "focus-test-user" } };
+  return { ...actual, useAuth: () => value, useOptionalAuth: () => value };
+});
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FocusPage } from "./FocusPage";
@@ -205,6 +209,51 @@ describe("FocusPage", () => {
         shortBreakDurationSeconds: 300,
         longBreakDurationSeconds: 900,
         longBreakInterval: 4,
+      });
+    });
+    expect(await screen.findByText("Settings saved")).toBeDefined();
+  });
+
+  it("keeps dirty settings after a 409 fence and adopts hash after an accepted save", async () => {
+    const HASH_A = "a".repeat(64);
+    const HASH_B = "b".repeat(64);
+    let settings = { ...settingsFixture(), baseHash: HASH_A };
+    let putConflict = true;
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/apps/focus/state") return jsonResponse(focusState(null, { settings }));
+      if (url === "/api/apps/focus/settings" && method === "PUT") {
+        if (putConflict) return jsonResponse({ error: { code: "sync_stale", message: "stale" } }, false, 409);
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        settings = { ...settings, ...body, baseHash: HASH_B };
+        return jsonResponse(settings);
+      }
+      if (url.startsWith("/api/apps/focus/stats")) return jsonResponse(statsFixture);
+      if (url.startsWith("/api/apps/focus/sessions")) return jsonResponse({ items: [historyItem], total: 1 });
+      return jsonResponse(null, false, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+    await screen.findByText("25:00");
+    fireEvent.change(screen.getByLabelText("Focus minutes"), { target: { value: "30" } });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    expect(await screen.findByRole("button", { name: "Discard draft and reload" })).toBeTruthy();
+    expect(screen.getByLabelText("Focus minutes")).toHaveValue(30);
+    putConflict = false;
+    settings = { ...settingsFixture(), focusDurationSeconds: 1200, baseHash: HASH_B };
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft and reload" }));
+    await waitFor(() => expect(screen.getByLabelText("Focus minutes")).toHaveValue(20));
+    expect(screen.queryByRole("button", { name: "Discard draft and reload" })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Focus minutes"), { target: { value: "35" } });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    await waitFor(() => {
+      const puts = fetchMock.mock.calls.filter(
+        ([url, init]) => String(url) === "/api/apps/focus/settings" && (init as RequestInit | undefined)?.method === "PUT",
+      );
+      expect(JSON.parse(String((puts[puts.length - 1]![1] as RequestInit).body))).toMatchObject({
+        focusDurationSeconds: 2100,
+        baseHash: HASH_B,
       });
     });
     expect(await screen.findByText("Settings saved")).toBeDefined();

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../shared/api";
 import { useI18n } from "../../shared/i18n";
@@ -19,6 +19,7 @@ import { PixelMeter } from "../../shared/ui/PixelMeter";
 import { PixelWindow } from "../../shared/ui/PixelWindow";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { useAsync } from "../../shared/useAsync";
+import { SyncPendingNotice, armPendingIfSyncConflict, useCoherentDraft, useSyncModelRefresh } from "../../shared/sync-guard-client";
 import { usePulseOnChange } from "../../shared/motion/usePulseOnChange";
 
 interface Task {
@@ -30,6 +31,7 @@ interface Task {
   due_at: string | null;
   priority: number;
   completed_at: string | null;
+  baseHash?: string;
 }
 
 export const PRIORITIES = [
@@ -130,17 +132,45 @@ function TaskEditor({
   task,
   onClose,
   onSaved,
+  pending = false,
+  onReload,
+  onDismiss,
+  onDirtyChange,
+  onSyncConflict,
 }: {
   task: Task | null;
   onClose: () => void;
   onSaved: () => void;
+  pending?: boolean;
+  onReload?: () => Promise<boolean> | boolean | void;
+  onDismiss?: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
+  onSyncConflict?: () => void;
 }) {
   const { t } = useI18n();
+  const baseHash = useRef(task?.baseHash);
   const [form, setForm] = useState<TaskEditorState>(() =>
     task ? editorStateFromTask(task) : emptyEditorState(),
   );
-  const set = <K extends keyof TaskEditorState>(key: K, value: TaskEditorState[K]) =>
+  const [dirty, setDirty] = useState(false);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = dirty;
+  const signature = task ? `${task.id}\0${task.baseHash ?? ""}` : null;
+  const draft = useCoherentDraft(task, signature, dirty, (incoming) => {
+    baseHash.current = incoming.baseHash;
+    setForm(editorStateFromTask(incoming));
+    setDirty(false);
+  }, onDismiss);
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
+  const set = <K extends keyof TaskEditorState>(key: K, value: TaskEditorState[K]) => {
+    draft.cancelAdopt();
+    dirtyRef.current = true;
+    setDirty(true);
     setForm((current) => ({ ...current, [key]: value }));
+  };
 
   const save = useMutation(async () => {
     const base: Record<string, unknown> = {
@@ -150,13 +180,18 @@ function TaskEditor({
       dueAt: fromLocalInputValue(form.dueAt),
       priority: form.priority,
     };
-    const body = task ? { ...base, status: form.status } : base;
+    const body = task ? { ...base, status: form.status, ...(baseHash.current ? { baseHash: baseHash.current } : {}) } : base;
     if (task) {
-      await api(`/api/apps/tasks/tasks/${task.id}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      try {
+        await api(`/api/apps/tasks/tasks/${task.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      } catch (error) {
+        armPendingIfSyncConflict(error, () => onSyncConflict?.());
+        throw error;
+      }
     } else {
       await api("/api/apps/tasks/tasks", {
         method: "POST",
@@ -180,6 +215,16 @@ function TaskEditor({
         className="px-dialog px-dialog--form"
         data-testid="task-editor"
       >
+        <SyncPendingNotice
+          pending={pending || draft.stale}
+          discard={dirty}
+          onReload={() => {
+            draft.requestAdopt();
+            void Promise.resolve(onReload?.()).then((ok) => {
+              if (ok === false) draft.cancelAdopt();
+            });
+          }}
+        />
         <form className="px-form" onSubmit={submit} aria-label={task ? t("Edit task", "编辑任务") : t("Create task", "创建任务")}>
           <label className="px-form__row">
             <span className="px-form__label">{t("Title", "标题")}</span>
@@ -271,8 +316,8 @@ function TasksPage() {
   const { t, locale } = useI18n();
   const displayName = useAppDisplayName({ id: "tasks", name: "Tasks" });
   const [searchParams, setSearchParams] = useSearchParams();
-  const [reloadKey, setReloadKey] = useState(0);
   const [editorFor, setEditorFor] = useState<Task | null | undefined>(undefined);
+  const [editorDirty, setEditorDirty] = useState(false);
   const [deleting, setDeleting] = useState<Task | null>(null);
   // Filters collapse into a header button; a deep link with active filters
   // starts expanded.
@@ -280,7 +325,6 @@ function TasksPage() {
     () => countActiveFilters(new URLSearchParams(window.location.search), TASKS_FILTER_KEYS) > 0,
   );
 
-  const refresh = () => setReloadKey((key) => key + 1);
   const setParam = (key: string, value: string) => {
     setSearchParams(
       (params) => {
@@ -312,15 +356,23 @@ function TasksPage() {
 
   const tasks = useAsync(
     () => api<{ items: Task[] }>(`/api/apps/tasks/tasks${tasksQueryString(searchParams)}`),
-    [searchParams.toString(), reloadKey],
+    [searchParams.toString()],
+    { retainOnReload: true },
   );
+  const refresh = () => { void tasks.reload(); };
+  const sync = useSyncModelRefresh(editorDirty, refresh);
+  useEffect(() => {
+    if (!tasks.data || editorFor == null) return;
+    const fresh = tasks.data.items.find((item) => item.id === editorFor.id);
+    if (fresh && fresh !== editorFor) setEditorFor(fresh);
+  }, [tasks.data, editorFor]);
 
   const setStatus = async (task: Task, status: string) => {
     try {
       await api(`/api/apps/tasks/tasks/${task.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ status }),
+        body: JSON.stringify({ status, ...(task.baseHash ? { baseHash: task.baseHash } : {}) }),
       });
       refresh();
     } catch {
@@ -330,7 +382,10 @@ function TasksPage() {
 
   const remove = useMutation(async () => {
     if (!deleting) return;
-    await api(`/api/apps/tasks/tasks/${deleting.id}`, { method: "DELETE" });
+    await api(`/api/apps/tasks/tasks/${deleting.id}`, {
+      method: "DELETE",
+      headers: deleting.baseHash ? { "x-base-hash": deleting.baseHash } : undefined,
+    });
   });
 
   const resetFilters = () => {
@@ -344,6 +399,7 @@ function TasksPage() {
 
   return (
     <div className="page" data-app="tasks">
+      <SyncPendingNotice pending={sync.pending} onReload={sync.reload} />
       <header className="page-header">
         <div className="px-inline-help">
           <h1 className="page-header__title">
@@ -537,9 +593,19 @@ function TasksPage() {
 
       {editorFor !== undefined ? (
         <TaskEditor
+          key={editorFor === null ? "new" : editorFor.id}
           task={editorFor}
-          onClose={() => setEditorFor(undefined)}
+          pending={sync.pending}
+          onDirtyChange={setEditorDirty}
+          onReload={() => tasks.reload()}
+          onDismiss={sync.dismiss}
+          onSyncConflict={sync.markPending}
+          onClose={() => {
+            setEditorDirty(false);
+            setEditorFor(undefined);
+          }}
           onSaved={() => {
+            setEditorDirty(false);
             setEditorFor(undefined);
             refresh();
           }}
@@ -573,22 +639,24 @@ const pad = (value: number) => String(value).padStart(2, "0");
 function TaskDetailPage() {
   const { t, locale } = useI18n();
   const { id } = useParams();
-  const [reloadKey, setReloadKey] = useState(0);
   const [editing, setEditing] = useState(false);
+  const [editorDirty, setEditorDirty] = useState(false);
   const task = useAsync(
     () => api<Task>(`/api/apps/tasks/tasks/${id}`),
-    [id, reloadKey],
+    [id],
+    { retainOnReload: true },
   );
-  const refresh = () => setReloadKey((key) => key + 1);
+  const refresh = () => { void task.reload(); };
+  const sync = useSyncModelRefresh(editorDirty, refresh);
 
-  if (task.loading) {
+  if (task.loading && !task.data) {
     return (
       <div className="page page--detail" data-app="tasks">
         <LoadingState label={t("Loading task…", "正在加载任务…")} />
       </div>
     );
   }
-  if (task.error || !task.data) {
+  if ((task.error && !task.data) || !task.data) {
     return (
       <div className="page page--detail" data-app="tasks">
         <EmptyState
@@ -612,7 +680,10 @@ function TaskDetailPage() {
       await api(`/api/apps/tasks/tasks/${current.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ status: current.status === "done" ? "todo" : "done" }),
+        body: JSON.stringify({
+          status: current.status === "done" ? "todo" : "done",
+          ...(current.baseHash ? { baseHash: current.baseHash } : {}),
+        }),
       });
     } finally {
       refresh();
@@ -692,9 +763,19 @@ function TaskDetailPage() {
 
       {editing ? (
         <TaskEditor
+          key={current.id}
           task={current}
-          onClose={() => setEditing(false)}
+          pending={sync.pending}
+          onDirtyChange={setEditorDirty}
+          onReload={() => task.reload()}
+          onDismiss={sync.dismiss}
+          onSyncConflict={sync.markPending}
+          onClose={() => {
+            setEditorDirty(false);
+            setEditing(false);
+          }}
           onSaved={() => {
+            setEditorDirty(false);
             setEditing(false);
             refresh();
           }}
@@ -762,6 +843,10 @@ function TasksTodayWidget({ density = "normal" }: { density?: WidgetDensity }) {
   const todayPulse = usePulseOnChange<number, HTMLSpanElement>(summary.data?.today ?? 0);
   const overduePulse = usePulseOnChange<number, HTMLSpanElement>(summary.data?.overdue ?? 0);
   const donePulse = usePulseOnChange<number, HTMLSpanElement>(summary.data?.done ?? 0);
+  useSyncModelRefresh(false, () => {
+    status.reload();
+    summary.reload();
+  });
   if ((wantStatus && status.loading) || (wantSummary && summary.loading)) {
     return <LoadingState label={t("Loading…", "正在加载…")} />;
   }

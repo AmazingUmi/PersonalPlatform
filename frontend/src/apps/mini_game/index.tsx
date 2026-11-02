@@ -9,6 +9,7 @@ import { PixelButton } from "../../shared/ui/PixelButton";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { LoadingState } from "../../shared/ui/LoadingState";
 import { useAsync } from "../../shared/useAsync";
+import { SyncPendingNotice, useSyncModelRefresh } from "../../shared/sync-guard-client";
 import { usePulseOnChange } from "../../shared/motion/usePulseOnChange";
 import logo from "./assets/logo.svg";
 import {
@@ -80,12 +81,23 @@ export function Game2048() {
   // backend rejects writes whose revision is not newer, so a slow older save
   // can never overwrite a newer board (FP-2A.4).
   const revision = useRef(0);
+  const baseHash = useRef<string | undefined>(undefined);
+  const holdSave = useRef(false);
+  const [held, setHeld] = useState(false);
+  const inflight = useRef(false);
+  const queued = useRef<{ board: Board; score: number } | null>(null);
+  const [boardDirty, setBoardDirty] = useState(false);
+  const loadedOnce = useRef(false);
 
   const loadSave = useCallback(async () => {
     try {
-      const body = await api<{ save: SaveState | null }>("/api/apps/mini_game/saves");
-      // Defensive validation (FP-13.2): a corrupted board never renders; the
-      // player simply gets a fresh run.
+      const body = await api<{ save: SaveState | null; baseHash?: string }>("/api/apps/mini_game/saves");
+      holdSave.current = false;
+      queued.current = null;
+      setHeld(false);
+      setBoardDirty(false);
+      loadedOnce.current = true;
+      baseHash.current = body.baseHash;
       if (body.save && isValidBoard(body.save.board)) {
         setTiles(tilesFromBoard(body.save.board));
         setScore(body.save.score);
@@ -96,7 +108,12 @@ export function Game2048() {
         return;
       }
     } catch {
-      // Offline / error: fall through to a fresh local run.
+      // A failed reload keeps the board already on screen.
+      if (holdSave.current || loadedOnce.current) {
+        setSaveState("error");
+        setPhase("ready");
+        return;
+      }
     }
     setTiles(freshTiles());
     setScore(0);
@@ -104,24 +121,53 @@ export function Game2048() {
     setMoveFx(NO_FX);
     setPhase("ready");
   }, []);
+  const sync = useSyncModelRefresh(boardDirty || held, () => {
+    if (!holdSave.current) void loadSave();
+  });
 
   const save = useCallback(async (nextBoard: Board, nextScore: number) => {
+    queued.current = { board: nextBoard, score: nextScore };
+    if (holdSave.current || inflight.current) return;
+    inflight.current = true;
     setSaveState("saving");
-    const nextRevision = revision.current + 1;
-    revision.current = nextRevision;
     try {
-      const body = await api<{ save: SaveState; accepted: boolean }>("/api/apps/mini_game/saves", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ score: nextScore, board: nextBoard, revision: nextRevision }),
-      });
-      setHighScore(body.save.highScore);
-      // A rejected write means the server already holds a newer revision; keep
-      // the local (newer) state and continue numbering above the server.
-      if (!body.accepted) revision.current = Math.max(revision.current, body.save.revision);
-      setSaveState("saved");
-    } catch {
-      setSaveState("error");
+      while (queued.current && !holdSave.current) {
+        const next = queued.current;
+        queued.current = null;
+        const nextRevision = revision.current + 1;
+        let body: { save: SaveState; accepted: boolean; baseHash?: string };
+        try {
+          body = await api("/api/apps/mini_game/saves", {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              score: next.score,
+              board: next.board,
+              revision: nextRevision,
+              ...(baseHash.current ? { baseHash: baseHash.current } : {}),
+            }),
+          });
+        } catch {
+          holdSave.current = true;
+          queued.current = null;
+          setHeld(true);
+          setSaveState("error");
+          break;
+        }
+        if (body.accepted === false || !body.save || typeof body.save.revision !== "number") {
+          holdSave.current = true;
+          queued.current = null;
+          setHeld(true);
+          setSaveState("error");
+          break;
+        }
+        revision.current = body.save.revision;
+        baseHash.current = body.baseHash;
+        setHighScore(body.save.highScore);
+        setSaveState("saved");
+      }
+    } finally {
+      inflight.current = false;
     }
   }, []);
 
@@ -140,6 +186,7 @@ export function Game2048() {
       const nextTiles = [...result.tiles, spawned];
       const nextBoard = boardFromTiles(nextTiles);
       const nextScore = score + result.gained;
+      setBoardDirty(true);
       setTiles(nextTiles);
       setScore(nextScore);
       setHighScore((current) => Math.max(current, nextScore));
@@ -181,6 +228,7 @@ export function Game2048() {
         </div>
         <p className="page-header__subtitle">{displayName}</p>
       </header>
+      <SyncPendingNotice pending={sync.pending} onReload={() => { sync.reload(); if (holdSave.current) void loadSave(); }} />
       <div className="game__bar">
         <div className="game__score" aria-label={t("Score", "得分")}>
           <span className="game__score-label">{t("Score", "得分")}</span>
@@ -193,6 +241,11 @@ export function Game2048() {
         <PixelButton onClick={newGame} disabled={phase !== "ready"}>
           {t("New Game", "新游戏")}
         </PixelButton>
+        {held ? (
+          <PixelButton size="sm" variant="secondary" onClick={() => void loadSave()}>
+            {t("Reload server board", "重新加载服务器棋盘")}
+          </PixelButton>
+        ) : null}
         <PixelBadge
           tone={saveState === "error" ? "danger" : saveState === "saved" ? "success" : "neutral"}
         >
@@ -260,6 +313,10 @@ function HighScoreWidget() {
   const { t } = useI18n();
   const summary = useAsync(() => api<{ highScore: number }>("/api/apps/mini_game/summary"));
   const run = useAsync(() => api<{ save: SaveState | null }>("/api/apps/mini_game/saves"));
+  useSyncModelRefresh(false, () => {
+    summary.reload();
+    run.reload();
+  });
   const scorePulse = usePulseOnChange<number, HTMLSpanElement>(summary.data?.highScore ?? 0);
   if (summary.loading || run.loading) return <LoadingState label={t("Loading…", "加载中…")} />;
   const error = summary.error ?? run.error;

@@ -48,6 +48,7 @@ interface NoteView {
   updatedAt: string;
   tags: NoteTagView[];
   dayKey: string;
+  baseHash: string;
 }
 
 interface TagView {
@@ -175,9 +176,10 @@ describe("notes CRUD full path (P7A1-04)", () => {
     created = response.body;
     noteId = created.id;
     assert.deepEqual(
-      Object.keys(created).sort(),
+      Object.keys(created).filter((key) => key !== "baseHash").sort(),
       ["content", "createdAt", "dayKey", "id", "mood", "occurredAt", "pinned", "tags", "title", "updatedAt"],
     );
+    assert.match(created.baseHash, /^[0-9a-f]{64}$/);
     assert.equal(created.title, "Full note");
     assert.equal(created.content, "body text");
     assert.equal(created.mood, "good");

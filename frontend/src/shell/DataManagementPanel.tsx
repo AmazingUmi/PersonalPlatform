@@ -13,6 +13,7 @@ import {
   importSnapshot, parseBackup, previewMerge, saveDownload, saveWebDav, testWebDav,
   type BackupResult, type BackupMode, type BackupRecord, type DataScope, type MergeReport, type WebDavConfig,
 } from "../shared/dataManagement";
+import { SyncPanel } from "./SyncPanel";
 import "./dataManagement.css";
 
 const errorValue = (error: unknown) => error instanceof Error ? error : new Error("The operation failed. Please try again.");
@@ -171,7 +172,7 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
   const { t, locale, language } = useI18n();
   const [params, setParams] = useSearchParams();
   const requestedView = params.get("view");
-  const view = requestedView === "backup" || requestedView === "history" ? requestedView : "connection";
+  const view = requestedView === "backup" || requestedView === "history" || requestedView === "sync" ? requestedView : "connection";
   function viewUrl(nextView: string) { const next = new URLSearchParams(params); next.set("section", "webdav"); next.set("view", nextView); return `?${next}`; }
   const [config, setConfig] = useState<WebDavConfig | null>(null);
   const [history, setHistory] = useState<BackupRecord[]>([]);
@@ -230,7 +231,7 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
 
   return <PixelWindow title={t("WebDAV backup", "WebDAV 备份")} icon="file" className="data-management" titleHelp={<HelpPopover label={t("About WebDAV backup", "关于 WebDAV 备份")}><p>{t("Save backups to your WebDAV drive.", "将备份保存到支持 WebDAV 的网盘。")}</p></HelpPopover>}>
     <nav className="settings-subnav" aria-label={t("WebDAV sections", "WebDAV 分区")}>
-      {["connection", "backup", "history"].map((item) => <Link key={item} to={viewUrl(item)} aria-current={view === item ? "page" : undefined} className={`px-button px-button--${view === item ? "primary" : "secondary"} px-button--md`}>{item === "connection" ? t("Connection", "连接") : item === "backup" ? t("Backup", "备份") : t("History", "历史")}</Link>)}
+      {(["connection", "backup", "history", "sync"] as const).map((item) => <Link key={item} to={viewUrl(item)} aria-current={view === item ? "page" : undefined} className={`px-button px-button--${view === item ? "primary" : "secondary"} px-button--md`}>{item === "connection" ? t("Connection", "连接") : item === "backup" ? t("Backup", "备份") : item === "history" ? t("History", "历史") : t("Sync", "同步")}</Link>)}
     </nav>
     {loading ? <p role="status">{t("Loading backup settings…", "正在加载备份设置…")}</p> : loadError ? <StatusMessage tone="error">
       <p>{t("Could not load backup settings:", "无法加载备份设置：")} {localizeError(loadError, language)}</p><PixelButton variant="secondary" onClick={() => void load()}>{t("Retry backup settings", "重新加载备份设置")}</PixelButton>
@@ -336,6 +337,9 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
           <span role="status">{t("Page", "第")} {page.toLocaleString(locale)} {t("of", "/")} {pageCount.toLocaleString(locale)} · {history.length.toLocaleString(locale)} {t("records", "条记录")}</span>
           <PixelButton variant="secondary" disabled={disabled || page === pageCount} onClick={() => changePage(page + 1)}>{t("Next page", "下一页")}</PixelButton>
         </nav>}
+      </div>
+      <div hidden={view !== "sync"}>
+        <SyncPanel configured={Boolean(config?.configured)} connectionLoading={false} />
       </div>
     </>}
     {busy && <p role="status">{t("Working on WebDAV…", "正在处理 WebDAV…")}</p>}

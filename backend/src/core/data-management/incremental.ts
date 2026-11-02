@@ -1,4 +1,5 @@
 import { AppError } from "../api/errors.js";
+import { assertRecordGraph } from "./record-graph.js";
 import {
   TABLES, UUID, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_ROWS, digest, exactKeys,
   keyOf, record, validTimestamp, validateEnvelope,
@@ -44,7 +45,8 @@ export function canonicalJson(value: unknown): string {
   return JSON.stringify(normalize(value, 0));
 }
 
-function bucketFor(row: Row, tableName: string): number {
+/** Stable 16-way partition. One edited row rewrites only its bucket. */
+export function contentBucket(row: Row, tableName: string): number {
   const table = TABLES.find(table => table.name === tableName)!;
   return parseInt(digest(Buffer.from(keyOf(row, table.key)))[0]!, 16);
 }
@@ -139,31 +141,7 @@ export function fingerprintManifest(manifest: IncrementalManifest): string {
 
 /** Cross-row ownership and file correspondence also apply to offline reconstruction. */
 function validateRelationships(snapshot: Snapshot): void {
-  const byId = new Map<string, Map<unknown, Row>>();
-  for (const [name, rows] of Object.entries(snapshot.tables)) byId.set(name, new Map(rows.map(row => [row.id, row])));
-  const owners = new Set((snapshot.tables["core.users"] ?? []).map(row => row.id));
-  for (const table of TABLES) for (const row of snapshot.tables[table.name] ?? []) {
-    for (const key of table.key) {
-      if (typeof row[key] !== "string") invalid("Invalid primary-key value in backup.");
-      if ((key.endsWith("_id") || (key === "id" && !["clock.settings", "focus.settings", "mini_game.saves"].includes(table.name))) && !UUID.test(row[key] as string)) invalid("Invalid record UUID in backup.");
-    }
-    if ("user_id" in row && (typeof row.user_id !== "string" || !UUID.test(row.user_id))) invalid("Invalid record owner.");
-    if (snapshot.scope === "all" && "user_id" in row && !owners.has(row.user_id)) invalid("Missing account for an owned record.");
-    const ownerIds: unknown[] = "user_id" in row ? [row.user_id] : [];
-    for (const [column, parent] of Object.entries(table.parents ?? {})) {
-      const record = byId.get(parent)?.get(row[column]);
-      if (!record) invalid("Missing parent in reconstructed backup.");
-      ownerIds.push(record.user_id);
-    }
-    if (ownerIds.some(owner => owner !== ownerIds[0])) invalid("Cross-user relationship in reconstructed backup.");
-  }
-  const rows = snapshot.tables["assets.attachments"] ?? [];
-  if (rows.length !== snapshot.files.length) invalid("Attachment metadata and content references do not match.");
-  const files = new Map(snapshot.files.map(file => [file.attachmentId, file]));
-  for (const row of rows) {
-    const file = files.get(String(row.id));
-    if (!file || !/^(0|[1-9]\d*)$/.test(String(row.size)) || BigInt(String(row.size)) !== BigInt(Buffer.from(file.data, "base64").length)) invalid("Attachment size or identity differs from its content.");
-  }
+  assertRecordGraph(snapshot, invalid);
 }
 
 export function buildIncremental(input: Snapshot, namespace: string): IncrementalPlan {
@@ -186,7 +164,7 @@ export function buildIncremental(input: Snapshot, namespace: string): Incrementa
     const table = TABLES.find(table => table.name === name)!;
     const buckets = new Map<number, Row[]>();
     for (const row of snapshot.tables[name]!) {
-      const bucket = bucketFor(row, name);
+      const bucket = contentBucket(row, name);
       if (!buckets.has(bucket)) buckets.set(bucket, []);
       buckets.get(bucket)!.push(row);
     }
@@ -222,7 +200,7 @@ export async function reconstructManifest(input: IncrementalManifest, readObject
       rowCount += decoded.length;
       if (rowCount > MAX_SNAPSHOT_ROWS) invalid("Backup exceeds the row limit.", 413);
       for (const row of decoded as Row[]) {
-        if (bucketFor(row, name) !== bucket.bucket) invalid("Record is in the wrong content bucket.");
+        if (contentBucket(row, name) !== bucket.bucket) invalid("Record is in the wrong content bucket.");
         rows.push(row);
       }
     }

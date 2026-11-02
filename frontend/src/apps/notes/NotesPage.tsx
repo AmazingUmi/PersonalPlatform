@@ -14,6 +14,7 @@ import { PixelInput } from "../../shared/ui/PixelInput";
 import { PixelWindow } from "../../shared/ui/PixelWindow";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { useAsync } from "../../shared/useAsync";
+import { SyncPendingNotice, useSyncModelRefresh } from "../../shared/sync-guard-client";
 import {
   MOODS,
   NOTE_SORT_OPTIONS,
@@ -181,7 +182,7 @@ export function NotesPage() {
     setSearchInput("");
   };
 
-  const tags = useAsync(() => listTags(), []);
+  const tags = useAsync(() => listTags(), [], { retainOnReload: true });
   const notes = useAsync(
     () =>
       listNotes({
@@ -195,7 +196,12 @@ export function NotesPage() {
         order,
       }),
     [searchParams.toString()],
+    { retainOnReload: true },
   );
+  const sync = useSyncModelRefresh(false, () => {
+    tags.reload();
+    notes.reload();
+  });
 
   const data = notes.data;
   const items = data?.items ?? [];
@@ -205,6 +211,7 @@ export function NotesPage() {
 
   return (
     <div className="page" data-app="notes">
+      <SyncPendingNotice pending={sync.pending} onReload={sync.reload} />
       <header className="page-header">
         <div className="px-inline-help">
           <h1 className="page-header__title">

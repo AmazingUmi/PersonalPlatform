@@ -1,8 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NoteEditorPage } from "./NoteEditorPage";
 import type { NoteView, TagView } from "./api";
+import { I18nProvider } from "../../shared/i18n";
+import { AuthProvider } from "../../shell/AuthContext";
+import { SYNC_DATA_CHANGED } from "../../shared/sync";
 
 function jsonResponse(body: unknown, ok = true, status = 200): Response {
   return { ok, status, json: async () => body } as unknown as Response;
@@ -69,11 +72,13 @@ function sentBody(
   fetchMock: ReturnType<typeof setupFetch>,
   method: string,
   url: string,
+  index = 0,
 ): Record<string, unknown> {
-  const call = fetchMock.mock.calls.find(
+  const calls = fetchMock.mock.calls.filter(
     ([calledUrl, init]) =>
       String(calledUrl) === url && (init as RequestInit | undefined)?.method === method,
   );
+  const call = calls[index];
   expect(call).toBeDefined();
   return JSON.parse(String((call![1] as RequestInit).body));
 }
@@ -294,5 +299,254 @@ describe("NoteEditorPage", () => {
       expect(call).toBeDefined();
     });
     expect(await screen.findByText(TIMELINE)).toBeDefined();
+  });
+});
+
+const HASH_A = "a".repeat(64);
+const HASH_B = "b".repeat(64);
+const AUTH_USER = { id: "user-1", username: "ada", displayName: null, role: "user" as const };
+
+function emitOwnSync() {
+  act(() => {
+    window.dispatchEvent(new CustomEvent(SYNC_DATA_CHANGED, {
+      detail: { userId: "user-1", identityId: "replica-1", result: "committed", baseline: false, openConflicts: 0 },
+    }));
+  });
+}
+
+function renderSignedInEditor(id: string) {
+  return render(
+    <I18nProvider initialLanguage="en">
+      <AuthProvider>
+        <MemoryRouter initialEntries={[`/notes/${id}`]}>
+          <Routes>
+            <Route path="/notes/:id" element={<NoteEditorPage />} />
+          </Routes>
+        </MemoryRouter>
+      </AuthProvider>
+    </I18nProvider>,
+  );
+}
+
+describe("NoteEditorPage sync draft", () => {
+  it("applies a clean background fetch as fields and hash together", async () => {
+    let current = noteFixture({ title: "Existing title", content: "Existing body", baseHash: HASH_A });
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/core/auth/me") return jsonResponse(AUTH_USER);
+      if (url === "/api/apps/notes/tags") return jsonResponse({ items: tagList });
+      if (url === `/api/apps/notes/notes/${current.id}` && method === "PATCH") {
+        return jsonResponse({ ...current, ...(JSON.parse(String(init?.body ?? "{}")) as object) });
+      }
+      if (url === `/api/apps/notes/notes/${current.id}`) return jsonResponse(current);
+      return jsonResponse(null, false, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSignedInEditor(current.id);
+    await screen.findByDisplayValue("Existing title");
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/core/auth/me")).toBe(true));
+    current = noteFixture({ title: "Server title", content: "Server body", baseHash: HASH_B, updatedAt: "2026-09-01T00:00:00.000Z" });
+    emitOwnSync();
+    await waitFor(() => expect(screen.getByLabelText("Note title")).toHaveValue("Server title"));
+    expect(screen.getByLabelText("Note content")).toHaveValue("Server body");
+    fireEvent.change(screen.getByLabelText("Note content"), { target: { value: "Server body!" } });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() => {
+      expect(sentBody(fetchMock, "PATCH", `/api/apps/notes/notes/${current.id}`)).toMatchObject({
+        content: "Server body!",
+        baseHash: HASH_B,
+      });
+    });
+  });
+
+  it("keeps a draft and the old hash when the user types during a fetch", async () => {
+    const original = noteFixture({ title: "Existing title", content: "Existing body", baseHash: HASH_A });
+    let current = original;
+    let hold: ((value: Response) => void) | null = null;
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/core/auth/me") return jsonResponse(AUTH_USER);
+      if (url === "/api/apps/notes/tags") return jsonResponse({ items: tagList });
+      if (url === `/api/apps/notes/notes/${original.id}` && method === "PATCH") {
+        return jsonResponse(original);
+      }
+      if (url === `/api/apps/notes/notes/${original.id}` && method === "GET") {
+        if (hold) return new Promise<Response>((resolve) => { hold = resolve; });
+        return jsonResponse(current);
+      }
+      return jsonResponse(null, false, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSignedInEditor(original.id);
+    await screen.findByDisplayValue("Existing title");
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/core/auth/me")).toBe(true));
+    const getsBefore = fetchMock.mock.calls.filter(([url, init]) =>
+      String(url) === `/api/apps/notes/notes/${original.id}` && !(init as RequestInit | undefined)?.method,
+    ).length;
+    hold = () => undefined;
+    current = noteFixture({ title: "Server title", content: "Server body", baseHash: HASH_B, updatedAt: "2026-09-01T00:00:00.000Z" });
+    emitOwnSync();
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.filter(([url, init]) =>
+        String(url) === `/api/apps/notes/notes/${original.id}` && !(init as RequestInit | undefined)?.method,
+      ).length).toBeGreaterThan(getsBefore),
+    );
+    fireEvent.change(screen.getByLabelText("Note title"), { target: { value: "Kept draft" } });
+    act(() => { hold?.(jsonResponse(current) as Response); });
+    await waitFor(() => expect(screen.getByLabelText("Note title")).toHaveValue("Kept draft"));
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() => {
+      expect(sentBody(fetchMock, "PATCH", `/api/apps/notes/notes/${original.id}`)).toMatchObject({
+        title: "Kept draft",
+        baseHash: HASH_A,
+      });
+    });
+  });
+
+  it("keeps the draft after a failed discard reload and does not auto-adopt later", async () => {
+    let current = noteFixture({ title: "Existing title", content: "Existing body", baseHash: HASH_A });
+    let failGet = false;
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/core/auth/me") return jsonResponse(AUTH_USER);
+      if (url === "/api/apps/notes/tags") return jsonResponse({ items: tagList });
+      if (url === `/api/apps/notes/notes/${current.id}` && method === "PATCH") return jsonResponse(current);
+      if (url === `/api/apps/notes/notes/${current.id}` && (method === "GET" || !init?.method)) {
+        if (failGet) return jsonResponse({ error: { message: "offline", code: "unavailable" } }, false, 500);
+        return jsonResponse(current);
+      }
+      return jsonResponse(null, false, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSignedInEditor("note-1");
+    await screen.findByDisplayValue("Existing title");
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/core/auth/me")).toBe(true));
+    fireEvent.change(screen.getByLabelText("Note title"), { target: { value: "Local draft" } });
+    emitOwnSync();
+    expect(await screen.findByRole("button", { name: "Discard draft and reload" })).toBeTruthy();
+    const getsBeforeFail = fetchMock.mock.calls.filter(([url, init]) =>
+      String(url) === `/api/apps/notes/notes/${current.id}` && ((init as RequestInit | undefined)?.method ?? "GET") === "GET",
+    ).length;
+    failGet = true;
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft and reload" }));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url, init]) =>
+      String(url) === `/api/apps/notes/notes/${current.id}` && ((init as RequestInit | undefined)?.method ?? "GET") === "GET",
+    ).length).toBe(getsBeforeFail + 1));
+    for (let step = 0; step < 20; step += 1) await Promise.resolve();
+    expect(screen.getByLabelText("Note title")).toHaveValue("Local draft");
+    failGet = false;
+    current = noteFixture({ title: "Remote title", content: "Remote body", baseHash: HASH_B, updatedAt: "2026-09-02T00:00:00.000Z" });
+    const gets = fetchMock.mock.calls.filter(([url, init]) =>
+      String(url).includes("/api/apps/notes/notes/note-1") && (!(init as RequestInit | undefined)?.method || (init as RequestInit).method === "GET"),
+    ).length;
+    emitOwnSync();
+    expect(fetchMock.mock.calls.filter(([url, init]) =>
+      String(url).includes("/api/apps/notes/notes/note-1") && (!(init as RequestInit | undefined)?.method || (init as RequestInit).method === "GET"),
+    ).length).toBe(gets);
+    expect(screen.getByLabelText("Note title")).toHaveValue("Local draft");
+  });
+
+  it("adopts fields and hash on a successful discard reload", async () => {
+    let current = noteFixture({ title: "Existing title", content: "Existing body", baseHash: HASH_A });
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/core/auth/me") return jsonResponse(AUTH_USER);
+      if (url === "/api/apps/notes/tags") return jsonResponse({ items: tagList });
+      if (url === `/api/apps/notes/notes/${current.id}` && method === "PATCH") {
+        return jsonResponse({ ...current, ...(JSON.parse(String(init?.body ?? "{}")) as object) });
+      }
+      if (url === `/api/apps/notes/notes/${current.id}`) return jsonResponse(current);
+      return jsonResponse(null, false, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSignedInEditor(current.id);
+    await screen.findByDisplayValue("Existing title");
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/core/auth/me")).toBe(true));
+    fireEvent.change(screen.getByLabelText("Note title"), { target: { value: "Local draft" } });
+    emitOwnSync();
+    current = noteFixture({ title: "Remote title", content: "Remote body", baseHash: HASH_B, updatedAt: "2026-09-02T00:00:00.000Z" });
+    fireEvent.click(await screen.findByRole("button", { name: "Discard draft and reload" }));
+    await waitFor(() => expect(screen.getByLabelText("Note title")).toHaveValue("Remote title"));
+    expect(screen.getByLabelText("Note content")).toHaveValue("Remote body");
+    expect(screen.queryByRole("button", { name: "Discard draft and reload" })).toBeNull();
+    expect(screen.queryByText("Server data changed. Your unsaved edits are kept.")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Note content"), { target: { value: "Remote body!" } });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() => {
+      expect(sentBody(fetchMock, "PATCH", `/api/apps/notes/notes/${current.id}`)).toMatchObject({
+        content: "Remote body!",
+        baseHash: HASH_B,
+      });
+    });
+  });
+
+  it("keeps the draft and offers reload when save returns 409 sync_stale without an event", async () => {
+    let current = noteFixture({ title: "Existing title", content: "Existing body", baseHash: HASH_A });
+    let patchConflict = true;
+    let failGet = false;
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/core/auth/me") return jsonResponse(AUTH_USER);
+      if (url === "/api/apps/notes/tags") return jsonResponse({ items: tagList });
+      if (url === `/api/apps/notes/notes/${current.id}` && method === "PATCH") {
+        if (patchConflict) {
+          return jsonResponse({ error: { code: "sync_stale", message: "stale" } }, false, 409);
+        }
+        return jsonResponse({ ...current, ...(JSON.parse(String(init?.body ?? "{}")) as object) });
+      }
+      if (url === `/api/apps/notes/notes/${current.id}`) {
+        if (failGet) return jsonResponse({ error: { message: "offline", code: "unavailable" } }, false, 500);
+        return jsonResponse(current);
+      }
+      return jsonResponse(null, false, 404);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSignedInEditor(current.id);
+    await screen.findByDisplayValue("Existing title");
+    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url) === "/api/core/auth/me")).toBe(true));
+    fireEvent.change(screen.getByLabelText("Note title"), { target: { value: "Local draft" } });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    expect(await screen.findByRole("button", { name: "Discard draft and reload" })).toBeTruthy();
+    expect(screen.getByLabelText("Note title")).toHaveValue("Local draft");
+    const getsBeforeFail = fetchMock.mock.calls.filter(([url, init]) =>
+      String(url) === `/api/apps/notes/notes/${current.id}` && ((init as RequestInit | undefined)?.method ?? "GET") === "GET",
+    ).length;
+    failGet = true;
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft and reload" }));
+    await waitFor(() => expect(fetchMock.mock.calls.filter(([url, init]) =>
+      String(url) === `/api/apps/notes/notes/${current.id}` && ((init as RequestInit | undefined)?.method ?? "GET") === "GET",
+    ).length).toBe(getsBeforeFail + 1));
+    for (let step = 0; step < 20; step += 1) await Promise.resolve();
+    expect(screen.getByLabelText("Note title")).toHaveValue("Local draft");
+    expect(screen.getByRole("button", { name: "Discard draft and reload" })).toBeTruthy();
+    failGet = false;
+    patchConflict = false;
+    current = noteFixture({ title: "Remote title", content: "Remote body", baseHash: HASH_B, updatedAt: "2026-09-02T00:00:00.000Z" });
+    fireEvent.click(screen.getByRole("button", { name: "Discard draft and reload" }));
+    await waitFor(() => expect(screen.getByLabelText("Note title")).toHaveValue("Remote title"));
+    expect(screen.getByLabelText("Note content")).toHaveValue("Remote body");
+    expect(screen.queryByRole("button", { name: "Discard draft and reload" })).toBeNull();
+    fireEvent.change(screen.getByLabelText("Note content"), { target: { value: "Remote body!" } });
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() => {
+      const patchUrl = `/api/apps/notes/notes/${current.id}`;
+      const patches = fetchMock.mock.calls.filter(([url, init]) =>
+        String(url) === patchUrl && (init as RequestInit | undefined)?.method === "PATCH",
+      );
+      expect(patches).toHaveLength(2);
+      expect(sentBody(fetchMock, "PATCH", patchUrl, 0)).toMatchObject({
+        title: "Local draft",
+        baseHash: HASH_A,
+      });
+      expect(sentBody(fetchMock, "PATCH", patchUrl, 1)).toMatchObject({
+        content: "Remote body!",
+        baseHash: HASH_B,
+      });
+    });
   });
 });

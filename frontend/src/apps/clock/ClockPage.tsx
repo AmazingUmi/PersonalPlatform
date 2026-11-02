@@ -16,6 +16,7 @@ import { fetchTasksPublicStatus } from "./tasksPublic";
 import { useClockNow } from "./useClockNow";
 import type { ClockSettings } from "./useClockSettings";
 import { useClockSettings } from "./useClockSettings";
+import { SyncPendingNotice } from "../../shared/sync-guard-client";
 
 /**
  * Clock app page: a bigger Main Clock plus the Task Status, Alarm and World
@@ -26,7 +27,7 @@ export function ClockPage() {
   const { t } = useI18n();
   const displayName = useAppDisplayName({ id: "clock", name: "Clock" });
   const [saveFailed, setSaveFailed] = useState(false);
-  const { settings, loading, error, reload, save } = useClockSettings();
+  const { settings, loading, error, reload, save, syncPending, acceptServerSync } = useClockSettings();
   const minuteNow = useClockNow(false);
   // One shared public-status fetch: it feeds both the face focus state and
   // the Task Status zone, and re-runs each minute so next→current transitions
@@ -50,6 +51,7 @@ export function ClockPage() {
 
   return (
     <div className="page" data-app="clock">
+      <SyncPendingNotice pending={syncPending} onReload={acceptServerSync} />
       <header className="page-header">
         <div className="px-inline-help">
           <h1 className="page-header__title">

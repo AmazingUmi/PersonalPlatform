@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, UNAUTHORIZED_EVENT, type AuthUser } from "../shared/api";
+import { SESSION_ENDING_EVENT } from "../shared/sync";
 import { AuthProvider, useAuth } from "./AuthContext";
 
 vi.mock("../shared/api", async (importOriginal) => {
@@ -13,7 +14,7 @@ vi.mock("../shared/api", async (importOriginal) => {
   };
 });
 
-import { fetchMe as fetchMeMock } from "../shared/api";
+import { fetchMe as fetchMeMock, logout as logoutMock } from "../shared/api";
 
 /**
  * Session bootstrap + loss (AUTH-5, AUTH-H1-07): /me resolves the boot status
@@ -36,6 +37,11 @@ function AuthProbe() {
 }
 
 /** Drives refresh() from tests (recovery / failure paths). */
+function SignOutProbe() {
+  const { signOut } = useAuth();
+  return <button type="button" onClick={() => void signOut()}>sign out</button>;
+}
+
 function RefreshProbe() {
   const { refresh } = useAuth();
   return (
@@ -133,6 +139,18 @@ describe("AuthProvider session states", () => {
       fireEvent.click(screen.getByRole("button", { name: "refresh" }));
     });
     expect(await screen.findByText("authenticated|admin|admin")).toBeTruthy();
+  });
+
+  it("dispatches session-ending before the logout request resolves", async () => {
+    vi.mocked(fetchMeMock).mockResolvedValue(adminUser);
+    const order: string[] = [];
+    window.addEventListener(SESSION_ENDING_EVENT, () => { order.push("ending"); });
+    vi.mocked(logoutMock).mockImplementation(async () => { order.push("logout"); });
+    render(<AuthProvider><AuthProbe /><SignOutProbe /></AuthProvider>);
+    expect(await screen.findByText("authenticated|admin|admin")).toBeTruthy();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "sign out" })); });
+    expect(order).toEqual(["ending", "logout"]);
+    expect(screen.getByText("anonymous|-|-")).toBeTruthy();
   });
 
   it("refresh() failure also lands in the error state (stays out of the login page)", async () => {

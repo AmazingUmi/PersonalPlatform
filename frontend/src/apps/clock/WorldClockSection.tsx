@@ -1,7 +1,8 @@
 import { HelpPopover } from "../../shared/ui/HelpPopover";
 import { useI18n } from "../../shared/i18n";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { api } from "../../shared/api";
+import { SyncPendingNotice, retainLoadedHash, useSyncModelRefresh } from "../../shared/sync-guard-client";
 import { useAsync } from "../../shared/useAsync";
 import { useMutation } from "../../shared/useMutation";
 import { EmptyState } from "../../shared/ui/EmptyState";
@@ -18,6 +19,7 @@ export interface WorldClockView {
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
+  baseHash?: string;
 }
 
 const WORLD_CLOCKS_URL = "/api/apps/clock/world-clocks";
@@ -32,9 +34,13 @@ const WORLD_CLOCKS_URL = "/api/apps/clock/world-clocks";
  */
 export function WorldClockSection({ now }: { now: Date }) {
   const { t, language } = useI18n();
-  const clocks = useAsync(() => api<{ items: WorldClockView[] }>(WORLD_CLOCKS_URL));
+  const clocks = useAsync(() => api<{ items: WorldClockView[]; orderHash?: string }>(WORLD_CLOCKS_URL), [], { retainOnReload: true });
+  const [reorderPending, setReorderPending] = useState(false);
+  const orderHash = useRef<string | undefined>(undefined);
+  orderHash.current = retainLoadedHash(orderHash.current, clocks.data?.orderHash, reorderPending);
   const [presetValue, setPresetValue] = useState("");
   const preset = findWorldCityPreset(presetValue);
+  const sync = useSyncModelRefresh(reorderPending || presetValue !== "", clocks.reload);
 
   const add = useMutation(async () => {
     if (!preset) return;
@@ -50,7 +56,10 @@ export function WorldClockSection({ now }: { now: Date }) {
 
   const removeAt = async (entry: WorldClockView) => {
     try {
-      await api(`${WORLD_CLOCKS_URL}/${entry.id}`, { method: "DELETE" });
+      await api(`${WORLD_CLOCKS_URL}/${entry.id}`, {
+        method: "DELETE",
+        headers: entry.baseHash ? { "x-base-hash": entry.baseHash } : undefined,
+      });
     } finally {
       clocks.reload();
     }
@@ -61,13 +70,15 @@ export function WorldClockSection({ now }: { now: Date }) {
     if (target < 0 || target >= items.length) return;
     const ids = items.map((entry) => entry.id);
     [ids[index], ids[target]] = [ids[target], ids[index]!];
+    setReorderPending(true);
     try {
       await api(`${WORLD_CLOCKS_URL}/order`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ ids }),
+        body: JSON.stringify({ ids, ...(orderHash.current ? { baseHash: orderHash.current } : {}) }),
       });
     } finally {
+      setReorderPending(false);
       clocks.reload();
     }
   };
@@ -78,6 +89,7 @@ export function WorldClockSection({ now }: { now: Date }) {
 
   return (
     <div className="clock-world">
+      <SyncPendingNotice pending={sync.pending} onReload={sync.reload} />
       {clocks.loading ? <LoadingState label={t("Loading world clocks…", "正在加载世界时钟…")} /> : null}
       {clocks.error ? (
         <div className="widget-fallback">

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { Database } from "../database/index.js";
+import type { Database, DatabaseContext } from "../database/index.js";
 import { AppError } from "../api/errors.js";
 import { backupKey, decryptPassword, encryptPassword } from "./credentials.js";
 import { davRequest, davHead, normalizeEndpoint, type DavRequest } from "./webdav-http.js";
@@ -67,6 +67,22 @@ export class WebdavBackups {
     now?: () => Date;
   }) {}
   private now() { return this.deps.now?.() ?? new Date(); }
+  /** Password stays inside the backup service. Sync routes never receive it. */
+  async syncCredentials(userId: string): Promise<{ endpoint: string; username: string; password: string }> {
+    const row = await this.target(userId);
+    if (!row) throw new AppError(422, "webdav_not_configured", "Save a WebDAV destination before continuous sync.");
+    return { endpoint: row.endpoint, username: row.username, password: decryptPassword(row.password_ciphertext, await backupKey(this.deps.storageRoot), row.user_id) };
+  }
+  /** Lock the backup row, then the binding, so link and destination edits cannot pass each other. */
+  private async lockDestination(tx: DatabaseContext, userId: string, endpoint: string | null, username: string | null): Promise<void> {
+    await tx.query("SELECT user_id FROM core.backup_targets WHERE user_id=$1 FOR UPDATE", [userId]);
+    const row = (await tx.query<{ destination_endpoint: string; destination_username: string; phase: string }>(
+      "SELECT destination_endpoint, destination_username, phase FROM core.sync_bindings WHERE user_id=$1 FOR UPDATE", [userId])).rows[0];
+    if (!row || row.phase === "unlinked") return;
+    if (endpoint === null || endpoint !== row.destination_endpoint || username !== row.destination_username) {
+      throw new AppError(409, "sync_destination_locked", "Unlink continuous sync before changing or removing this WebDAV destination.");
+    }
+  }
   private async target(userId: string): Promise<Target | undefined> {
     return (await this.deps.database.query<Target>("SELECT * FROM core.backup_targets WHERE user_id=$1", [userId])).rows[0];
   }
@@ -82,6 +98,11 @@ export class WebdavBackups {
     if (!input.username || input.username.includes(":") || /[\r\n]/.test(input.username) || input.username.length > 512) throw new AppError(422, "invalid_webdav_username", "Enter a valid WebDAV username without a colon or newline.");
     if (![0,1,6,12,24,168].includes(input.intervalHours)) throw new AppError(422, "invalid_interval", "Choose a supported backup interval.");
     const existing = await this.target(actor.id);
+    const linked = (await this.deps.database.query<{ destination_endpoint: string; destination_username: string; phase: string }>(
+      "SELECT destination_endpoint, destination_username, phase FROM core.sync_bindings WHERE user_id=$1", [actor.id])).rows[0];
+    if (linked && linked.phase !== "unlinked" && (endpoint !== linked.destination_endpoint || input.username !== linked.destination_username)) {
+      throw new AppError(409, "sync_destination_locked", "Unlink continuous sync before changing or removing this WebDAV destination.");
+    }
     if (input.password === undefined && (!existing || endpoint !== existing.endpoint || input.username !== existing.username)) {
       throw new AppError(422, "password_required", "Enter the password when configuring a new WebDAV destination or username.");
     }
@@ -89,7 +110,9 @@ export class WebdavBackups {
     const encrypted = input.password === undefined ? existing!.password_ciphertext : encryptPassword(input.password, await backupKey(this.deps.storageRoot), actor.id);
     const now = this.now();
     const next = input.intervalHours ? new Date(now.getTime() + input.intervalHours * 3_600_000) : null;
-    const result = await this.deps.database.query<Target>(`INSERT INTO core.backup_targets
+    const result = await this.deps.database.withTransaction(async tx => {
+      await this.lockDestination(tx, actor.id, endpoint, input.username);
+      return tx.query<Target>(`INSERT INTO core.backup_targets
       (user_id,endpoint,username,password_ciphertext,scope,interval_hours,next_run_at)
       VALUES ($1,$2,$3,$4,$5,$6,$7)
       ON CONFLICT (user_id) DO UPDATE SET endpoint=EXCLUDED.endpoint, username=EXCLUDED.username,
@@ -98,14 +121,16 @@ export class WebdavBackups {
       WHERE (core.backup_targets.lease_until IS NULL OR core.backup_targets.lease_until <= $8)
       AND core.backup_targets.revision=$9 RETURNING *`,
       [actor.id, endpoint, input.username, encrypted, input.scope, input.intervalHours, next, now, existing?.revision ?? 0]);
+    });
     if (!result.rows[0]) throw new AppError(409, "backup_busy", "A backup is running. Wait before changing its configuration.");
     return view(result.rows[0]);
   }
   async remove(actor: BackupActor) {
-    const row = await this.target(actor.id);
-    if (!row) return;
-    const deleted = await this.deps.database.query("DELETE FROM core.backup_targets WHERE user_id=$1 AND (lease_until IS NULL OR lease_until <= $2)", [actor.id, this.now()]);
-    if (!deleted.rowCount) throw new AppError(409, "backup_busy", "A backup is running. Wait before removing its configuration.");
+    const deleted = await this.deps.database.withTransaction(async tx => {
+      await this.lockDestination(tx, actor.id, null, null);
+      return tx.query("DELETE FROM core.backup_targets WHERE user_id=$1 AND (lease_until IS NULL OR lease_until <= $2)", [actor.id, this.now()]);
+    });
+    if (!deleted.rowCount && await this.target(actor.id)) throw new AppError(409, "backup_busy", "A backup is running. Wait before removing its configuration.");
   }
   private async request(row: Target, method: DavRequest["method"], filename?: string, body?: Buffer, timeoutMs?: number) {
     const password = decryptPassword(row.password_ciphertext, await backupKey(this.deps.storageRoot), row.user_id);

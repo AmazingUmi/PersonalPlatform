@@ -15,6 +15,7 @@ import {
   UNAUTHORIZED_EVENT,
   type AuthUser,
 } from "../shared/api";
+import { SESSION_ENDING_EVENT } from "../shared/sync";
 
 /**
  * Session bootstrap + 401 handling (AUTH-5, AUTH-H1-07).
@@ -91,6 +92,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signOut = useCallback(async (): Promise<void> => {
+    // Stop sync before the logout request so an in-flight cycle can abort.
+    // The request already on the network cannot be recalled.
+    if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(SESSION_ENDING_EVENT));
     await apiLogout().catch(() => undefined); // cookie cleared server-side best-effort
     setUser(null);
     setStatus("anonymous");
@@ -130,4 +134,9 @@ export function useAuth(): AuthContextValue {
   const value = useContext(AuthContext);
   if (!value) throw new Error("useAuth must be used inside <AuthProvider>");
   return value;
+}
+
+/** Same context read as useAuth. Missing provider is null; it does not change sign-in behavior. */
+export function useOptionalAuth(): AuthContextValue | null {
+  return useContext(AuthContext);
 }

@@ -62,6 +62,17 @@ export interface DavRequest {
   filename?: string;
   body?: Buffer;
   timeoutMs?: number;
+  /** Strong or server-supplied tag. When set on PUT, If-None-Match is not sent. */
+  ifMatch?: string;
+  /** Sent on GET. A 304 is success only when this is set. */
+  ifNoneMatch?: string;
+}
+
+export interface DavResult {
+  body: Buffer;
+  status: number;
+  etag?: string;
+  length?: number;
 }
 
 export async function resolveWithTimeout(
@@ -85,6 +96,10 @@ export async function davRequest(input: DavRequest): Promise<Buffer> {
   return (await davTransfer(input)).body;
 }
 
+export async function davExchange(input: DavRequest): Promise<DavResult> {
+  return davTransfer(input);
+}
+
 export async function davHead(input: DavRequest): Promise<number | null> {
   const response = await davTransfer({ ...input, method: "HEAD", body: undefined });
   if (response.status === 404) return null;
@@ -92,9 +107,9 @@ export async function davHead(input: DavRequest): Promise<number | null> {
   return response.length;
 }
 
-async function davTransfer(input: DavRequest): Promise<{body: Buffer; status: number; length?: number}> {
+async function davTransfer(input: DavRequest): Promise<DavResult> {
   const endpoint = normalizeEndpoint(input.endpoint);
-  if (input.filename && !/^(?:ppm?-[a-f0-9-]+-(?:own|all)-[a-f0-9-]+\.json|ppc-[a-f0-9]{64}-[a-f0-9]{64}\.(?:json|bin))$/.test(input.filename)) {
+  if (input.filename && !/^(?:ppm?-[a-f0-9-]+-(?:own|all)-[a-f0-9-]+\.json|ppc-[a-f0-9]{64}-[a-f0-9]{64}\.(?:json|bin)|pps-probe-[a-f0-9]{32}\.json|pps-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-(?:head|[a-f0-9]{64})\.(?:json|bin))$/.test(input.filename)) {
     throw new AppError(422, "invalid_backup_name", "Invalid backup filename.");
   }
   const url = new URL(input.filename ?? "", endpoint);
@@ -113,7 +128,12 @@ async function davTransfer(input: DavRequest): Promise<{body: Buffer; status: nu
       headers: {
         authorization: `Basic ${Buffer.from(`${input.username}:${input.password}`).toString("base64")}`,
         ...(input.method === "PROPFIND" ? { depth: "0", "content-type": "application/xml" } : {}),
-        ...(input.method === "PUT" ? { "content-type": input.filename?.endsWith(".bin") ? "application/octet-stream" : "application/json", "if-none-match": "*", "content-length": input.body?.length ?? 0 } : {}),
+        ...(input.method === "GET" && input.ifNoneMatch ? { "if-none-match": input.ifNoneMatch } : {}),
+        ...(input.method === "PUT" ? {
+          "content-type": input.filename?.endsWith(".bin") ? "application/octet-stream" : "application/json",
+          "content-length": input.body?.length ?? 0,
+          ...(input.ifMatch ? { "if-match": input.ifMatch } : { "if-none-match": "*" }),
+        } : {}),
       },
     });
     const timer = setTimeout(() => request.destroy(new Error("timeout")), Math.max(1, timeoutMs - (Date.now() - started)));
@@ -122,7 +142,8 @@ async function davTransfer(input: DavRequest): Promise<{body: Buffer; status: nu
     request.on("error", () => fail(new AppError(502, "webdav_unreachable", "WebDAV request failed or timed out. Check the address, TLS certificate and connection.")));
     request.on("response", response => {
       const status = response.statusCode ?? 0;
-      const ok = input.method === "PROPFIND" ? status === 207 : input.method === "PUT" ? [200,201,204].includes(status) : input.method === "HEAD" ? [200,404].includes(status) : status === 200;
+      const notModified = input.method === "GET" && status === 304 && Boolean(input.ifNoneMatch);
+      const ok = notModified || (input.method === "PROPFIND" ? status === 207 : input.method === "PUT" ? [200,201,204].includes(status) : input.method === "HEAD" ? [200,404].includes(status) : status === 200);
       if (!ok) {
         const hint = status === 401 ? "Check the account and WebDAV application password (some providers require an app password instead of the login password)."
           : status === 403 ? "The server denied access. Check this account's WebDAV and directory permissions."
@@ -148,7 +169,9 @@ async function davTransfer(input: DavRequest): Promise<{body: Buffer; status: nu
           finished = true; clearTimeout(timer);
           const rawLength = response.headers["content-length"];
           const length = typeof rawLength === "string" && /^\d+$/.test(rawLength) && Number.isSafeInteger(Number(rawLength)) ? Number(rawLength) : undefined;
-          resolve({ body: Buffer.concat(chunks), status, length });
+          const rawEtag = response.headers.etag;
+          const etag = typeof rawEtag === "string" ? rawEtag : Array.isArray(rawEtag) ? rawEtag[0] : undefined;
+          resolve({ body: Buffer.concat(chunks), status, length, ...(etag ? { etag } : {}) });
         }
       });
     });

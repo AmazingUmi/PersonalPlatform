@@ -6,6 +6,7 @@ import { PixelBadge } from "../../shared/ui/PixelBadge";
 import { PixelButton } from "../../shared/ui/PixelButton";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { useAsync } from "../../shared/useAsync";
+import { SyncPendingNotice, useSyncModelRefresh } from "../../shared/sync-guard-client";
 import { useMutation } from "../../shared/useMutation";
 import { createNote, listNotes, type NoteView } from "./api";
 
@@ -35,6 +36,7 @@ export function QuickNoteWidget({ density = "normal" }: { density?: WidgetDensit
     () => (density === "expanded" ? listNotes() : Promise.resolve(null)),
     [density],
   );
+  const sync = useSyncModelRefresh(content.trim() !== "", () => recent.reload());
   const saved = useMutation(async () => {
     const submittedContent = content;
     const submittedRevision = editRevision.current;
@@ -51,6 +53,7 @@ export function QuickNoteWidget({ density = "normal" }: { density?: WidgetDensit
 
   return (
     <div className="notes-quick" data-density={density}>
+      <SyncPendingNotice pending={sync.pending} onReload={sync.reload} />
       <textarea
         className="px-textarea notes-quick__input"
         placeholder={t("A thought to capture…", "今天突然想到……")}

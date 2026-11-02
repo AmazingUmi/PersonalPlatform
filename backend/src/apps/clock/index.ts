@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import { AppError } from "../../core/api/errors.js";
 import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-registry/types.js";
 import {
+  assertPresentedHash, editorBaseHash, headerPresentedHash, lockOwnedTables, lockOwnerSet, parseSnapshotRow, readPresentedHash, singletonBaseHash, syncWriteFenced,
+} from "../../core/data-management/sync-fence.js";
+import {
   ALARM_TIME_PATTERN,
   DEFAULT_CLOCK_SETTINGS,
   isUuid,
@@ -41,6 +44,7 @@ export interface AlarmView {
   repeatDays: number[];
   createdAt: string;
   updatedAt: string;
+  baseHash?: string;
 }
 
 export interface WorldClockView {
@@ -50,6 +54,7 @@ export interface WorldClockView {
   sortOrder: number;
   createdAt: string;
   updatedAt: string;
+  baseHash?: string;
 }
 
 /** camelCase view boundary (notes toNoteView precedent). */
@@ -91,11 +96,11 @@ function invalidCityError(): AppError {
 /** A malformed uuid must not reach pg as a 22P02 parse error — it is simply not found. */
 async function findAlarmView(db: Db, alarmId: string, userId: string): Promise<AlarmView | null> {
   if (!isUuid(alarmId)) return null;
-  const { rows } = await db.query<AlarmRow>(
-    "SELECT * FROM clock.alarms WHERE id = $1 AND user_id = $2",
+  const { rows } = await db.query<AlarmRow & { snapshot: string }>(
+    "SELECT a.*, row_to_json(a)::text AS snapshot FROM clock.alarms a WHERE id = $1 AND user_id = $2",
     [alarmId, userId],
   );
-  return rows[0] ? toAlarmView(rows[0]) : null;
+  return rows[0] ? { ...toAlarmView(rows[0]), baseHash: clockRowHash("clock.alarms", rows[0].snapshot) } : null;
 }
 
 async function findWorldClockView(
@@ -104,30 +109,49 @@ async function findWorldClockView(
   userId: string,
 ): Promise<WorldClockView | null> {
   if (!isUuid(id)) return null;
-  const { rows } = await db.query<WorldClockRow>(
-    "SELECT * FROM clock.world_clocks WHERE id = $1 AND user_id = $2",
+  const { rows } = await db.query<WorldClockRow & { snapshot: string }>(
+    "SELECT w.*, row_to_json(w)::text AS snapshot FROM clock.world_clocks w WHERE id = $1 AND user_id = $2",
     [id, userId],
   );
-  return rows[0] ? toWorldClockView(rows[0]) : null;
+  return rows[0] ? { ...toWorldClockView(rows[0]), baseHash: clockRowHash("clock.world_clocks", rows[0].snapshot) } : null;
 }
 
 const id = "clock";
 const SETTINGS_ID = "current";
 
-async function getSettings(db: Db, userId: string): Promise<ClockSettingsView> {
-  const { rows } = await db.query<{ value: unknown }>(
-    "SELECT value FROM clock.settings WHERE id = $1 AND user_id = $2",
-    [SETTINGS_ID, userId],
-  );
-  return sanitizeClockSettings(rows[0]?.value) ?? DEFAULT_CLOCK_SETTINGS;
+function clockRowHash(table: string, snapshot: string): string {
+  return editorBaseHash([{ table, row: parseSnapshotRow(snapshot) }]);
 }
 
-async function saveSettings(db: Db, userId: string, next: ClockSettingsView): Promise<void> {
-  await db.query(
-    `INSERT INTO clock.settings (id, user_id, value, updated_at) VALUES ($1, $2, $3::jsonb, now())
-     ON CONFLICT (user_id, id) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
-    [SETTINGS_ID, userId, JSON.stringify(next)],
+function absentClockSettingsHash(): string {
+  return singletonBaseHash("clock.settings", { id: SETTINGS_ID, value: DEFAULT_CLOCK_SETTINGS });
+}
+
+async function getSettings(db: Db, userId: string): Promise<ClockSettingsView & { baseHash: string }> {
+  const { rows } = await db.query<{ value: unknown; snapshot: string }>(
+    "SELECT value, row_to_json(s)::text AS snapshot FROM clock.settings s WHERE id = $1 AND user_id = $2",
+    [SETTINGS_ID, userId],
   );
+  const view = sanitizeClockSettings(rows[0]?.value) ?? DEFAULT_CLOCK_SETTINGS;
+  return { ...view, baseHash: rows[0] ? clockRowHash("clock.settings", rows[0].snapshot) : absentClockSettingsHash() };
+}
+
+async function saveSettings(db: Db, userId: string, next: ClockSettingsView, presented: string | undefined): Promise<void> {
+  await db.withTransaction(async (tx) => {
+    await lockOwnedTables(tx, ["clock.settings"]);
+    await lockOwnerSet(tx, userId, "clock.settings");
+    const { rows } = await tx.query<{ snapshot: string }>(
+      "SELECT row_to_json(s)::text AS snapshot FROM clock.settings s WHERE id = $1 AND user_id = $2 FOR UPDATE",
+      [SETTINGS_ID, userId],
+    );
+    const actual = rows[0] ? clockRowHash("clock.settings", rows[0].snapshot) : absentClockSettingsHash();
+    assertPresentedHash(await syncWriteFenced(tx, userId), presented, actual);
+    await tx.query(
+      `INSERT INTO clock.settings (id, user_id, value, updated_at) VALUES ($1, $2, $3::jsonb, now())
+       ON CONFLICT (user_id, id) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+      [SETTINGS_ID, userId, JSON.stringify(next)],
+    );
+  });
 }
 
 async function registerApi(ctx: AppContext): Promise<void> {
@@ -153,17 +177,18 @@ async function registerApi(ctx: AppContext): Promise<void> {
           showSeconds: { type: "boolean" },
           showDate: { type: "boolean" },
           hourFormat: { type: "integer", enum: [12, 24] },
+          baseHash: { type: "string" },
         },
       },
     },
     async handler(request) {
       const user = await ctx.auth.requireUser(request);
-      // Defense in depth after the schema (focus PUT /settings precedent).
+      const presented = readPresentedHash((request.body as { baseHash?: unknown }).baseHash);
       const sanitized = sanitizeClockSettings(request.body);
       if (!sanitized) {
         throw new AppError(422, "invalid_settings", "settings payload is not a legal settings object");
       }
-      await saveSettings(db, user.id, sanitized);
+      await saveSettings(db, user.id, sanitized, presented);
       return getSettings(db, user.id);
     },
   });
@@ -173,11 +198,11 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
   ctx.api.get("/alarms", async (request) => {
     const user = await ctx.auth.requireUser(request);
-    const { rows } = await db.query<AlarmRow>(
-      "SELECT * FROM clock.alarms WHERE user_id = $1 ORDER BY time ASC, created_at ASC",
+    const { rows } = await db.query<AlarmRow & { snapshot: string }>(
+      "SELECT a.*, row_to_json(a)::text AS snapshot FROM clock.alarms a WHERE user_id = $1 ORDER BY time ASC, created_at ASC",
       [user.id],
     );
-    return { items: rows.map(toAlarmView) };
+    return { items: rows.map((row) => ({ ...toAlarmView(row), baseHash: clockRowHash("clock.alarms", row.snapshot) })) };
   });
 
   ctx.api.post("/alarms", {
@@ -234,6 +259,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
             uniqueItems: true,
             items: { type: "integer", minimum: 0, maximum: 6 },
           },
+          baseHash: { type: "string" },
         },
       },
     },
@@ -245,8 +271,9 @@ async function registerApi(ctx: AppContext): Promise<void> {
         label?: string | null;
         enabled?: boolean;
         repeatDays?: number[];
+        baseHash?: unknown;
       };
-      if (Object.keys(body).length === 0) {
+      if (body.time === undefined && body.label === undefined && body.enabled === undefined && body.repeatDays === undefined) {
         const view = await findAlarmView(db, request.params.id, user.id);
         if (!view) throw new AppError(404, "not_found", "alarm not found");
         return view;
@@ -261,24 +288,43 @@ async function registerApi(ctx: AppContext): Promise<void> {
       if (body.label !== undefined) set("label", body.label === null ? "" : body.label.trim());
       if (body.enabled !== undefined) set("enabled", body.enabled);
       if (body.repeatDays !== undefined) set("repeat_days", normalizeRepeatDays(body.repeatDays));
-      const updated = await db.query<AlarmRow>(
-        `UPDATE clock.alarms SET ${sets.join(", ")}, updated_at = now()
-         WHERE id = $1 AND user_id = $2 RETURNING *`,
-        params,
-      );
-      if (!updated.rows[0]) throw new AppError(404, "not_found", "alarm not found");
-      return toAlarmView(updated.rows[0]);
+      const presented = readPresentedHash((body as { baseHash?: unknown }).baseHash);
+      const updated = await db.withTransaction(async (tx) => {
+        await lockOwnedTables(tx, ["clock.alarms"]);
+        const current = await tx.query<{ snapshot: string }>(
+          "SELECT row_to_json(a)::text AS snapshot FROM clock.alarms a WHERE id = $1 AND user_id = $2 FOR UPDATE",
+          [request.params.id, user.id],
+        );
+        if (!current.rows[0]) throw new AppError(404, "not_found", "alarm not found");
+        assertPresentedHash(await syncWriteFenced(tx, user.id), presented, clockRowHash("clock.alarms", current.rows[0].snapshot));
+        const written = await tx.query<AlarmRow>(
+          `UPDATE clock.alarms SET ${sets.join(", ")}, updated_at = now()
+           WHERE id = $1 AND user_id = $2 RETURNING *`,
+          params,
+        );
+        return written.rows[0] ?? null;
+      });
+      if (!updated) throw new AppError(404, "not_found", "alarm not found");
+      const view = await findAlarmView(db, request.params.id, user.id);
+      if (!view) throw new AppError(404, "not_found", "alarm not found");
+      return view;
     },
   });
 
   ctx.api.delete<{ Params: { id: string } }>("/alarms/:id", async (request, reply) => {
     const user = await ctx.auth.requireUser(request);
     if (!isUuid(request.params.id)) throw new AppError(404, "not_found", "alarm not found");
-    const result = await db.query("DELETE FROM clock.alarms WHERE id = $1 AND user_id = $2", [
-      request.params.id,
-      user.id,
-    ]);
-    if (result.rowCount === 0) throw new AppError(404, "not_found", "alarm not found");
+    const presented = headerPresentedHash(request.headers["x-base-hash"]);
+    await db.withTransaction(async (tx) => {
+      await lockOwnedTables(tx, ["clock.alarms"]);
+      const current = await tx.query<{ snapshot: string }>(
+        "SELECT row_to_json(a)::text AS snapshot FROM clock.alarms a WHERE id = $1 AND user_id = $2 FOR UPDATE",
+        [request.params.id, user.id],
+      );
+      if (!current.rows[0]) throw new AppError(404, "not_found", "alarm not found");
+      assertPresentedHash(await syncWriteFenced(tx, user.id), presented, clockRowHash("clock.alarms", current.rows[0].snapshot));
+      await tx.query("DELETE FROM clock.alarms WHERE id = $1 AND user_id = $2", [request.params.id, user.id]);
+    });
     return reply.code(204).send();
   });
 
@@ -287,11 +333,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
   ctx.api.get("/world-clocks", async (request) => {
     const user = await ctx.auth.requireUser(request);
-    const { rows } = await db.query<WorldClockRow>(
-      "SELECT * FROM clock.world_clocks WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC",
-      [user.id],
-    );
-    return { items: rows.map(toWorldClockView) };
+    return worldClockList(db, user.id);
   });
 
   ctx.api.post("/world-clocks", {
@@ -319,12 +361,16 @@ async function registerApi(ctx: AppContext): Promise<void> {
       // sort_order is "append at the end", computed atomically in one statement.
       // The MAX is scoped per user (AUTH-3): each user's list is numbered 1..n
       // independently of other users' entries.
-      await db.query(
-        `INSERT INTO clock.world_clocks (id, user_id, city, timezone, sort_order)
-         SELECT $1, $2, $3, $4, COALESCE(MAX(sort_order), 0) + 1
-         FROM clock.world_clocks WHERE user_id = $2`,
-        [newId, user.id, city, timezone],
-      );
+      await db.withTransaction(async (tx) => {
+        await lockOwnedTables(tx, ["clock.world_clocks"]);
+        await lockOwnerSet(tx, user.id, "clock.world_clocks");
+        await tx.query(
+          `INSERT INTO clock.world_clocks (id, user_id, city, timezone, sort_order)
+           SELECT $1, $2, $3, $4, COALESCE(MAX(sort_order), 0) + 1
+           FROM clock.world_clocks WHERE user_id = $2`,
+          [newId, user.id, city, timezone],
+        );
+      });
       return reply.code(201).send(await findWorldClockView(db, newId, user.id));
     },
   });
@@ -337,13 +383,15 @@ async function registerApi(ctx: AppContext): Promise<void> {
         properties: {
           city: { type: "string", minLength: 1, maxLength: 60 },
           timezone: { type: "string", minLength: 1, maxLength: 64 },
+          baseHash: { type: "string" },
         },
       },
     },
     async handler(request) {
       const user = await ctx.auth.requireUser(request);
       if (!isUuid(request.params.id)) throw new AppError(404, "not_found", "world clock not found");
-      const body = request.body as { city?: string; timezone?: string };
+      const body = request.body as { city?: string; timezone?: string; baseHash?: unknown };
+      const presented = readPresentedHash(body.baseHash);
       const city = body.city?.trim();
       const timezone = body.timezone?.trim();
       if (city !== undefined && city.length === 0) throw invalidCityError();
@@ -359,13 +407,21 @@ async function registerApi(ctx: AppContext): Promise<void> {
         sets.push(`timezone = $${params.length}`);
       }
       if (sets.length > 0) {
-        const updated = await db.query<WorldClockRow>(
-          `UPDATE clock.world_clocks SET ${sets.join(", ")}, updated_at = now()
-           WHERE id = $1 AND user_id = $2 RETURNING *`,
-          params,
-        );
-        if (!updated.rows[0]) throw new AppError(404, "not_found", "world clock not found");
-        return toWorldClockView(updated.rows[0]);
+        await db.withTransaction(async (tx) => {
+          await lockOwnedTables(tx, ["clock.world_clocks"]);
+          const current = await tx.query<{ snapshot: string }>(
+            "SELECT row_to_json(w)::text AS snapshot FROM clock.world_clocks w WHERE id = $1 AND user_id = $2 FOR UPDATE",
+            [request.params.id, user.id],
+          );
+          if (!current.rows[0]) throw new AppError(404, "not_found", "world clock not found");
+          assertPresentedHash(await syncWriteFenced(tx, user.id), presented, clockRowHash("clock.world_clocks", current.rows[0].snapshot));
+          const updated = await tx.query(
+            `UPDATE clock.world_clocks SET ${sets.join(", ")}, updated_at = now() WHERE id = $1 AND user_id = $2`,
+            params,
+          );
+          if (updated.rowCount === 0) throw new AppError(404, "not_found", "world clock not found");
+        });
+        return findWorldClockView(db, request.params.id, user.id);
       }
       const view = await findWorldClockView(db, request.params.id, user.id);
       if (!view) throw new AppError(404, "not_found", "world clock not found");
@@ -376,11 +432,18 @@ async function registerApi(ctx: AppContext): Promise<void> {
   ctx.api.delete<{ Params: { id: string } }>("/world-clocks/:id", async (request, reply) => {
     const user = await ctx.auth.requireUser(request);
     if (!isUuid(request.params.id)) throw new AppError(404, "not_found", "world clock not found");
-    const result = await db.query(
-      "DELETE FROM clock.world_clocks WHERE id = $1 AND user_id = $2",
-      [request.params.id, user.id],
-    );
-    if (result.rowCount === 0) throw new AppError(404, "not_found", "world clock not found");
+    const presented = headerPresentedHash(request.headers["x-base-hash"]);
+    await db.withTransaction(async (tx) => {
+      await lockOwnedTables(tx, ["clock.world_clocks"]);
+      await lockOwnerSet(tx, user.id, "clock.world_clocks");
+      const current = await tx.query<{ snapshot: string }>(
+        "SELECT row_to_json(w)::text AS snapshot FROM clock.world_clocks w WHERE id = $1 AND user_id = $2 FOR UPDATE",
+        [request.params.id, user.id],
+      );
+      if (!current.rows[0]) throw new AppError(404, "not_found", "world clock not found");
+      assertPresentedHash(await syncWriteFenced(tx, user.id), presented, clockRowHash("clock.world_clocks", current.rows[0].snapshot));
+      await tx.query("DELETE FROM clock.world_clocks WHERE id = $1 AND user_id = $2", [request.params.id, user.id]);
+    });
     return reply.code(204).send();
   });
 
@@ -393,13 +456,16 @@ async function registerApi(ctx: AppContext): Promise<void> {
         required: ["ids"],
         additionalProperties: false,
         properties: {
-          ids: { type: "array", minItems: 1, items: { type: "string", maxLength: 64 } },
+          ids: { type: "array", items: { type: "string", maxLength: 64 } },
+          baseHash: { type: "string" },
         },
       },
     },
     async handler(request) {
       const user = await ctx.auth.requireUser(request);
-      const ids = (request.body as { ids: string[] }).ids;
+      const body = request.body as { ids: string[]; baseHash?: unknown };
+      const ids = body.ids;
+      const presented = readPresentedHash(body.baseHash);
       const invalid = ids.filter((value) => !isUuid(value));
       if (invalid.length > 0) {
         throw new AppError(400, "validation_error", `ids must be uuids (got "${invalid[0]}")`, {
@@ -410,17 +476,24 @@ async function registerApi(ctx: AppContext): Promise<void> {
         throw new AppError(422, "invalid_order", "ids must not contain duplicates", { ids });
       }
       // Only the calling user's entries may be (re)ordered (AUTH-3).
-      const existing = await db.query<{ id: string }>(
-        "SELECT id FROM clock.world_clocks WHERE user_id = $1",
-        [user.id],
-      );
-      const existingIds = new Set(existing.rows.map((row) => row.id));
-      if (ids.length !== existingIds.size || ids.some((value) => !existingIds.has(value))) {
-        throw new AppError(422, "invalid_order", "ids must list every world clock exactly once", {
-          known: [...existingIds],
-        });
-      }
       await db.withTransaction(async (tx) => {
+        await lockOwnedTables(tx, ["clock.world_clocks"]);
+        await lockOwnerSet(tx, user.id, "clock.world_clocks");
+        const existing = await tx.query<{ id: string; snapshot: string }>(
+          "SELECT id, row_to_json(w)::text AS snapshot FROM clock.world_clocks w WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC FOR UPDATE",
+          [user.id],
+        );
+        const existingIds = new Set(existing.rows.map((row) => row.id));
+        if (ids.length !== existingIds.size || ids.some((value) => !existingIds.has(value))) {
+          throw new AppError(422, "invalid_order", "ids must list every world clock exactly once", {
+            known: [...existingIds],
+          });
+        }
+        const parts = existing.rows.map((row) => ({ table: "clock.world_clocks", row: parseSnapshotRow(row.snapshot) }));
+        const actual = parts.length === 0
+          ? singletonBaseHash("clock.world_clocks", { id: "absent", sort_order: 0 })
+          : editorBaseHash(parts);
+        assertPresentedHash(await syncWriteFenced(tx, user.id), presented, actual);
         for (let index = 0; index < ids.length; index += 1) {
           await tx.query(
             "UPDATE clock.world_clocks SET sort_order = $2, updated_at = now() WHERE id = $1 AND user_id = $3",
@@ -428,13 +501,21 @@ async function registerApi(ctx: AppContext): Promise<void> {
           );
         }
       });
-      const { rows } = await db.query<WorldClockRow>(
-        "SELECT * FROM clock.world_clocks WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC",
-        [user.id],
-      );
-      return { items: rows.map(toWorldClockView) };
+      return worldClockList(db, user.id);
     },
   });
+}
+
+async function worldClockList(db: Db, userId: string): Promise<{ items: Array<WorldClockView & { baseHash: string }>; orderHash: string }> {
+  const { rows } = await db.query<WorldClockRow & { snapshot: string }>(
+    "SELECT w.*, row_to_json(w)::text AS snapshot FROM clock.world_clocks w WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC",
+    [userId],
+  );
+  const parts = rows.map((row) => ({ table: "clock.world_clocks", row: parseSnapshotRow(row.snapshot) }));
+  return {
+    items: rows.map((row) => ({ ...toWorldClockView(row), baseHash: clockRowHash("clock.world_clocks", row.snapshot) })),
+    orderHash: parts.length === 0 ? singletonBaseHash("clock.world_clocks", { id: "absent", sort_order: 0 }) : editorBaseHash(parts),
+  };
 }
 
 async function healthcheck(ctx: AppContext): Promise<AppHealth> {

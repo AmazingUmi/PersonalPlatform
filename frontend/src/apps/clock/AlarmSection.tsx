@@ -3,6 +3,7 @@ import { useI18n } from "../../shared/i18n";
 import { useEffect, useId, useRef, useState } from "react";
 import { api } from "../../shared/api";
 import { useAsync } from "../../shared/useAsync";
+import { SyncPendingNotice, armPendingIfSyncConflict, useCoherentDraft, useSyncModelRefresh } from "../../shared/sync-guard-client";
 import { useMutation } from "../../shared/useMutation";
 import { ConfirmDialog } from "../../shared/ui/ConfirmDialog";
 import { EmptyState } from "../../shared/ui/EmptyState";
@@ -30,6 +31,7 @@ export interface AlarmView {
   repeatDays: number[];
   createdAt: string;
   updatedAt: string;
+  baseHash?: string;
 }
 
 const ALARMS_URL = "/api/apps/clock/alarms";
@@ -51,8 +53,15 @@ interface RingingAlarm {
  */
 export function AlarmSection() {
   const { t, language } = useI18n();
-  const alarms = useAsync(() => api<{ items: AlarmView[] }>(ALARMS_URL));
   const [editorFor, setEditorFor] = useState<AlarmView | null | undefined>(undefined);
+  const [editorDirty, setEditorDirty] = useState(false);
+  const alarms = useAsync(() => api<{ items: AlarmView[] }>(ALARMS_URL), [], { retainOnReload: true });
+  const sync = useSyncModelRefresh(editorDirty, () => { void alarms.reload(); });
+  useEffect(() => {
+    if (!alarms.data || editorFor == null) return;
+    const fresh = alarms.data.items.find((item) => item.id === editorFor.id);
+    if (fresh && fresh !== editorFor) setEditorFor(fresh);
+  }, [alarms.data, editorFor]);
   const [deleting, setDeleting] = useState<AlarmView | null>(null);
   const [ringing, setRinging] = useState<RingingAlarm[]>([]);
   const firedKeys = useRef<Set<string>>(new Set());
@@ -70,7 +79,10 @@ export function AlarmSection() {
 
   const remove = useMutation(async () => {
     if (!deleting) return;
-    await api(`${ALARMS_URL}/${deleting.id}`, { method: "DELETE" });
+    await api(`${ALARMS_URL}/${deleting.id}`, {
+      method: "DELETE",
+      headers: deleting.baseHash ? { "x-base-hash": deleting.baseHash } : undefined,
+    });
   });
 
   const items = alarms.data?.items ?? [];
@@ -107,7 +119,7 @@ export function AlarmSection() {
         void api(`${ALARMS_URL}/${alarm.id}`, {
           method: "PATCH",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ enabled: false }),
+          body: JSON.stringify({ enabled: false, ...(alarm.baseHash ? { baseHash: alarm.baseHash } : {}) }),
         })
           .then(alarms.reload)
           .catch(() => undefined);
@@ -120,7 +132,7 @@ export function AlarmSection() {
       await api(`${ALARMS_URL}/${alarm.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ enabled: !alarm.enabled }),
+        body: JSON.stringify({ enabled: !alarm.enabled, ...(alarm.baseHash ? { baseHash: alarm.baseHash } : {}) }),
       });
     } finally {
       alarms.reload();
@@ -131,6 +143,7 @@ export function AlarmSection() {
 
   return (
     <div className="clock-alarms">
+      <SyncPendingNotice pending={sync.pending} onReload={sync.reload} />
       {ringing.length > 0 ? (
         <div className="clock-alarms__ringing" role="alert">
           {ringing.map(({ key, alarm }) => (
@@ -225,11 +238,21 @@ export function AlarmSection() {
 
       {editorFor !== undefined ? (
         <AlarmEditor
+          key={editorFor === null ? "new" : editorFor.id}
           alarm={editorFor}
-          onClose={() => setEditorFor(undefined)}
-          onSaved={() => {
+          pending={sync.pending}
+          onDirtyChange={setEditorDirty}
+          onReload={() => alarms.reload()}
+          onDismiss={sync.dismiss}
+          onSyncConflict={sync.markPending}
+          onClose={() => {
+            setEditorDirty(false);
             setEditorFor(undefined);
-            alarms.reload();
+          }}
+          onSaved={() => {
+            setEditorDirty(false);
+            setEditorFor(undefined);
+            void alarms.reload();
           }}
         />
       ) : null}
@@ -267,31 +290,62 @@ export function computeNextAlarm(items: AlarmView[], now: Date, language = "en")
 
 interface AlarmEditorProps {
   alarm: AlarmView | null;
+  pending: boolean;
+  onDirtyChange: (dirty: boolean) => void;
+  onReload: () => Promise<boolean>;
+  onDismiss: () => void;
+  onSyncConflict?: () => void;
   onClose: () => void;
   onSaved: () => void;
 }
 
-function AlarmEditor({ alarm, onClose, onSaved }: AlarmEditorProps) {
+function AlarmEditor({ alarm, pending, onDirtyChange, onReload, onDismiss, onSyncConflict, onClose, onSaved }: AlarmEditorProps) {
   const { t, language } = useI18n();
   const repeatLabelId = useId();
+  const baseHash = useRef(alarm?.baseHash);
+  const [dirty, setDirty] = useState(false);
+  const dirtyRef = useRef(false);
   const [time, setTime] = useState(alarm?.time ?? "07:30");
   const [label, setLabel] = useState(alarm?.label ?? "");
   const [repeatDays, setRepeatDays] = useState<number[]>(alarm?.repeatDays ?? [1, 2, 3, 4, 5]);
+  dirtyRef.current = dirty;
+  const signature = alarm ? `${alarm.id}\0${alarm.baseHash ?? ""}` : null;
+  const draft = useCoherentDraft(alarm, signature, dirty, (incoming) => {
+    baseHash.current = incoming.baseHash;
+    setTime(incoming.time);
+    setLabel(incoming.label ?? "");
+    setRepeatDays(incoming.repeatDays);
+    setDirty(false);
+  }, onDismiss);
+  useEffect(() => {
+    onDirtyChange(dirty);
+  }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
+  const markDirty = () => {
+    draft.cancelAdopt();
+    dirtyRef.current = true;
+    setDirty(true);
+  };
   const save = useMutation(async () => {
     if (!parseAlarmTime(time)) return; // guarded below; keeps mutation types simple
     // POST takes a non-nullable label, so an empty label is simply omitted
     // ("" is the column default); PATCH keeps null = "clear to ''".
     const trimmed = label.trim();
-    const payload: Record<string, unknown> = { time, repeatDays };
+    const payload: Record<string, unknown> = { time, repeatDays, ...(baseHash.current ? { baseHash: baseHash.current } : {}) };
     if (alarm) payload.label = trimmed || null;
     else if (trimmed) payload.label = trimmed;
     const body = JSON.stringify(payload);
     if (alarm) {
-      await api(`${ALARMS_URL}/${alarm.id}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body,
-      });
+      try {
+        await api(`${ALARMS_URL}/${alarm.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body,
+        });
+      } catch (error) {
+        armPendingIfSyncConflict(error, () => onSyncConflict?.());
+        throw error;
+      }
     } else {
       await api(ALARMS_URL, {
         method: "POST",
@@ -302,6 +356,7 @@ function AlarmEditor({ alarm, onClose, onSaved }: AlarmEditorProps) {
   });
 
   const toggleDay = (day: number) => {
+    markDirty();
     setRepeatDays((current) =>
       current.includes(day) ? current.filter((value) => value !== day) : [...current, day].sort((a, b) => a - b),
     );
@@ -312,6 +367,16 @@ function AlarmEditor({ alarm, onClose, onSaved }: AlarmEditorProps) {
   return (
     <div className="px-dialog-backdrop" role="presentation">
       <PixelWindow title={alarm ? t("Edit Alarm", "编辑闹钟") : t("New Alarm", "新闹钟")} icon="clock" className="px-dialog px-dialog--form">
+        <SyncPendingNotice
+          pending={pending || draft.stale}
+          discard={dirty}
+          onReload={() => {
+            draft.requestAdopt();
+            void onReload().then((ok) => {
+              if (ok === false) draft.cancelAdopt();
+            });
+          }}
+        />
         <form
           className="px-form"
           data-testid="alarm-editor"
@@ -326,7 +391,7 @@ function AlarmEditor({ alarm, onClose, onSaved }: AlarmEditorProps) {
               <PixelInput
                 type="time"
                 value={time}
-                onChange={(event) => setTime(event.target.value)}
+                onChange={(event) => { markDirty(); setTime(event.target.value); }}
                 aria-label={t("Alarm time", "闹钟时间")}
                 required
               />
@@ -337,7 +402,7 @@ function AlarmEditor({ alarm, onClose, onSaved }: AlarmEditorProps) {
                 type="text"
                 value={label}
                 maxLength={100}
-                onChange={(event) => setLabel(event.target.value)}
+                onChange={(event) => { markDirty(); setLabel(event.target.value); }}
                 placeholder={t("Morning", "早晨")}
                 aria-label={t("Alarm label", "闹钟名称")}
               />

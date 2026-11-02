@@ -79,6 +79,7 @@ interface FocusState {
     shortBreakDurationSeconds: number;
     longBreakDurationSeconds: number;
     longBreakInterval: number;
+    baseHash: string;
   };
 }
 
@@ -129,6 +130,15 @@ const DEFAULT_SETTINGS = {
   longBreakDurationSeconds: 900,
   longBreakInterval: 4,
 };
+const SYNC_HASH = /^[0-9a-f]{64}$/;
+
+type FocusSettings = typeof DEFAULT_SETTINGS & { baseHash: string };
+
+function assertFocusSettings(body: FocusSettings, expected: typeof DEFAULT_SETTINGS): void {
+  const { baseHash, ...domain } = body;
+  assert.deepEqual(domain, expected);
+  assert.match(baseHash, SYNC_HASH);
+}
 
 // ---------------------------------------------------------------------------
 // fixture lifecycle
@@ -284,7 +294,7 @@ describe("state machine transitions (APP-1 §24.1-7)", () => {
     assert.equal(state.active, null);
     assert.deepEqual(state.today, { focusedSeconds: 0, completedRounds: 0, sessionsEnded: 0 });
     assert.equal(state.nextKind, "focus");
-    assert.deepEqual(state.settings, DEFAULT_SETTINGS);
+    assertFocusSettings(state.settings, DEFAULT_SETTINGS);
   });
 
   it("idle -> start: 201 with running session, planned from settings, exact expectedEndAt, revision 1", async () => {
@@ -841,9 +851,9 @@ describe("settings (APP-1 §24.22)", () => {
   });
 
   it("GET returns the defaults 1500/300/900/4", async () => {
-    const { status, body } = await getBody<FocusState["settings"]>("/settings");
+    const { status, body } = await getBody<FocusSettings>("/settings");
     assert.equal(status, 200);
-    assert.deepEqual(body, DEFAULT_SETTINGS);
+    assertFocusSettings(body, DEFAULT_SETTINGS);
   });
 
   it("PUT round-trips valid settings; start uses the new default and an explicit planned overrides it", async () => {
@@ -855,8 +865,14 @@ describe("settings (APP-1 §24.22)", () => {
     };
     const put = await api("PUT", "/settings", next);
     assert.equal(put.statusCode, 200);
-    assert.deepEqual(put.json(), next);
-    assert.deepEqual((await getBody<FocusState["settings"]>("/settings")).body, next);
+    const saved = put.json() as FocusSettings;
+    assertFocusSettings(saved, next);
+    const read = await getBody<FocusSettings>("/settings");
+    assertFocusSettings(read.body, next);
+    assert.equal(read.body.baseHash, saved.baseHash);
+    const state = await getState();
+    assertFocusSettings(state.settings, next);
+    assert.equal(state.settings.baseHash, saved.baseHash);
 
     const defaultStart = (await postBody<TransitionBody>("/start", { kind: "focus" })).body.state.active!;
     assert.equal(defaultStart.plannedDurationSeconds, 1800, "start picks up the stored default");
@@ -869,6 +885,8 @@ describe("settings (APP-1 §24.22)", () => {
   });
 
   it("rejects out-of-range settings with 400 validation_error", async () => {
+    const before = await getBody<FocusSettings>("/settings");
+    assertFocusSettings(before.body, DEFAULT_SETTINGS);
     const base = { ...DEFAULT_SETTINGS };
     const cases = [
       { ...base, focusDurationSeconds: 0 },
@@ -881,7 +899,9 @@ describe("settings (APP-1 §24.22)", () => {
       assert.equal(response.json().error.code, "validation_error");
     }
     // Nothing was persisted along the way.
-    assert.deepEqual((await getBody<FocusState["settings"]>("/settings")).body, DEFAULT_SETTINGS);
+    const after = await getBody<FocusSettings>("/settings");
+    assertFocusSettings(after.body, DEFAULT_SETTINGS);
+    assert.equal(after.body.baseHash, before.body.baseHash);
   });
 });
 
@@ -1052,6 +1072,6 @@ describe("409 details.state self-heal snapshot (APP-1 §24.24)", () => {
     assert.equal(state.active!.status, "running");
     assert.deepEqual(state.today, { focusedSeconds: 0, completedRounds: 0, sessionsEnded: 0 });
     assert.equal(state.nextKind, "focus");
-    assert.deepEqual(state.settings, DEFAULT_SETTINGS);
+    assertFocusSettings(state.settings, DEFAULT_SETTINGS);
   });
 });

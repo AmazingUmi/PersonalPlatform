@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
 import { after, before, describe, it } from "node:test";
 import { Database } from "../../src/core/database/index.js";
 import clockApp from "../../src/apps/clock/index.js";
@@ -24,12 +25,19 @@ const clockMigrations = [
 ];
 
 const FIXED_NOW = new Date("2026-08-31T11:26:00.000Z");
+const SYNC_HASH = /^[0-9a-f]{64}$/;
+
+function domainWithoutHash<T extends { baseHash: string }>(value: T): Omit<T, "baseHash"> {
+  const { baseHash: _baseHash, ...domain } = value;
+  return domain;
+}
 
 interface ClockSettings {
   displayMode: "digital" | "analog";
   showSeconds: boolean;
   showDate: boolean;
   hourFormat: 12 | 24;
+  baseHash: string;
 }
 
 interface AlarmView {
@@ -40,6 +48,7 @@ interface AlarmView {
   repeatDays: number[];
   createdAt: string;
   updatedAt: string;
+  baseHash: string;
 }
 
 interface WorldClockView {
@@ -129,12 +138,13 @@ describe("clock settings (focus GET/PUT pattern)", () => {
   it("returns defaults before anything is stored", async () => {
     const response = await json<ClockSettings>("GET", "/api/apps/clock/settings");
     assert.equal(response.status, 200);
-    assert.deepEqual(response.body, {
+    assert.deepEqual(domainWithoutHash(response.body), {
       displayMode: "digital",
       showSeconds: true,
       showDate: true,
       hourFormat: 24,
     });
+    assert.match(response.body.baseHash, SYNC_HASH);
     assertNoSnakeCaseKeys(response.body);
   });
 
@@ -146,14 +156,16 @@ describe("clock settings (focus GET/PUT pattern)", () => {
       hourFormat: 12,
     });
     assert.equal(put.status, 200);
-    assert.deepEqual(put.body, {
+    assert.deepEqual(domainWithoutHash(put.body), {
       displayMode: "analog",
       showSeconds: false,
       showDate: false,
       hourFormat: 12,
     });
+    assert.match(put.body.baseHash, SYNC_HASH);
     const get = await json<ClockSettings>("GET", "/api/apps/clock/settings");
-    assert.deepEqual(get.body, put.body, "card and page read the same row");
+    assert.deepEqual(domainWithoutHash(get.body), domainWithoutHash(put.body), "card and page read the same row");
+    assert.equal(get.body.baseHash, put.body.baseHash);
   });
 
   it("rejects partial or illegal payloads", async () => {
@@ -185,9 +197,10 @@ describe("alarm CRUD and repeat days", () => {
   it("creates a weekday alarm and a minimal one-shot, returning camelCase views", async () => {
     const weekday = await createAlarm({ time: "07:30", label: "Morning", repeatDays: [1, 2, 3, 4, 5] });
     assert.deepEqual(
-      Object.keys(weekday).sort(),
+      Object.keys(weekday).filter((key) => key !== "baseHash").sort(),
       ["createdAt", "enabled", "id", "label", "repeatDays", "time", "updatedAt"],
     );
+    assert.match(weekday.baseHash, SYNC_HASH);
     assert.equal(weekday.label, "Morning");
     assert.equal(weekday.enabled, true);
     assert.deepEqual(weekday.repeatDays, [1, 2, 3, 4, 5]);
@@ -272,7 +285,13 @@ describe("alarm CRUD and repeat days", () => {
 
     const untouched = await json<AlarmView>("PATCH", `/api/apps/clock/alarms/${alarm.id}`, {});
     assert.equal(untouched.status, 200);
-    assert.deepEqual(untouched.body, toggled.body, "empty PATCH is a no-op that returns the current view");
+    assert.deepEqual(
+      domainWithoutHash(untouched.body),
+      domainWithoutHash(toggled.body),
+      "empty PATCH is a no-op that returns the current view",
+    );
+    assert.equal(untouched.body.baseHash, toggled.body.baseHash);
+    assert.match(untouched.body.baseHash, SYNC_HASH);
   });
 
   it("404s for unknown and malformed ids instead of 500", async () => {
@@ -398,6 +417,52 @@ describe("world clock CRUD, IANA validation and ordering", () => {
       ids: ["nope"],
     });
     assert.equal(notUuid.status, 400);
+  });
+
+  it("reorders an empty collection with the orderHash GET publishes", async () => {
+    const before = await json<{ items: WorldClockView[] }>("GET", "/api/apps/clock/world-clocks");
+    for (const entry of before.body.items) {
+      const removed = await json("DELETE", `/api/apps/clock/world-clocks/${entry.id}`);
+      assert.equal(removed.status, 204);
+    }
+    const user = await db.context().query<{ id: string }>("SELECT id FROM core.users WHERE username = 'admin'");
+    const userId = user.rows[0]!.id;
+    const link = async (phase: "linked" | "unlinked") => {
+      await db.context().query("DELETE FROM core.sync_bindings WHERE user_id = $1", [userId]);
+      if (phase === "unlinked") return;
+      await db.context().query(
+        `INSERT INTO core.sync_bindings (user_id, identity_id, replica_id, destination_endpoint, destination_username, pairing_verifier, phase)
+         VALUES ($1, $2, $3, 'https://example.invalid', 'fence', 'verifier', $4)`,
+        [userId, randomUUID(), randomUUID(), phase],
+      );
+    };
+    try {
+      const empty = await json<{ items: WorldClockView[]; orderHash: string }>("GET", "/api/apps/clock/world-clocks");
+      assert.deepEqual(empty.body.items, []);
+      const unlinked = await json<{ items: WorldClockView[]; orderHash: string }>("PUT", "/api/apps/clock/world-clocks/order", {
+        ids: [],
+      });
+      assert.equal(unlinked.status, 200);
+      assert.deepEqual(unlinked.body.items, []);
+      assert.equal(unlinked.body.orderHash, empty.body.orderHash);
+
+      await link("linked");
+      const missing = await json<ErrorBody>("PUT", "/api/apps/clock/world-clocks/order", { ids: [] });
+      assert.equal(missing.status, 409);
+      assert.equal(missing.body.error.code, "sync_base_required");
+      const linked = await json<{ items: WorldClockView[]; orderHash: string }>("PUT", "/api/apps/clock/world-clocks/order", {
+        ids: [],
+        baseHash: empty.body.orderHash,
+      });
+      assert.equal(linked.status, 200);
+      assert.deepEqual(linked.body.items, []);
+      assert.equal(linked.body.orderHash, empty.body.orderHash);
+    } finally {
+      await link("unlinked");
+      for (const entry of before.body.items) {
+        await createWorldClock({ city: entry.city, timezone: entry.timezone });
+      }
+    }
   });
 
   it("deletes and keeps the remaining order stable", async () => {

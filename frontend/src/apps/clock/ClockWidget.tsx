@@ -8,6 +8,7 @@ import { DigitalClock, focusElapsedClock, type ClockFocusState } from "./Digital
 import { dateLine, humanDuration, timeParts, weekdayLabel } from "./timeMath";
 import { useClockNow } from "./useClockNow";
 import { useClockSettings, type ClockSettings } from "./useClockSettings";
+import { SyncPendingNotice } from "../../shared/sync-guard-client";
 import { fetchTasksPublicStatus, type TasksPublicStatus } from "./tasksPublic";
 
 /** Shared face rendering for the card and the page (same settings row).
@@ -150,7 +151,7 @@ function HeroAgenda({
  */
 export function ClockWidget({ density = "normal" }: { density?: WidgetDensity }) {
   const { t } = useI18n();
-  const { settings, loading, error, reload, save } = useClockSettings();
+  const { settings, loading, error, reload, save, syncPending, acceptServerSync } = useClockSettings();
   const minuteNow = useClockNow(false);
   const { status, focus } = useTasksStatus(minuteNow.getMinutes());
   const faceNow = useClockNow(settings.showSeconds || focus !== null);
@@ -180,6 +181,7 @@ export function ClockWidget({ density = "normal" }: { density?: WidgetDensity })
 
   return (
     <div className="clock-card clock-hero" data-density={density}>
+      <SyncPendingNotice pending={syncPending} onReload={acceptServerSync} />
       {!compact ? <HeroDateBar now={minuteNow} /> : null}
       <div className="clock-hero__main">
         <ClockFace now={faceNow} settings={settings} variant="card" focus={focus} density={density} />

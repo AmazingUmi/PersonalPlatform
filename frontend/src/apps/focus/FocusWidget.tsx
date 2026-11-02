@@ -6,6 +6,7 @@ import { PixelButton } from "../../shared/ui/PixelButton";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { formatDuration, kindLabel, type FocusSettings, type SessionKind } from "./api";
 import { useFocusState } from "./useFocusState";
+import { SyncPendingNotice } from "../../shared/sync-guard-client";
 
 /** Compact human label for the daily summary: "1h 30m" / "30m" / "45s". */
 function secondsToHumanLabel(totalSeconds: number, language = "en"): string {
@@ -52,7 +53,7 @@ function defaultSecondsFor(kind: SessionKind, settings: FocusSettings): number {
  */
 export function FocusWidget() {
   const { t, language } = useI18n();
-  const { state, loading, error, busy, remainingSeconds, dispatch, completion, dismissCompletion, alerts } = useFocusState();
+  const { state, loading, error, busy, remainingSeconds, dispatch, completion, dismissCompletion, alerts, syncPending, acceptServerSync } = useFocusState();
   const [alertsOpen, setAlertsOpen] = useState(false);
   const alertsId = useId();
   if (loading) return <LoadingState label={t("Loading…", "加载中…")} />;
@@ -81,6 +82,7 @@ export function FocusWidget() {
 
   return (
     <div className="focus-widget" data-state={stateKey} data-kind={kind}>
+      <SyncPendingNotice pending={syncPending} onReload={acceptServerSync} />
       <FocusCompletion completion={completion} onDismiss={dismissCompletion} alerts={alerts} compact />
       <div className="focus-widget__state">
         {stateLabel} · {kindLabel(kind, language)}

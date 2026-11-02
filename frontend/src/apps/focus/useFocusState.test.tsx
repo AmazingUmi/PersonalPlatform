@@ -1,5 +1,9 @@
 import { I18nProvider, useI18n } from "../../shared/i18n";
-vi.mock("../../shell/AuthContext", () => ({ useAuth: () => ({ user: { id: "focus-test-user" } }) }));
+vi.mock("../../shell/AuthContext", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../shell/AuthContext")>();
+  const value = { user: { id: "focus-test-user" } };
+  return { ...actual, useAuth: () => value, useOptionalAuth: () => value };
+});
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useFocusState } from "./useFocusState";

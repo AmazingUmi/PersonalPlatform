@@ -31,6 +31,8 @@ npm run test:docker:config   # 开发/生产 Compose 配置回归，不需 daemo
 npm run verify:docker        # 隔离项目内构建生产镜像、启动并验证持久化
 ```
 
+逻辑 JSON 备份、WebDAV 增量/完整备份与浏览器内持续同步的区别见 [`DATA_MANAGEMENT.md`](DATA_MANAGEMENT.md)。持续同步只在已登录且平台页面保持打开时由浏览器发起；备份调度不代跑同步。
+
 ## 数据库
 
 - 开发库连接串由 `DATABASE_URL` 提供（`.env` / 环境变量，不提交）。

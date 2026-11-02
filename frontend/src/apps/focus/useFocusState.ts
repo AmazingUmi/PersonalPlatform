@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "../../shell/AuthContext";
 import { useFocusAlerts } from "./useFocusAlerts";
 import { ApiError } from "../../shared/api";
+import { useSyncModelRefresh } from "../../shared/sync-guard-client";
 import {
   fetchFocusState,
   fetchFocusSession,
@@ -59,6 +60,8 @@ export function useFocusState(): {
   completion: FocusHistoryItem | null;
   dismissCompletion: () => void;
   alerts: ReturnType<typeof useFocusAlerts>;
+  syncPending: boolean;
+  acceptServerSync: () => void;
 } {
   const { language } = useI18n();
   const { user } = useAuth();
@@ -82,6 +85,7 @@ export function useFocusState(): {
   const mutationGenerationRef = useRef(0);
   const busyRef = useRef(false);
   const stateRef = useRef<FocusState | null>(null);
+  stateRef.current = state;
   const anchorRef = useRef<{ serverNow: number; receivedAt: number } | null>(null);
   const channelRef = useRef<BroadcastChannel | null>(null);
 
@@ -132,7 +136,7 @@ export function useFocusState(): {
   }, [verifyPending]);
 
   const loadState = useCallback(async (mode: "foreground" | "background") => {
-    if (!mountedRef.current || busyRef.current || !userId || identityRef.current !== userId) return;
+    if (!mountedRef.current || busyRef.current || !userId || identityRef.current !== userId) return false;
     const epoch = mountEpochRef.current;
     const generation = mutationGenerationRef.current;
     const sequence = ++requestSequenceRef.current;
@@ -141,16 +145,18 @@ export function useFocusState(): {
     if (stateRef.current === null) setLoading(true);
     try {
       const next = await fetchFocusState();
-      if (!current()) return;
+      if (!current()) return false;
       applyState(next);
       setError(null);
+      return true;
     } catch (err) {
-      if (!current()) return;
+      if (!current()) return false;
       // A background failure is silent only when there is valid state to
       // keep displaying; it must not strand a superseded initial load.
       if (mode === "foreground" || stateRef.current === null) {
         setError(err);
       }
+      return false;
     } finally {
       if (current()) setLoading(false);
     }
@@ -266,10 +272,10 @@ export function useFocusState(): {
         action === "start"
           ? await startFocusSession({ kind: kind ?? "focus" })
           : action === "pause"
-            ? await pauseFocusSession()
+            ? await pauseFocusSession({ baseRevision: stateRef.current?.active?.revision, baseHash: stateRef.current?.active?.baseHash })
             : action === "resume"
-              ? await resumeFocusSession()
-              : await stopFocusSession();
+              ? await resumeFocusSession({ baseRevision: stateRef.current?.active?.revision, baseHash: stateRef.current?.active?.baseHash })
+              : await stopFocusSession({ baseRevision: stateRef.current?.active?.revision, baseHash: stateRef.current?.active?.baseHash });
       if (!current()) return;
       applyState(next);
       if (action === "start") setCompletion(null);
@@ -282,7 +288,10 @@ export function useFocusState(): {
       const healed = details !== null && typeof details === "object" && "state" in details
         ? (details as { state: unknown }).state
         : null;
-      if (isFocusStateLike(healed)) {
+      const code = err instanceof ApiError && err.code;
+      if (code === "sync_stale" || code === "sync_base_required") {
+        setError(err);
+      } else if (isFocusStateLike(healed)) {
         applyState(healed);
         setError(null);
       } else {
@@ -308,5 +317,22 @@ export function useFocusState(): {
     return Number.isFinite(active.remainingSeconds) ? Math.max(0, active.remainingSeconds) : 0;
   }, [active, displayNow]);
 
-  return { state, loading, error: error ? localizeError(error, language) : null, busy, displayNow, remainingSeconds, dispatch, reload, completion, dismissCompletion: () => setCompletion(null), alerts };
+  const sync = useSyncModelRefresh(Boolean(state?.active) || busy, () => {
+    void refetch();
+  }, userId);
+  return {
+    state,
+    loading,
+    error: error ? localizeError(error, language) : null,
+    busy,
+    displayNow,
+    remainingSeconds,
+    dispatch,
+    reload,
+    completion,
+    dismissCompletion: () => setCompletion(null),
+    alerts,
+    syncPending: sync.pending,
+    acceptServerSync: sync.reload,
+  };
 }

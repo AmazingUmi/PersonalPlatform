@@ -642,7 +642,10 @@ describe("mini_game app API", () => {
   it("starts with no save", async () => {
     const empty = await platform.app.inject({ method: "GET", url: "/api/apps/mini_game/saves", headers: { cookie } });
     assert.equal(empty.statusCode, 200);
-    assert.deepEqual(empty.json(), { save: null });
+    const body = empty.json() as { save: unknown; baseHash: string };
+    assert.equal(body.save, null);
+    assert.match(body.baseHash, /^[0-9a-f]{64}$/);
+    assert.deepEqual(Object.keys(body).sort(), ["baseHash", "save"]);
   });
 
   it("saves, loads and overwrites a board with monotonic revisions", async () => {

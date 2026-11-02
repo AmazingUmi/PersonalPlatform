@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../../shared/api";
 import { localizeError } from "../../shared/localizeError";
@@ -22,11 +22,13 @@ import type { PixelAccent } from "../../shared/ui/PixelWindow";
 import { PixelWindow } from "../../shared/ui/PixelWindow";
 import { StatusMessage } from "../../shared/ui/StatusMessage";
 import { useAsync } from "../../shared/useAsync";
+import { SyncPendingNotice, armPendingIfSyncConflict, useCoherentDraft, useSyncModelRefresh } from "../../shared/sync-guard-client";
 
 interface Category {
   id: string;
   name: string;
   color: string | null;
+  baseHash?: string;
 }
 
 interface Item {
@@ -40,6 +42,7 @@ interface Item {
   updatedAt: string;
   /** Categories ordered by name (server-side); empty = uncategorized. */
   categories: Category[];
+  baseHash?: string;
 }
 
 interface Attachment {
@@ -158,26 +161,57 @@ function ItemEditor({
   categories,
   onClose,
   onSaved,
+  onRefresh,
+  pending = false,
+  onDismiss,
+  onDirtyChange,
+  onSyncConflict,
 }: {
   item: Item | null;
   categories: Category[];
   onClose: () => void;
   onSaved: () => void;
+  onRefresh?: () => Promise<boolean> | boolean | void;
+  pending?: boolean;
+  onDismiss?: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
+  onSyncConflict?: () => void;
 }) {
   const { t } = useI18n();
+  const baseHash = useRef(item?.baseHash);
+  const [draftDirty, setDraftDirty] = useState(false);
+  const dirtyRef = useRef(false);
+  dirtyRef.current = draftDirty;
+  const signature = item ? `${item.id}\0${item.baseHash ?? ""}` : null;
+  const draft = useCoherentDraft(item, signature, draftDirty, (incoming) => {
+    baseHash.current = incoming.baseHash;
+    setForm(editorStateFromItem(incoming));
+    setDraftDirty(false);
+  }, onDismiss);
+  useEffect(() => {
+    onDirtyChange?.(draftDirty);
+  }, [draftDirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   const [form, setForm] = useState<ItemEditorState>(() =>
     item ? editorStateFromItem(item) : emptyEditorState(),
   );
-  const set = <K extends keyof ItemEditorState>(key: K, value: ItemEditorState[K]) =>
+  const set = <K extends keyof ItemEditorState>(key: K, value: ItemEditorState[K]) => {
+    draft.cancelAdopt();
+    dirtyRef.current = true;
+    setDraftDirty(true);
     setForm((current) => ({ ...current, [key]: value }));
+  };
 
-  const toggleCategory = (categoryId: string) =>
+  const toggleCategory = (categoryId: string) => {
+    draft.cancelAdopt();
+    setDraftDirty(true);
     setForm((current) => ({
       ...current,
       categoryIds: current.categoryIds.includes(categoryId)
         ? current.categoryIds.filter((id) => id !== categoryId)
         : [...current.categoryIds, categoryId],
     }));
+  };
 
   const save = useMutation(async () => {
     const body: Record<string, unknown> = {
@@ -193,12 +227,18 @@ function ItemEditor({
     if (!item || !sameIdSet(form.categoryIds, item.categories.map((category) => category.id))) {
       body.categoryIds = form.categoryIds;
     }
+    if (baseHash.current) body.baseHash = baseHash.current;
     if (item) {
-      await api(`/api/apps/assets/items/${item.id}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      try {
+        await api(`/api/apps/assets/items/${item.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      } catch (error) {
+        armPendingIfSyncConflict(error, () => onSyncConflict?.());
+        throw error;
+      }
     } else {
       await api("/api/apps/assets/items", {
         method: "POST",
@@ -222,6 +262,16 @@ function ItemEditor({
         className="px-dialog px-dialog--form"
         data-testid="item-editor"
       >
+        <SyncPendingNotice
+          pending={pending || draft.stale}
+          discard={draftDirty}
+          onReload={() => {
+            draft.requestAdopt();
+            void Promise.resolve(onRefresh?.()).then((ok) => {
+              if (ok === false) draft.cancelAdopt();
+            });
+          }}
+        />
         <form className="px-form" onSubmit={submit} aria-label={item ? t("Edit item", "编辑物品") : t("Create item", "创建物品")}>
           <label className="px-form__row">
             <span className="px-form__label">{t("Name", "名称")}</span>
@@ -393,8 +443,8 @@ function AssetsPage() {
   const { t, locale } = useI18n();
   const displayName = useAppDisplayName({ id: "assets", name: "Assets" });
   const [searchParams, setSearchParams] = useSearchParams();
-  const [reloadKey, setReloadKey] = useState(0);
   const [editorFor, setEditorFor] = useState<Item | null | undefined>(undefined);
+  const [editorDirty, setEditorDirty] = useState(false);
   const [categoryEdit, setCategoryEdit] = useState<Category | null>(null);
   const [categoryDelete, setCategoryDelete] = useState<Category | null>(null);
   // The "Manage category" button reveals that chip's inline tools; one at a time.
@@ -405,7 +455,11 @@ function AssetsPage() {
     () => countActiveFilters(new URLSearchParams(window.location.search), ASSETS_FILTER_KEYS) > 0,
   );
 
-  const refresh = () => setReloadKey((key) => key + 1);
+  const refresh = () => {
+    void items.reload();
+    void categories.reload();
+  };
+  const sync = useSyncModelRefresh(editorDirty || categoryEdit !== null, refresh);
   const setParam = (key: string, value: string) => {
     setSearchParams(
       (params) => {
@@ -446,9 +500,15 @@ function AssetsPage() {
 
   const items = useAsync(
     () => api<ItemsListResponse>(`/api/apps/assets/items${itemsQueryString(searchParams)}`),
-    [searchParams.toString(), reloadKey],
+    [searchParams.toString()],
+    { retainOnReload: true },
   );
-  const categories = useAsync(() => api<{ items: Category[] }>("/api/apps/assets/categories"), [reloadKey]);
+  const categories = useAsync(() => api<{ items: Category[] }>("/api/apps/assets/categories"), [], { retainOnReload: true });
+  useEffect(() => {
+    if (!items.data || editorFor == null) return;
+    const fresh = items.data.items.find((entry) => entry.id === editorFor.id);
+    if (fresh && fresh !== editorFor) setEditorFor(fresh);
+  }, [items.data, editorFor]);
 
   const newCategory = useMutation(async () => {
     const name = newCategoryName.trim();
@@ -463,7 +523,10 @@ function AssetsPage() {
 
   const deleteCategory = useMutation(async () => {
     if (!categoryDelete) return;
-    await api(`/api/apps/assets/categories/${categoryDelete.id}`, { method: "DELETE" });
+    await api(`/api/apps/assets/categories/${categoryDelete.id}`, {
+      method: "DELETE",
+      headers: categoryDelete.baseHash ? { "x-base-hash": categoryDelete.baseHash } : undefined,
+    });
   });
 
   const resetFilters = () => {
@@ -479,6 +542,7 @@ function AssetsPage() {
 
   return (
     <div className="page" data-app="assets">
+      <SyncPendingNotice pending={sync.pending} onReload={sync.reload} />
       <header className="page-header">
         <div className="px-inline-help">
           <h1 className="page-header__title">
@@ -771,10 +835,20 @@ function AssetsPage() {
 
       {editorFor !== undefined ? (
         <ItemEditor
+          key={editorFor === null ? "new" : editorFor.id}
           item={editorFor}
           categories={categories.data?.items ?? []}
-          onClose={() => setEditorFor(undefined)}
+          pending={sync.pending}
+          onDirtyChange={setEditorDirty}
+          onDismiss={sync.dismiss}
+          onSyncConflict={sync.markPending}
+          onClose={() => {
+            setEditorDirty(false);
+            setEditorFor(undefined);
+          }}
+          onRefresh={() => items.reload()}
           onSaved={() => {
+            setEditorDirty(false);
             setEditorFor(undefined);
             refresh();
           }}
@@ -827,30 +901,41 @@ function AssetDetailPage() {
   const { t, locale, language } = useI18n();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const [reloadKey, setReloadKey] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<unknown>(null);
   const [oversizedFile, setOversizedFile] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
+  const [editorDirty, setEditorDirty] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [attachmentDelete, setAttachmentDelete] = useState<Attachment | null>(null);
 
-  const item = useAsync(() => api<Item>(`/api/apps/assets/items/${id}`), [id, reloadKey]);
-  const categories = useAsync(() => api<{ items: Category[] }>("/api/apps/assets/categories"), [reloadKey]);
+  const item = useAsync(() => api<Item>(`/api/apps/assets/items/${id}`), [id], { retainOnReload: true });
+  const categories = useAsync(() => api<{ items: Category[] }>("/api/apps/assets/categories"), [], { retainOnReload: true });
   const attachments = useAsync(
     () => api<{ items: Attachment[] }>(`/api/apps/assets/items/${id}/attachments`),
-    [id, reloadKey],
+    [id],
+    { retainOnReload: true },
   );
-
-  const refresh = useCallback(() => setReloadKey((key) => key + 1), []);
+  const refresh = useCallback(() => {
+    void item.reload();
+    void categories.reload();
+    void attachments.reload();
+  }, [item, categories, attachments]);
+  const sync = useSyncModelRefresh(editorDirty, refresh);
 
   const deleteItem = useMutation(async () => {
-    await api(`/api/apps/assets/items/${id}`, { method: "DELETE" });
+    await api(`/api/apps/assets/items/${id}`, {
+      method: "DELETE",
+      headers: item.data?.baseHash ? { "x-base-hash": item.data.baseHash } : undefined,
+    });
   });
 
   const deleteAttachment = useMutation(async () => {
     if (!attachmentDelete) return;
-    await api(`/api/apps/assets/items/${id}/attachments/${attachmentDelete.id}`, { method: "DELETE" });
+    await api(`/api/apps/assets/items/${id}/attachments/${attachmentDelete.id}`, {
+      method: "DELETE",
+      headers: item.data?.baseHash ? { "x-base-hash": item.data.baseHash } : undefined,
+    });
   });
 
   const upload = async (file: File) => {
@@ -869,6 +954,7 @@ function AssetDetailPage() {
       await api(`/api/apps/assets/items/${id}/attachments`, {
         method: "POST",
         body: form,
+        headers: item.data?.baseHash ? { "x-base-hash": item.data.baseHash } : undefined,
       });
       refresh();
     } catch (error) {
@@ -878,14 +964,14 @@ function AssetDetailPage() {
     }
   };
 
-  if (item.loading) {
+  if (item.loading && !item.data) {
     return (
       <div className="page" data-app="assets">
         <LoadingState label={t("Loading item…", "正在加载物品…")} />
       </div>
     );
   }
-  if (item.error) {
+  if (item.error && !item.data) {
     return (
       <div className="page" data-app="assets">
         <StatusMessage tone="error">
@@ -901,6 +987,7 @@ function AssetDetailPage() {
 
   return (
     <div className="page page--detail" data-app="assets">
+      <SyncPendingNotice pending={sync.pending} onReload={sync.reload} />
       <Link to="/assets" className="back-link">
         <PixelIcon name="back" />
         {t("Assets", "资产")}</Link>
@@ -1022,10 +1109,20 @@ function AssetDetailPage() {
 
       {editing ? (
         <ItemEditor
+          key={data.id}
           item={data}
           categories={categories.data?.items ?? []}
-          onClose={() => setEditing(false)}
+          pending={sync.pending}
+          onDirtyChange={setEditorDirty}
+          onDismiss={sync.dismiss}
+          onSyncConflict={sync.markPending}
+          onClose={() => {
+            setEditorDirty(false);
+            setEditing(false);
+          }}
+          onRefresh={() => item.reload()}
           onSaved={() => {
+            setEditorDirty(false);
             setEditing(false);
             refresh();
           }}
@@ -1095,6 +1192,11 @@ function AssetSummaryWidget({ density = "normal" }: { density?: WidgetDensity })
         : api<{ items: Category[] }>("/api/apps/assets/categories"),
     [density],
   );
+  useSyncModelRefresh(false, () => {
+    summary.reload();
+    list.reload();
+    categories.reload();
+  });
   if ((compact && summary.loading) || (!compact && (list.loading || categories.loading))) {
     return <LoadingState label={t("Loading…", "正在加载…")} />;
   }
