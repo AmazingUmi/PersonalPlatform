@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import type { Database } from "../../src/core/database/index.js";
 import { runAppMigrations } from "../../src/core/database/startup-migrations.js";
 import { createAppStorage } from "../../src/core/storage/local.js";
+import { AppError } from "../../src/core/api/errors.js";
 import { WebdavBackups, type BackupActor, type WebdavInput, type BackupRunResult } from "../../src/core/data-management/webdav.js";
 import { exportSnapshot, type Snapshot } from "../../src/core/data-management/snapshot.js";
 import { TABLES } from "../../src/core/data-management/snapshot-schema.js";
@@ -25,6 +26,7 @@ const services: WebdavBackups[] = [];
 const originalOrigins = process.env.DATA_BACKUP_ALLOWED_ORIGINS;
 const originalKey = process.env.DATA_BACKUP_ENCRYPTION_KEY;
 let failPut: ((key: string) => boolean) | undefined;
+let failGet: ((method: string, key: string) => number | undefined) | undefined;
 let responseHook: ((method: string, key: string) => Promise<void>) | undefined;
 const payload = Buffer.from([0, 255, 1, 2, 128, 7]);
 const keyFor = (filename: string, username = "dav") => `${username}|/backups/${filename}`;
@@ -64,6 +66,8 @@ before(async () => {
     const split = auth.indexOf(":"); const user = auth.slice(0, split);
     const key = `${user}|${req.url}`;
     const record = (status: number) => { requests.push({ method: req.method!, key, status }); res.writeHead(status); };
+    const forced = failGet?.(req.method!, key);
+    if (forced) { record(forced); res.end(); return; }
     if (auth.slice(split + 1) !== "secret") { record(401); res.end(); return; }
     if (req.method === "PUT") {
       const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
@@ -84,7 +88,7 @@ before(async () => {
 });
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "pp-incremental-dav-"));
-  objects.clear(); requests.length = 0; failPut = undefined; responseHook = undefined; clock = new Date("2026-11-01T12:00:00Z");
+  objects.clear(); requests.length = 0; failPut = undefined; failGet = undefined; responseHook = undefined; clock = new Date("2026-11-01T12:00:00Z");
   await db.query("DELETE FROM core.backup_history"); await db.query("DELETE FROM core.backup_targets");
   await db.query("TRUNCATE " + TABLES.filter(table => !table.name.startsWith("core.")).map(table => table.name).join(",") + " CASCADE");
   await db.query("UPDATE core.users SET status='active', role=CASE WHEN id=$1 THEN 'admin' ELSE 'user' END", [admin.id]);
@@ -141,10 +145,66 @@ describe("incremental WebDAV against a real HTTP server", () => {
     assert.equal(requests.filter(request => request.method === "PUT").length, 0);
   });
 
-  it("rejects corrupted or absent previous manifests and detects wrong-size or same-size object corruption", async () => {
+  it("rebuilds a new manifest when the previous one is missing, including after a full backup, and repairs missing objects", async () => {
+    const service = manager(); await service.save(alice, config);
+    const first = created(await service.run(alice));
+    const full = created(await service.run(alice, false, "full"));
+    const before = await snapshot();
+    objects.delete(keyFor(first.filename)); requests.length = 0;
+    const recovered = created(await service.run(alice));
+    assert.notEqual(recovered.id, first.id); assert.equal(recovered.kind, "incremental");
+    assert.deepEqual((await service.history(alice)).items.map(item => item.id), [recovered.id, full.id, first.id]);
+    assert(objects.has(keyFor(full.filename)));
+    assert(requests.some(request => request.method === "PUT" && request.status === 412 && request.key.endsWith(".bin")));
+    assert.equal(requests.filter(request => request.method === "PUT" && request.status === 201 && request.key.includes("ppm-")).length, 1);
+    await assertSnapshot(JSON.parse((await service.download(alice, recovered.id)).data.toString()) as Snapshot, before);
+    requests.length = 0;
+    const unchanged = await service.run(alice);
+    assert.equal(unchanged.status, "unchanged"); assert.equal(unchanged.uploadedBytes, 0); assert.equal(unchanged.uploadedObjects, 0);
+    assert.equal(requests.filter(request => request.method === "PUT").length, 0);
+    const manifest = parseManifest(objects.get(keyFor(recovered.filename))!);
+    const ref = getObjectRefs(manifest)[0]!;
+    objects.delete(keyFor(recovered.filename)); objects.delete(keyFor(ref.filename)); requests.length = 0;
+    const repaired = created(await service.run(alice));
+    assert(objects.has(keyFor(ref.filename))); assert(objects.has(keyFor(repaired.filename)));
+    assert(requests.some(request => request.method === "PUT" && request.status === 201 && request.key === keyFor(ref.filename)));
+    await assertSnapshot(JSON.parse((await service.download(alice, repaired.id)).data.toString()) as Snapshot, before);
+    assert.equal((await service.history(alice)).items.length, 4);
+  });
+
+  it("recovers a missing manifest on the scheduled incremental run", async () => {
+    const service = manager(); await service.save(alice, config);
+    const first = created(await service.run(alice));
+    objects.delete(keyFor(first.filename));
+    clock = new Date(clock.getTime() + 2 * 3_600_000); requests.length = 0;
+    await service.tick();
+    const items = (await service.history(alice)).items;
+    assert.equal(items.length, 2); assert.notEqual(items[0]!.id, first.id);
+    assert.equal((await service.config(alice)).lastStatus, "success");
+    assert(requests.some(request => request.method === "PUT" && request.key.includes("ppm-") && request.status === 201));
+    await assertSnapshot(JSON.parse((await service.download(alice, items[0]!.id)).data.toString()) as Snapshot, await snapshot());
+  });
+
+  it("keeps non-404 manifest read failures from uploading or rewriting history", async () => {
+    const service = manager(); await service.save(alice, config); created(await service.run(alice));
+    for (const status of [401, 403, 429, 503]) {
+      failGet = (method, key) => method === "GET" && key.includes("ppm-") ? status : undefined;
+      requests.length = 0;
+      await assert.rejects(service.run(alice), (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.equal(error.code, "webdav_failed");
+        assert.equal((error.details as { status?: number }).status, status);
+        return true;
+      });
+      assert.equal(requests.filter(request => request.method === "PUT").length, 0);
+      assert.equal((await service.history(alice)).items.length, 1);
+      assert.match((await service.config(alice)).lastError ?? "", /^webdav_failed:/);
+    }
+  });
+
+  it("rejects corrupted previous manifests and detects wrong-size or same-size object corruption", async () => {
     const service = manager(); await service.save(alice, config); const first = created(await service.run(alice));
     const mainKey = keyFor(first.filename), main = objects.get(mainKey)!;
-    objects.delete(mainKey); await assert.rejects(service.run(alice), /manifest is unavailable/);
     objects.set(mainKey, Buffer.from("bad")); await assert.rejects(service.run(alice), /manifest has changed/);
     objects.set(mainKey, main);
     const ref = getObjectRefs(parseManifest(main))[0]!, objectKey = keyFor(ref.filename), object = objects.get(objectKey)!;

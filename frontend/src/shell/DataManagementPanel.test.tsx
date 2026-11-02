@@ -4,6 +4,7 @@ import { I18nProvider, useI18n } from "../shared/i18n";
 import { DataManagementPanel } from "./DataManagementPanel";
 import { Settings } from "./Settings";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
+import { ApiError } from "../shared/api";
 import * as api from "../shared/api";
 import * as data from "../shared/dataManagement";
 
@@ -217,6 +218,40 @@ describe("Settings data management", () => {
     await screen.findByText("Backup settings saved.");
     expect(data.saveWebDav).toHaveBeenCalledWith(expect.objectContaining({ password: "private-token" }));
     expect(screen.getByLabelText("WebDAV password or app token")).toHaveValue("");
+  });
+
+  it("shows one action error for a failed backup and the stored failure after refresh", async () => {
+    const message = "WebDAV returned HTTP 503. Check the service, directory and permissions.";
+    const stored = `webdav_failed: ${message}`;
+    vi.mocked(data.getWebDav).mockResolvedValue({ ...config, lastStatus: "failed", lastRunAt: "2026-11-02T12:00:00.000Z", lastError: stored });
+    vi.mocked(data.backupWebDav).mockRejectedValue(new ApiError(message, 502, "webdav_failed", { status: 503 }));
+    await ready("webdav", "backup");
+    expect(screen.getByText(/Last backup failed:/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Back up now" }));
+    await screen.findByText(message);
+    expect(screen.getAllByText(message)).toHaveLength(1);
+    expect(screen.queryByText(/Last backup failed:/)).not.toBeInTheDocument();
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh backup status" }));
+    await screen.findByText(/Last backup failed:/);
+    const alerts = screen.getAllByRole("alert");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toHaveTextContent(stored);
+  });
+
+  it("shows one Chinese action error and the stored failure after refresh", async () => {
+    const message = "WebDAV returned HTTP 503. Check the service, directory and permissions.";
+    vi.mocked(data.getWebDav).mockResolvedValue({ ...config, lastStatus: "failed", lastRunAt: "2026-11-02T12:00:00.000Z", lastError: `webdav_failed: ${message}` });
+    vi.mocked(data.backupWebDav).mockRejectedValue(new ApiError(message, 502, "webdav_failed", { status: 503 }));
+    renderChinese("webdav", "backup");
+    await screen.findByText(/最近备份失败/);
+    fireEvent.click(screen.getByRole("button", { name: "立即备份" }));
+    await screen.findByText(/WebDAV 服务返回错误/);
+    expect(screen.queryByText(/最近备份失败/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/WebDAV 服务返回错误/)).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "刷新备份状态" }));
+    await screen.findByText(/最近备份失败/);
+    expect(screen.getAllByText(/WebDAV 服务返回错误/)).toHaveLength(1);
   });
 
   it("shows backup failures without claiming success", async () => {

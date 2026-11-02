@@ -78,5 +78,7 @@ describe("interface language", () => {
     expect(resolvePresentation({ id: "custom", name: "Custom" }, {}, "zh").displayName).toBe("Custom");
     expect(localizeError(new ApiError("secret detail", 403, "forbidden", null), "zh")).toBe("当前账号没有执行此操作的权限。");
     expect(localizeError("unknown: user title", "zh")).toBe("unknown: user title");
+    expect(localizeError("webdav_failed: WebDAV returned HTTP 503.", "en")).toBe("webdav_failed: WebDAV returned HTTP 503.");
+    expect(localizeError("webdav_failed: WebDAV returned HTTP 503.", "zh")).toBe("WebDAV 服务返回错误，请根据下方 HTTP 状态检查账号、应用密码或目录权限。\nWebDAV returned HTTP 503.");
   });
 });

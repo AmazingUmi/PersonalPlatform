@@ -22,7 +22,9 @@ export function localizeError(error: unknown, language: Language): string {
     "A record belongs to another user.": "某条记录属于其他用户，无法合并。",
   };
   if (messages[message]) return messages[message]!;
-  const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+  const labeled = typeof error === "string" ? /^([a-z0-9_]+): ([\s\S]*)$/.exec(error) : null;
+  const code = error && typeof error === "object" && "code" in error ? String(error.code) : labeled?.[1] ?? "";
+  const diagnosticMessage = labeled?.[2] ?? message;
   const codes: Record<string, string> = {
     invalid_time_interval: "截止时间不能早于开始时间。", category_not_found: "分类不存在。", attachment_too_large: "附件超过大小限制。",
     unauthorized: "请重新登录。", forbidden: "当前账号没有执行此操作的权限。",
@@ -53,5 +55,5 @@ export function localizeError(error: unknown, language: Language): string {
   };
   if (codes[code]) return codes[code]!;
   const diagnostic: Record<string, string> = { webdav_origin_blocked: "WebDAV 地址在认证前被网络策略拦截。请检查 DNS / Fake-IP，或由管理员配置可信的精确 origin。", webdav_failed: "WebDAV 服务返回错误，请根据下方 HTTP 状态检查账号、应用密码或目录权限。", webdav_unreachable: "无法连接 WebDAV 服务。", backup_timeout: "备份连接超时。" };
-  return diagnostic[code] ? `${diagnostic[code]}\n${message}` : message;
+  return diagnostic[code] ? `${diagnostic[code]}\n${diagnosticMessage}` : message;
 }

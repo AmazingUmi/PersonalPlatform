@@ -257,17 +257,25 @@ export class WebdavBackups {
       if (mode === "incremental") {
         const plan = buildIncremental(snapshot, namespace);
         fingerprint = plan.fingerprint; data = plan.manifestBytes;
-        const previous = (await this.deps.database.query<History>(`SELECT * FROM core.backup_history
+        let previous = (await this.deps.database.query<History>(`SELECT * FROM core.backup_history
           WHERE user_id=$1 AND namespace=$2 AND kind='incremental' ORDER BY sequence DESC LIMIT 1`, [actor.id, namespace])).rows[0];
         const confirmed = new Map<string, ObjectRef>();
         if (previous) {
-          let bytes: Buffer;
+          let bytes: Buffer | undefined;
           try { bytes = await remote.request("GET", previous.filename); }
-          catch { throw new AppError(422, "backup_baseline_unavailable", "The previous incremental manifest is unavailable. Restore that file on the drive or create a standalone full backup."); }
-          if (bytes.length !== previous.size_bytes || createHash("sha256").update(bytes).digest("hex") !== previous.sha256) throw new AppError(422, "backup_integrity_error", "The previous incremental manifest has changed; restore it before continuing incremental backups.");
-          const manifest = parseManifest(bytes, namespace);
-          if (manifest.source.id !== actor.id || manifest.scope !== row.scope || fingerprintManifest(manifest) !== previous.content_fingerprint) throw new AppError(422, "backup_integrity_error", "Previous incremental manifest identity does not match.");
-          for (const ref of getObjectRefs(manifest)) confirmed.set(ref.filename, ref);
+          catch (error) {
+            // Only a confirmed missing manifest may be rebuilt. Auth, rate-limit,
+            // server, and transport failures keep their original typed error.
+            const status = error instanceof AppError ? (error.details as { status?: number } | undefined)?.status : undefined;
+            if (error instanceof AppError && status === 404) previous = undefined;
+            else throw error;
+          }
+          if (previous && bytes !== undefined) {
+            if (bytes.length !== previous.size_bytes || createHash("sha256").update(bytes).digest("hex") !== previous.sha256) throw new AppError(422, "backup_integrity_error", "The previous incremental manifest has changed; restore it before continuing incremental backups.");
+            const manifest = parseManifest(bytes, namespace);
+            if (manifest.source.id !== actor.id || manifest.scope !== row.scope || fingerprintManifest(manifest) !== previous.content_fingerprint) throw new AppError(422, "backup_integrity_error", "Previous incremental manifest identity does not match.");
+            for (const ref of getObjectRefs(manifest)) confirmed.set(ref.filename, ref);
+          }
         }
         for (const { ref, data: bytes } of plan.objects.values()) {
           const known = confirmed.get(ref.filename);

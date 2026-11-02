@@ -318,7 +318,7 @@ function WebDavPanel({ admin, onPrepare, importBusy }: { admin: boolean; onPrepa
           <div><dt>{t("Last backup attempt", "最近备份尝试")}</dt><dd>{dateLabel(config.lastRunAt, locale)}</dd></div>
           <div><dt>{t("Last result", "最近结果")}</dt><dd>{backupStatusLabel(config.lastStatus, t)}</dd></div>
         </dl>
-        {config.lastError && <StatusMessage tone="error">{t("Last backup failed:", "最近备份失败：")} {localizeError(config.lastError, language)}</StatusMessage>}
+        {config.lastError && !error && <StatusMessage tone="error">{t("Last backup failed:", "最近备份失败：")} {localizeError(config.lastError, language)}</StatusMessage>}
       </>}
       </div>
       <div hidden={view !== "history"}>
