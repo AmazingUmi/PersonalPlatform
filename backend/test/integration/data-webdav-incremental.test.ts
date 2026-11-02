@@ -27,6 +27,8 @@ const originalOrigins = process.env.DATA_BACKUP_ALLOWED_ORIGINS;
 const originalKey = process.env.DATA_BACKUP_ENCRYPTION_KEY;
 let failPut: ((key: string) => boolean) | undefined;
 let failGet: ((method: string, key: string) => number | undefined) | undefined;
+let headLength: ((key: string) => number | null | undefined) | undefined;
+let dropHead: ((key: string) => boolean) | undefined;
 let responseHook: ((method: string, key: string) => Promise<void>) | undefined;
 const payload = Buffer.from([0, 255, 1, 2, 128, 7]);
 const keyFor = (filename: string, username = "dav") => `${username}|/backups/${filename}`;
@@ -68,6 +70,7 @@ before(async () => {
     const record = (status: number) => { requests.push({ method: req.method!, key, status }); res.writeHead(status); };
     const forced = failGet?.(req.method!, key);
     if (forced) { record(forced); res.end(); return; }
+    if (req.method === "HEAD" && dropHead?.(key)) { req.socket.destroy(); return; }
     if (auth.slice(split + 1) !== "secret") { record(401); res.end(); return; }
     if (req.method === "PUT") {
       const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
@@ -78,6 +81,11 @@ before(async () => {
     }
     const body = objects.get(key);
     if (req.method === "PROPFIND") { record(207); res.end('<d:multistatus xmlns:d="DAV:"/>'); return; }
+    if (req.method === "HEAD") {
+      const override = headLength?.(key);
+      if (override === null) { requests.push({ method: "HEAD", key, status: 200 }); res.writeHead(200, { "transfer-encoding": "chunked" }); res.end(); return; }
+      if (override !== undefined) { res.setHeader("content-length", override); record(200); res.end(); return; }
+    }
     if (!body) { record(404); res.end(); return; }
     res.setHeader("content-length", body.length); await responseHook?.(req.method!, key); record(200); res.end(req.method === "HEAD" ? undefined : body);
   });
@@ -88,7 +96,7 @@ before(async () => {
 });
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), "pp-incremental-dav-"));
-  objects.clear(); requests.length = 0; failPut = undefined; failGet = undefined; responseHook = undefined; clock = new Date("2026-11-01T12:00:00Z");
+  objects.clear(); requests.length = 0; failPut = undefined; failGet = undefined; headLength = undefined; dropHead = undefined; responseHook = undefined; clock = new Date("2026-11-01T12:00:00Z");
   await db.query("DELETE FROM core.backup_history"); await db.query("DELETE FROM core.backup_targets");
   await db.query("TRUNCATE " + TABLES.filter(table => !table.name.startsWith("core.")).map(table => table.name).join(",") + " CASCADE");
   await db.query("UPDATE core.users SET status='active', role=CASE WHEN id=$1 THEN 'admin' ELSE 'user' END", [admin.id]);
@@ -200,6 +208,91 @@ describe("incremental WebDAV against a real HTTP server", () => {
       assert.equal((await service.history(alice)).items.length, 1);
       assert.match((await service.config(alice)).lastError ?? "", /^webdav_failed:/);
     }
+  });
+
+  it("reuses objects when HEAD length is unreliable but GET size and hash match", async () => {
+    const service = manager(); await service.save(alice, config);
+    const first = created(await service.run(alice));
+    const manifest = parseManifest(objects.get(keyFor(first.filename))!);
+    const ref = getObjectRefs(manifest)[0]!;
+    const objectKey = keyFor(ref.filename);
+    headLength = key => key === objectKey ? 0 : undefined;
+    requests.length = 0;
+    const repeated = await service.run(alice);
+    assert.equal(repeated.status, "unchanged"); assert.equal(repeated.uploadedBytes, 0); assert.equal(repeated.uploadedObjects, 0);
+    assert.equal((await service.history(alice)).items.length, 1);
+    assert.equal(requests.filter(request => request.method === "PUT").length, 0);
+    assert(requests.some(request => request.method === "GET" && request.status === 200 && request.key === objectKey));
+    headLength = key => key === objectKey ? null : undefined; requests.length = 0;
+    assert.equal((await service.run(alice)).status, "unchanged");
+    assert(requests.some(request => request.method === "GET" && request.status === 200 && request.key === objectKey));
+    assert.equal(requests.filter(request => request.method === "PUT").length, 0);
+    for (const status of [405, 501]) {
+      failGet = (method, key) => method === "HEAD" && key === objectKey ? status : undefined; requests.length = 0;
+      assert.equal((await service.run(alice)).status, "unchanged");
+      assert(requests.some(request => request.method === "GET" && request.status === 200 && request.key === objectKey));
+      assert.equal(requests.filter(request => request.method === "PUT").length, 0);
+      assert.equal((await service.history(alice)).items.length, 1);
+    }
+  });
+
+  it("rejects a HEAD length mismatch when GET content is corrupt and does not upload", async () => {
+    const service = manager(); await service.save(alice, config);
+    const first = created(await service.run(alice));
+    const ref = getObjectRefs(parseManifest(objects.get(keyFor(first.filename))!))[0]!;
+    const objectKey = keyFor(ref.filename), object = objects.get(objectKey)!;
+    const corrupt = Buffer.from(object); corrupt[0] = corrupt[0]! ^ 1;
+    objects.set(objectKey, corrupt); headLength = key => key === objectKey ? 0 : undefined; requests.length = 0;
+    await assert.rejects(service.run(alice), /incorrect size/);
+    assert.equal(requests.filter(request => request.method === "PUT").length, 0);
+    assert.equal((await service.history(alice)).items.length, 1);
+    assert.deepEqual(objects.get(objectKey), corrupt);
+  });
+
+  it("does not replace HEAD authentication, rate-limit, or network failures with GET", async () => {
+    const service = manager(); await service.save(alice, config);
+    const first = created(await service.run(alice));
+    const ref = getObjectRefs(parseManifest(objects.get(keyFor(first.filename))!))[0]!;
+    const objectKey = keyFor(ref.filename);
+    for (const status of [401, 403, 429, 503]) {
+      failGet = (method, key) => method === "HEAD" && key === objectKey ? status : undefined; requests.length = 0;
+      await assert.rejects(service.run(alice), (error: unknown) => {
+        assert.ok(error instanceof AppError); assert.equal(error.code, "webdav_failed");
+        assert.equal((error.details as { status?: number }).status, status); return true;
+      });
+      assert.equal(requests.filter(request => request.method === "GET" && request.key === objectKey).length, 0);
+      assert.equal(requests.filter(request => request.method === "PUT").length, 0);
+      assert.equal((await service.history(alice)).items.length, 1);
+    }
+    failGet = undefined; dropHead = key => key === objectKey; requests.length = 0;
+    await assert.rejects(service.run(alice), (error: unknown) => {
+      assert.ok(error instanceof AppError); assert.equal(error.code, "webdav_unreachable"); return true;
+    });
+    assert.equal(requests.filter(request => request.method === "GET" && request.key === objectKey).length, 0);
+    assert.equal(requests.filter(request => request.method === "PUT").length, 0);
+    assert.equal((await service.history(alice)).items.length, 1);
+  });
+
+  it("repairs a fallback GET 404 and propagates a fallback GET 403 for the same object", async () => {
+    const service = manager(); await service.save(alice, config);
+    const first = created(await service.run(alice));
+    const ref = getObjectRefs(parseManifest(objects.get(keyFor(first.filename))!))[0]!;
+    const objectKey = keyFor(ref.filename), object = objects.get(objectKey)!;
+    headLength = key => key === objectKey ? 0 : undefined;
+    objects.delete(objectKey); requests.length = 0;
+    const repaired = await service.run(alice);
+    assert.equal(repaired.status, "unchanged"); assert.equal(repaired.uploadedObjects, 1);
+    assert(requests.some(request => request.method === "GET" && request.status === 404 && request.key === objectKey));
+    assert(requests.some(request => request.method === "PUT" && request.status === 201 && request.key === objectKey));
+    assert.equal((await service.history(alice)).items.length, 1);
+    assert.deepEqual(objects.get(objectKey), object);
+    failGet = (method, key) => method === "GET" && key === objectKey ? 403 : undefined; requests.length = 0;
+    await assert.rejects(service.run(alice), (error: unknown) => {
+      assert.ok(error instanceof AppError); assert.equal(error.code, "webdav_failed");
+      assert.equal((error.details as { status?: number }).status, 403); return true;
+    });
+    assert.equal(requests.filter(request => request.method === "PUT").length, 0);
+    assert.equal((await service.history(alice)).items.length, 1);
   });
 
   it("rejects corrupted previous manifests and detects wrong-size or same-size object corruption", async () => {

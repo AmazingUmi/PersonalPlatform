@@ -1,5 +1,5 @@
 import { I18nProvider, useI18n } from "../../shared/i18n";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Game2048 } from "./index";
 
@@ -19,6 +19,7 @@ function saveResponse(save: unknown) {
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("Game2048 loading gate (FP-13.1)", () => {
@@ -130,18 +131,14 @@ it("translates controls and help without reloading the saved board", async () =>
 });
 
 it("sends the later move with the hash returned by the earlier save", async () => {
-  const random = vi.spyOn(Math, "random").mockReturnValue(0);
+  vi.spyOn(Math, "random").mockReturnValue(0);
+  let releaseLoad: (value: { ok: boolean; json: () => Promise<unknown> }) => void = () => undefined;
+  const loaded = new Promise<{ ok: boolean; json: () => Promise<unknown> }>((resolve) => {
+    releaseLoad = resolve;
+  });
   let release: (value: { ok: boolean; json: () => Promise<unknown> }) => void = () => undefined;
   const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
-    if (!init?.method || init.method === "GET") {
-      return {
-        ok: true,
-        json: async () => ({
-          save: { score: 0, highScore: 0, revision: 1, board: [[2, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]] },
-          baseHash: "a".repeat(64),
-        }),
-      };
-    }
+    if (!init?.method || init.method === "GET") return loaded;
     const puts = fetchMock.mock.calls.filter((call) => (call[1] as RequestInit | undefined)?.method === "PUT");
     if (puts.length === 1) return new Promise((resolve) => { release = resolve; });
     const payload = JSON.parse(String(init.body)) as { revision: number; baseHash?: string };
@@ -155,27 +152,36 @@ it("sends the later move with the hash returned by the earlier save", async () =
     };
   });
   vi.stubGlobal("fetch", fetchMock);
-  render(<Game2048 />);
-  await waitFor(() => expect((screen.getByRole("button", { name: "New Game" }) as HTMLButtonElement).disabled).toBe(false));
+  const view = render(<Game2048 />);
+  await act(async () => {
+    releaseLoad({
+      ok: true,
+      json: async () => ({
+        save: { score: 0, highScore: 0, revision: 1, board: [[2, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]] },
+        baseHash: "a".repeat(64),
+      }),
+    });
+  });
+  expect(view.container.querySelector(".game__tile")).toHaveTextContent("2");
+  expect(screen.getByRole("button", { name: "New Game" })).toBeEnabled();
   key("ArrowRight");
   key("ArrowDown");
-  await waitFor(() => expect(fetchMock.mock.calls.filter((call) => (call[1] as RequestInit | undefined)?.method === "PUT")).toHaveLength(1));
-  release({
-    ok: true,
-    json: async () => ({
-      accepted: true,
-      baseHash: "b".repeat(64),
-      save: { score: 0, highScore: 0, revision: 2, board: [[0, 0, 0, 2], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]] },
-    }),
+  const puts = () => fetchMock.mock.calls.filter((call) => (call[1] as RequestInit | undefined)?.method === "PUT");
+  expect(puts()).toHaveLength(1);
+  await act(async () => {
+    release({
+      ok: true,
+      json: async () => ({
+        accepted: true,
+        baseHash: "b".repeat(64),
+        save: { score: 0, highScore: 0, revision: 2, board: [[0, 0, 0, 2], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]] },
+      }),
+    });
   });
-  await waitFor(() => expect(fetchMock.mock.calls.filter((call) => (call[1] as RequestInit | undefined)?.method === "PUT")).toHaveLength(2));
-  const puts = fetchMock.mock.calls.filter((call) => (call[1] as RequestInit | undefined)?.method === "PUT");
-  const second = JSON.parse(String((puts[puts.length - 1]![1] as RequestInit).body)) as { revision: number; baseHash?: string };
+  expect(puts()).toHaveLength(2);
+  const second = JSON.parse(String((puts()[1]![1] as RequestInit).body)) as { revision: number; baseHash?: string };
   expect(second.revision).toBe(3);
   expect(second.baseHash).toBe("b".repeat(64));
-  random.mockRestore();
-  cleanup();
-  vi.unstubAllGlobals();
 });
 
 it("holds the visible board on a remote 409 and keeps it when reload fails", async () => {

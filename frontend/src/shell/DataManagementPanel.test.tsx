@@ -445,7 +445,7 @@ describe("Settings data management", () => {
   });
 
   it("opens sync from the WebDAV subnav and keeps connection drafts across that tab and a language change", async () => {
-    render(<I18nProvider><MemoryRouter initialEntries={["/settings?section=webdav&view=sync"]}><Settings /><LocationControls /></MemoryRouter></I18nProvider>);
+    render(<I18nProvider initialLanguage="en"><MemoryRouter initialEntries={["/settings?section=webdav&view=sync"]}><Settings /><LocationControls /></MemoryRouter></I18nProvider>);
     const heading = await screen.findByRole("heading", { name: "Continuous sync" });
     expect(screen.getByRole("link", { name: "Sync" })).toHaveAttribute("aria-current", "page");
     expect(heading.parentElement).toContainElement(screen.getByRole("button", { name: "Help: About continuous sync" }));

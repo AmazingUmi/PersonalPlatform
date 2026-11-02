@@ -281,9 +281,30 @@ export class WebdavBackups {
           const known = confirmed.get(ref.filename);
           if (known) {
             if (known.sha256 !== ref.sha256 || known.size !== ref.size || known.kind !== ref.kind) throw new AppError(422, "backup_integrity_error", "A backup object reference has changed unexpectedly.");
-            const size = await remote.head(ref.filename);
-            if (size === ref.size) continue;
-            if (size !== null) throw new AppError(422, "backup_integrity_error", "A remote backup object has an incorrect size. Restore it or create a full backup.");
+            let verify = false;
+            try {
+              const size = await remote.head(ref.filename);
+              if (size === ref.size) continue;
+              // Missing object stays on the immutable PUT repair path. A present but
+              // unreliable length, including 0, is checked with one bounded GET.
+              if (size !== null) verify = true;
+            } catch (error) {
+              const status = error instanceof AppError ? (error.details as { status?: number } | undefined)?.status : undefined;
+              if (!(error instanceof AppError) || (error.code !== "webdav_head_unsupported" && status !== 405 && status !== 501)) throw error;
+              verify = true;
+            }
+            if (verify) {
+              let existing: Buffer | undefined;
+              try { existing = await remote.request("GET", ref.filename); }
+              catch (error) {
+                const status = error instanceof AppError ? (error.details as { status?: number } | undefined)?.status : undefined;
+                if (!(error instanceof AppError) || status !== 404) throw error;
+              }
+              if (existing) {
+                if (existing.length !== ref.size || createHash("sha256").update(existing).digest("hex") !== ref.sha256) throw new AppError(422, "backup_integrity_error", "A remote backup object has an incorrect size or hash. It was not overwritten.");
+                continue;
+              }
+            }
           }
           try { await put(ref.filename, bytes); }
           catch (error) {
