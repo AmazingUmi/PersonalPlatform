@@ -7,7 +7,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createBundle, verifyBundle } from "./release-images.mjs";
 
@@ -46,8 +46,15 @@ function command(binary, args, { input, failure = false, env = process.env } = {
   return { status: result.status, stdout: result.stdout?.trim() ?? "", stderr: result.stderr?.trim() ?? "" };
 }
 const docker = (args, options) => command("docker", args, options);
+const commandDirectory = directory => join(temporary, "commands", basename(directory));
+const commandPath = directory => join(commandDirectory(directory), "pp");
 
 function helperArgs(args, { shim = false, shimDirectory, name = helperName, entry = frozenInstaller } = {}) {
+  // Each isolated deployment has its own persistent command directory. Never
+  // install into the host or ephemeral helper container's /usr/local/bin.
+  if (entry === frozenInstaller && args.includes("--dir") && !args.includes("--command-dir")) {
+    args = [...args, "--command-dir", commandDirectory(args[args.indexOf("--dir") + 1])];
+  }
   helperNames.add(name);
   const run = ["run", "--rm", "--name", name, "--network", "host",
     "--user", `${process.getuid()}:${process.getgid()}`, "--group-add", String(statSync(socket).gid), "--group-add", "0",
@@ -139,7 +146,10 @@ function envFile(path, owner, template) {
     COMPOSE_PROJECT_NAME: owner, POSTGRES_PASSWORD: JSON.stringify(databasePassword),
     BOOTSTRAP_ADMIN_USERNAME: username, BOOTSTRAP_ADMIN_PASSWORD: JSON.stringify(password),
     BIND_IP: "127.0.0.1", FRONTEND_PORT: "0", SESSION_COOKIE_SECURE: "false",
-    HEALTHCHECK_INTERVAL: "1s", LOG_LEVEL: "warn",
+    // A cold initdb can need >15 seconds before the final TCP listener starts.
+    // At 1s, the published 5s start period + 10 failures can expire too early.
+    // 5s keeps tests faster than production's 30s without truncating initdb.
+    HEALTHCHECK_INTERVAL: "5s", LOG_LEVEL: "warn",
     DATA_BACKUP_ALLOWED_ORIGINS: "https://dav.example.invalid", DATA_BACKUP_ENCRYPTION_KEY: "",
   };
   let content = template;
@@ -199,7 +209,7 @@ try {
   socket = endpoint.slice("unix://".length);
   builtHelper = true;
   docker(["build", "-f", "scripts/test/fixtures/deploy-runtime.Dockerfile", "-t", helperImage, "."]);
-  helper(["for binary in node npm python3 jq; do if command -v \"$binary\" >/dev/null; then echo \"Unexpected host runtime: $binary\" >&2; exit 1; fi; done; docker compose version --short"], { entry: "-c" });
+  helper([`set -e; for binary in node npm python3 jq; do if command -v "$binary" >/dev/null; then echo "Unexpected host runtime: $binary" >&2; exit 1; fi; done; bash -n '${frozenInstaller}'; shellcheck --severity=warning '${frozenInstaller}'; docker compose version --short`], { entry: "-c" });
   const official = join(temporary, "official");
   mkdirSync(official);
   await Promise.all([
@@ -255,6 +265,17 @@ try {
   installDir = installDirs[winner];
   assert.ok(!existsSync(join(installDirs[1 - winner], ".deploy/active")), "the losing directory cannot accept an existing project");
   assert.equal(readFileSync(join(installDir, ".deploy/active"), "utf8").trim(), "v0.1.0");
+  assert.equal(statSync(commandPath(installDir)).mode & 0o777, 0o755);
+  const commandHelp = helper(["help"], { entry: commandPath(installDir) });
+  assert.match(commandHelp.stdout, /pp update/);
+  const commandStatus = helper(["status"], { entry: commandPath(installDir) });
+  assert.match(commandStatus.stdout, /v0\.1\.0/);
+  assert.ok(commandStatus.stdout.includes(installDir), "command is bound to the actual winning installation directory");
+  const unchangedDatabase = inspectService(project, "database").Id;
+  const unchangedBackend = inspectService(project, "backend").State.StartedAt;
+  helper(["update"], { entry: commandPath(installDir) });
+  assert.equal(inspectService(project, "database").Id, unchangedDatabase);
+  assert.equal(inspectService(project, "backend").State.StartedAt, unchangedBackend, "plain pp update is a healthy same-version no-op against the latest public release");
   const beforeDatabase = inspectService(project, "database");
   const beforeBackend = inspectService(project, "backend");
   const beforeVolumes = [beforeDatabase.Mounts.find(mount => mount.Destination === "/var/lib/postgresql/data").Name,
@@ -284,14 +305,14 @@ try {
   console.log("Checking a failed preflight pull leaves the accepted application running");
   const beforePull = inspectService(project, "backend").State.StartedAt;
   writeFileSync(pullFailure, "once\n");
-  assert.notEqual(helper(["--dir", installDir, "--version", "v0.1.1", "--bundle-dir", fixtureDirs["v0.1.1"]], { failure: true, shim: true }).status, 0);
+  assert.notEqual(helper(["update", "--version", "v0.1.1", "--bundle-dir", fixtureDirs["v0.1.1"]], { entry: commandPath(installDir), failure: true, shim: true }).status, 0);
   assert.ok(!existsSync(join(installDir, ".deploy/pending")));
   assert.equal(readFileSync(join(installDir, ".deploy/active"), "utf8").trim(), "v0.1.0");
   assert.equal(inspectService(project, "backend").State.StartedAt, beforePull);
   assert.equal((await json(baseUrl(project), `/api/apps/assets/items/${item.id}`, { cookie })).name, marker);
 
   console.log("Updating to a controlled newer fixture and checking data, identity, keys and backup");
-  helper(["--dir", installDir, "--version", "v0.1.1", "--bundle-dir", fixtureDirs["v0.1.1"]]);
+  helper(["update", "--version", "v0.1.1", "--bundle-dir", fixtureDirs["v0.1.1"]], { entry: commandPath(installDir) });
   assert.equal(readFileSync(join(installDir, ".deploy/active"), "utf8").trim(), "v0.1.1");
   assert.equal(inspectService(project, "database").Id, beforeDatabase.Id, "application update must not replace the database container");
   const updatedBackend = inspectService(project, "backend");
@@ -331,21 +352,47 @@ try {
   assert.equal(inspectService(project, "backend").State.StartedAt, startedAt);
   docker(["rm", "-f", holderName]);
   await holder.completion;
-  helper(["--dir", installDir, "--version", "v0.1.1", "--bundle-dir", fixtureDirs["v0.1.1"]]);
+  helper(["update", "--version", "v0.1.1", "--bundle-dir", fixtureDirs["v0.1.1"]], { entry: commandPath(installDir) });
   assert.equal(inspectService(project, "backend").State.StartedAt, startedAt, "same-version rerun must not restart applications");
   assert.equal(backupDirectories().length, 1);
 
+  console.log("Checking command registration locking and foreign-deployment conflicts before application mutation");
+  const commandLockReady = join(temporary, "command-lock-held");
+  const commandHolderName = `${helperName}-command-lock`;
+  const commandHolder = asynchronousHelper([`flock --no-fork '${join(commandDirectory(installDir), ".personalplatform-pp.lock")}' sh -c 'touch "${commandLockReady}"; exec sleep 120'`], { name: commandHolderName, entry: "-c" });
+  for (let attempt = 0; attempt < 100 && !existsSync(commandLockReady); attempt++) await new Promise(resolve => setTimeout(resolve, 100));
+  assert.ok(existsSync(commandLockReady), "command registration lock holder acquired the real kernel lock");
+  const commandBefore = hash(readFileSync(commandPath(installDir)));
+  const blockedCommand = helper(["update", "--version", "v0.1.1", "--bundle-dir", fixtureDirs["v0.1.1"]], { entry: commandPath(installDir), failure: true });
+  assert.notEqual(blockedCommand.status, 0);
+  assert.match(blockedCommand.stderr, /command directory lock/);
+  const foreignDirectory = join(temporary, "command-collision");
+  const foreignArgs = ["--dir", foreignDirectory, "--command-dir", commandDirectory(installDir), "--version", "v0.1.0", "--env-file", initialEnv];
+  const blockedForeign = helper(foreignArgs, { failure: true });
+  assert.notEqual(blockedForeign.status, 0);
+  assert.match(blockedForeign.stderr, /command directory lock/);
+  docker(["rm", "-f", commandHolderName]);
+  await commandHolder.completion;
+  const foreign = helper(foreignArgs, { failure: true });
+  assert.notEqual(foreign.status, 0);
+  assert.match(foreign.stderr, /Refusing unrelated, modified or foreign command/);
+  assert.equal(hash(readFileSync(commandPath(installDir))), commandBefore);
+  assert.ok(!existsSync(join(foreignDirectory, ".deploy/active")));
+  assert.equal(inspectService(project, "backend").State.StartedAt, startedAt);
+  assert.equal(readFileSync(join(installDir, ".env.release"), "utf8"), savedEnv);
+  helper(["update", "--version", "v0.1.1", "--bundle-dir", fixtureDirs["v0.1.1"]], { entry: commandPath(installDir) });
+
   writeFileSync(failureMarker, "once\n");
   console.log("Simulating a lost acknowledgement after target startup, then explicitly resuming forward");
-  const failed = helper(["--dir", installDir, "--version", "v0.1.2", "--bundle-dir", fixtureDirs["v0.1.2"]], { failure: true, shim: true });
+  const failed = helper(["update", "--version", "v0.1.2", "--bundle-dir", fixtureDirs["v0.1.2"]], { entry: commandPath(installDir), failure: true, shim: true });
   assert.notEqual(failed.status, 0);
   assert.equal(readFileSync(join(installDir, ".deploy/active"), "utf8").trim(), "v0.1.1");
   assert.ok(existsSync(join(installDir, ".deploy/pending")));
   assert.equal(inspectService(project, "database").Id, beforeDatabase.Id);
   for (const service of ["backend", "frontend"]) assert.equal(inspectService(project, service).State.Running, false, "ambiguous update must stop writers");
-  assert.notEqual(helper(["--dir", installDir, "--version", "v0.1.2", "--bundle-dir", fixtureDirs["v0.1.2"]], { failure: true }).status, 0, "ordinary rerun cannot bypass the failed-operation journal");
+  assert.notEqual(helper(["update", "--version", "v0.1.2", "--bundle-dir", fixtureDirs["v0.1.2"]], { entry: commandPath(installDir), failure: true }).status, 0, "ordinary rerun cannot bypass the failed-operation journal");
   const backupCount = backupDirectories().length;
-  helper(["--dir", installDir, "--resume"]);
+  helper(["resume"], { entry: commandPath(installDir) });
   assert.equal(readFileSync(join(installDir, ".deploy/active"), "utf8").trim(), "v0.1.2");
   assert.ok(!existsSync(join(installDir, ".deploy/pending")));
   assert.equal(backupDirectories().length, backupCount, "resume reuses the matching pre-update backup");
@@ -366,6 +413,7 @@ try {
   const manualCookie = await login(baseUrl(projects[1]));
   const manualItem = await json(baseUrl(projects[1]), "/api/apps/assets/items", { cookie: manualCookie, method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: `${marker}-manual` }) }, 201);
   helper(["--dir", manual, "--adopt", "--version", "v0.1.0", "--bundle-dir", official]);
+  assert.ok(helper(["status"], { entry: commandPath(manual) }).stdout.includes(manual), "adoption binds a separate command to the real manual directory");
   assert.equal(inspectService(projects[1], "database").Id, manualDatabase);
   assert.equal((await json(baseUrl(projects[1]), `/api/apps/assets/items/${manualItem.id}`, { cookie: manualCookie })).name, `${marker}-manual`);
   console.log("Recovering an interrupted preparation on an adopted deployment, with a pre-start backup failure");
@@ -378,7 +426,7 @@ try {
   assert.equal(readFileSync(join(manual, ".deploy/active"), "utf8").trim(), "v0.1.0");
   for (const service of ["backend", "frontend"]) assert.equal(inspectService(projects[1], service).State.Running, false);
   writeFileSync(dumpFailure, "once\n");
-  assert.notEqual(helper(["--dir", manual, "--resume"], { failure: true, shim: true }).status, 0);
+  assert.notEqual(helper(["resume"], { entry: commandPath(manual), failure: true, shim: true }).status, 0);
   assert.ok(!existsSync(join(manual, ".deploy/pending")), "known pre-start backup failure returns to the accepted deployment");
   await waitHealthy(projects[1]);
   for (const [service, original] of [["backend", manualBackend], ["frontend", manualFrontend]]) {
@@ -394,11 +442,22 @@ try {
   assert.equal(inspectService(projects[1], "database").Id, manualDatabase);
   assert.equal((await json(baseUrl(projects[1]), `/api/apps/assets/items/${manualItem.id}`, { cookie: manualCookie })).name, `${marker}-manual`);
   assert.equal(hash(readFileSync(join(root, "scripts/deploy.sh"))), installerSha256, "installer changed during acceptance; rerun the final source snapshot");
-  writeFileSync(join(temporary, "RESULT.json"), `${JSON.stringify({ result: "PASS", installerSha256, publicVersion: "v0.1.0", fixtureVersions: ["v0.1.1", "v0.1.2"], project, checks: ["concurrent-directory-ownership", "install", "matching-backup", "data-session-attachment-key-preservation", "database-identity", "kernel-lock-release", "no-op", "preflight-pull-failure", "ambiguous-start-failure", "forward-resume", "manual-adoption", "interrupted-preparation", "backup-failure-recovery"] }, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(join(temporary, "RESULT.json"), `${JSON.stringify({ result: "PASS", installerSha256, publicVersion: "v0.1.0", fixtureVersions: ["v0.1.1", "v0.1.2"], project, checks: ["concurrent-directory-ownership", "install", "command-install-binding", "command-update-status-resume", "command-registration-lock-release-conflicts", "matching-backup", "data-session-attachment-key-preservation", "database-identity", "kernel-lock-release", "no-op", "preflight-pull-failure", "ambiguous-start-failure", "forward-resume", "manual-adoption", "interrupted-preparation", "backup-failure-recovery"] }, null, 2)}\n`, { mode: 0o600 });
   console.log(`PASS: isolated Linux install/update/adoption, matching backup, data/session/attachment/key persistence and forward recovery (${temporary})`);
 } catch (error) {
   console.error(`FAIL: ${error.message}; private evidence retained in ${temporary}`);
   process.exitCode = 1;
+  // Keep useful health/startup evidence before removing only this run's owned
+  // projects. Inspect State only, so container environment is not logged.
+  for (const owner of projects) {
+    try {
+      const ids = docker(["ps", "-aq", "--filter", `label=com.docker.compose.project=${owner}`], { failure: true }).stdout.split(/\s+/).filter(Boolean);
+      for (const id of ids) {
+        docker(["inspect", "--format", "{{json .State}}", id], { failure: true });
+        docker(["logs", "--tail", "100", id], { failure: true });
+      }
+    } catch { /* Diagnostic failure must not replace the acceptance failure. */ }
+  }
 } finally {
   cleanup();
 }

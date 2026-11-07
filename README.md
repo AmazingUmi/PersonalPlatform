@@ -40,13 +40,15 @@ make dev                   # 等价于 docker compose up --build
 curl -fL --proto '=https' --tlsv1.2 'https://raw.githubusercontent.com/AmazingUmi/PersonalPlatform/<SCRIPT_COMMIT>/scripts/deploy.sh' -o personal-platform-deploy.sh && sudo bash personal-platform-deploy.sh
 ```
 
-默认安装到 `/opt/personal-platform`，选择最新稳定发行版。首次运行会询问管理员用户名和密码，密码输入不显示，并自动生成数据库密码。以后安装或更新只需：
+默认安装到 `/opt/personal-platform`，选择最新稳定发行版。首次运行会询问管理员用户名和密码，密码输入不显示，并自动生成数据库密码。成功后注册 `/usr/local/bin/pp`，以后在任意目录更新只需：
 
 ```bash
-sudo bash /opt/personal-platform/deploy.sh
+pp update
 ```
 
-脚本更新前先拉取配套镜像，再停写并备份数据库、附件、密钥和私有配置，保留原项目及数据卷；同版本重复运行只检查健康。指定版本、非交互配置、接管已有手动部署及失败后的 `--resume` 见 [部署指南](doc/DEPLOYMENT.md#一条命令安装和更新)。脚本本身可安装已有的 `v0.1.0`，不需要为它重发应用镜像。域名、HTTPS 代理和 Docker 安装仍由服务器管理员准备。
+`pp status` 查看状态，`pp resume` 在排除故障后继续未完成的更新，`pp help` 查看用法。root 管理的部署在需要时请求 sudo 验证。已用旧脚本部署的服务器，重新下载新版脚本并对原目录运行一次，即可补装命令入口。
+
+脚本更新前先拉取配套镜像，再停写并备份数据库、附件、密钥和私有配置，保留原项目及数据卷；同版本重复运行检查健康并登记命令入口。指定版本、非交互配置、自定义命令目录和接管已有手动部署见 [部署指南](doc/DEPLOYMENT.md#一条命令安装和更新)。脚本本身可安装已有的 `v0.1.0`，不需要为它重发应用镜像。域名、HTTPS 代理和 Docker 安装仍由服务器管理员准备。
 
 **手动使用发行镜像**：服务器只需 Docker Engine 和 Compose v2.20+，不需要 Node、npm 或源码。在对应 Release 下载部署包及 `SHA256SUMS`，校验并解压，在解压目录执行：
 

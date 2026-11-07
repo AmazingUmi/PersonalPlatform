@@ -4,14 +4,15 @@ set -Eeuo pipefail
 umask 077
 REPOSITORY=https://github.com/AmazingUmi/PersonalPlatform
 DIR=/opt/personal-platform
-VERSION='' ENV_SOURCE='' BUNDLE_DIR=''
+VERSION='' ENV_SOURCE='' BUNDLE_DIR='' COMMAND_DIR='' COMMAND_DIR_SET=0
+COMMAND_TEMP='' INSTALLER_TEMP='' COMMAND_RECORD_TEMP=''
 ADOPT=0 RESUME=0 STATUS=0
 PARSER_IMAGE='' PROJECT='' OLD_BACKEND='' OLD_FRONTEND='' STAGE='' BACKUP='' OWNERSHIP_VERIFIED=0 VERIFIED_PROJECT=''
 usage() {
   cat <<'HELP'
 Usage: bash deploy.sh [--dir PATH] [--version vMAJOR.MINOR.PATCH]
        [--env-file PRIVATE_FILE] [--bundle-dir DOWNLOADED_ASSETS] [--adopt]
-       [--resume | --status]
+       [--command-dir PATH] [--resume | --status]
 
 Default: install/update /opt/personal-platform to the latest published stable release.
 First install asks for an administrator password; the database password is generated.
@@ -20,6 +21,7 @@ First install asks for an administrator password; the database password is gener
 --adopt explicitly takes over a running manual release deployment in --dir.
 --resume retries only a retained pending target; it never restores a database backup.
 --status reports the accepted version and any unfinished operation, without secrets.
+--command-dir installs pp into a directory (default /usr/local/bin); saved choices are reused.
 Docker Engine, Compose >=2.20, Bash >=4, curl, GNU tar/coreutils, openssl and flock
 (util-linux) must already be installed. Production browser login requires HTTPS.
 HELP
@@ -28,9 +30,9 @@ fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 log() { printf '%s\n' "$*"; }
 while (($#)); do
   case "$1" in
-    --dir|--version|--env-file|--bundle-dir)
+    --dir|--version|--env-file|--bundle-dir|--command-dir)
       (($# >= 2)) && [[ -n $2 && $2 != --* ]] || fail "Missing value for $1"
-      case "$1" in --dir) DIR=$2;; --version) VERSION=$2;; --env-file) ENV_SOURCE=$2;; --bundle-dir) BUNDLE_DIR=$2;; esac; shift 2;;
+      case "$1" in --dir) DIR=$2;; --version) VERSION=$2;; --env-file) ENV_SOURCE=$2;; --bundle-dir) BUNDLE_DIR=$2;; --command-dir) COMMAND_DIR=$2; COMMAND_DIR_SET=1;; esac; shift 2;;
     --adopt) ADOPT=1; shift;; --resume) RESUME=1; shift;; --status) STATUS=1; shift;;
     -h|--help) usage; exit 0;; *) fail "Unknown option: $1";;
   esac
@@ -47,6 +49,7 @@ for command in docker curl tar sha256sum openssl flock awk sed grep sort cmp mkt
   command -v "$command" >/dev/null || fail "Missing dependency: $command"
 done
 [[ ! -L $DIR ]] || fail 'Deployment directory must not be a symlink.'
+INSTALLER_SOURCE=$(realpath -e -- "${BASH_SOURCE[0]}")
 DIR=$(realpath -m -- "$DIR")
 [[ $DIR != / ]] || fail 'The filesystem root cannot be a deployment directory.'
 if (( STATUS )); then
@@ -95,6 +98,164 @@ ACTIVE=''
 [[ -z $ACTIVE || $ACTIVE =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || fail 'Invalid accepted release state.'
 atomic() { local path=$1 value=$2 temporary; temporary=$(mktemp "$STATE/write.XXXXXX"); printf '%s\n' "$value" > "$temporary"; chmod 600 "$temporary"; sync -f "$temporary"; mv -f -- "$temporary" "$path"; sync -f "$(dirname "$path")"; }
 state_value() { local value=; [[ ! -f $1 ]] || IFS= read -r value < "$1"; printf '%s' "$value"; }
+# The public command is a bound argument router. Its literals are produced by
+# Bash printf %q, never dotenv/source/eval, and help does not access private state.
+render_command() {
+  printf '#!/bin/bash\nset -euo pipefail\nreadonly PP_DIRECTORY=%q PP_COMMAND_DIRECTORY=%q PP_OWNER_UID=%q\n' "$DIR" "$COMMAND_DIR" "$EUID"
+  cat <<'LAUNCHER'
+usage() {
+  cat <<'HELP'
+Usage: pp update [--version vMAJOR.MINOR.PATCH] [--bundle-dir DOWNLOADED_ASSETS]
+       pp status
+       pp resume
+       pp help
+
+Update this bound PersonalPlatform deployment; status is read-only and resume
+retries its retained unfinished update. Root-owned deployments use sudo when needed.
+HELP
+}
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+operation=${1:-help}
+arguments=(--dir "$PP_DIRECTORY" --command-dir "$PP_COMMAND_DIRECTORY")
+case "$operation" in
+  help|-h|--help) (($# <= 1)) || fail 'help takes no arguments.'; usage; exit 0;;
+  update)
+    shift
+    while (($#)); do
+      case "$1" in
+        --version|--bundle-dir)
+          (($# >= 2)) && [[ -n $2 && $2 != --* ]] || fail "Missing value for $1"
+          arguments+=("$1" "$2"); shift 2;;
+        *) fail "Unknown update option: $1";;
+      esac
+    done;;
+  status|resume)
+    (($# == 1)) || fail "$operation takes no arguments."
+    arguments+=("--$operation");;
+  *) fail "Unknown command: $operation";;
+esac
+if (( EUID != PP_OWNER_UID )); then
+  if (( PP_OWNER_UID == 0 && EUID != 0 )); then
+    exec sudo -- /bin/bash "$PP_DIRECTORY/deploy.sh" "${arguments[@]}"
+  fi
+  fail "Deployment belongs to user ID $PP_OWNER_UID. Run pp as that deployment owner."
+fi
+exec /bin/bash "$PP_DIRECTORY/deploy.sh" "${arguments[@]}"
+LAUNCHER
+}
+cleanup_command_files() {
+  [[ -z $COMMAND_TEMP ]] || rm -f -- "$COMMAND_TEMP" || true
+  [[ -z $INSTALLER_TEMP ]] || rm -f -- "$INSTALLER_TEMP" || true
+  [[ -z $COMMAND_RECORD_TEMP ]] || rm -f -- "$COMMAND_RECORD_TEMP" || true
+  return 0
+}
+# Registration failures before any app work must not trigger deployment recovery.
+cleanup_command_on_exit() {
+  local status=$?
+  trap - EXIT
+  cleanup_command_files
+  exit "$status"
+}
+trap cleanup_command_on_exit EXIT
+safe_command_path() {
+  local path=$1 kind=$2 mode
+  [[ ! -L $path && -O $path ]] || fail "Command $kind must be owned by the current user and must not be a symlink: $path"
+  if [[ $kind == directory ]]; then [[ -d $path ]] || fail "Expected a command directory: $path";
+  else [[ -f $path ]] || fail "Expected a regular command $kind: $path"; fi
+  mode=$(stat -c %a -- "$path")
+  [[ $mode =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) || fail "Command $kind must not be group/other writable: $path"
+}
+# Both executable bindings must survive use by their owner later. An otherwise
+# safe leaf can be replaced through an ancestor controlled by another user.
+safe_bound_ancestors() {
+  local label=$2 parent=$1 owner mode
+  while [[ $parent != / ]]; do
+    parent=$(dirname -- "$parent")
+    [[ -e $parent || -L $parent ]] || continue
+    [[ -d $parent && ! -L $parent ]] || fail "$label ancestor must be a real directory: $parent"
+    owner=$(stat -c %u -- "$parent"); mode=$(stat -c %a -- "$parent")
+    [[ $owner == 0 || $owner == "$EUID" ]] || fail "$label ancestor must be owned by the deployment owner or root: $parent"
+    [[ $mode =~ ^[0-7]{3,4}$ ]] || fail "Invalid permissions on $label ancestor: $parent"
+    # Root-owned sticky temporary directories protect every trusted child from
+    # replacement; all other writable ancestors are unsafe executable bindings.
+    (( (8#$mode & 0022) == 0 || (owner == 0 && (8#$mode & 01000) != 0) )) || fail "$label ancestor must not be group/other writable: $parent"
+  done
+}
+preflight_command() {
+  local saved='' lock target recorded='' current
+  if [[ -e $DIR/deploy.sh || -L $DIR/deploy.sh ]]; then safe_command_path "$DIR/deploy.sh" installer; fi
+  if [[ -e $STATE/command.path ]]; then
+    safe_command_path "$STATE/command.path" record
+    saved=$(cat "$STATE/command.path")
+    [[ -n $saved && $saved == /* && $saved != *$'\n'* && $saved != *$'\r'* ]] || fail 'Invalid saved command directory.'
+  fi
+  if (( !COMMAND_DIR_SET )); then COMMAND_DIR=${saved:-/usr/local/bin}; fi
+  [[ -n $COMMAND_DIR && $COMMAND_DIR != *$'\n'* && $COMMAND_DIR != *$'\r'* ]] || fail 'Invalid command directory.'
+  # Strip trailing slashes so that the symlink test also covers link/.
+  while [[ $COMMAND_DIR != / && $COMMAND_DIR == */ ]]; do COMMAND_DIR=${COMMAND_DIR%/}; done
+  [[ ! -L $COMMAND_DIR ]] || fail 'Command directory must not be a symlink.'
+  COMMAND_DIR=$(realpath -m -- "$COMMAND_DIR")
+  [[ -z $saved || $saved == "$COMMAND_DIR" ]] || fail 'This deployment already uses a different command directory; reuse its saved --command-dir.'
+  safe_bound_ancestors "$DIR" Deployment
+  safe_bound_ancestors "$COMMAND_DIR" Command
+  if [[ ! -e $COMMAND_DIR ]]; then
+    # shellcheck disable=SC2174 # Only publish the leaf directory; preserve parent permission policies.
+    mkdir -p -m 755 -- "$COMMAND_DIR"
+  fi
+  safe_command_path "$COMMAND_DIR" directory
+  lock=$COMMAND_DIR/.personalplatform-pp.lock
+  if [[ ! -e $lock && ! -L $lock ]]; then
+    (set -o noclobber; : > "$lock") || fail 'Could not create the command registration lock.'
+  fi
+  safe_command_path "$lock" lock
+  exec 7<>"$lock"
+  flock -n 7 || fail 'Another deployment operation holds the command directory lock.'
+  safe_command_path "$lock" lock
+  COMMAND_TEMP=$(mktemp "$COMMAND_DIR/.pp.new.XXXXXX")
+  render_command > "$COMMAND_TEMP"
+  chmod 755 -- "$COMMAND_TEMP"
+  target=$COMMAND_DIR/pp
+  if [[ -e $STATE/command.sha256 ]]; then
+    safe_command_path "$STATE/command.sha256" record
+    recorded=$(cat "$STATE/command.sha256")
+    [[ $recorded =~ ^[a-f0-9]{64}$ ]] || fail 'Invalid saved command checksum.'
+  fi
+  if [[ -e $target || -L $target ]]; then
+    safe_command_path "$target" launcher
+    current=$(sha256sum "$target"); current=${current%% *}
+    [[ -n $recorded && $current == "$recorded" ]] || cmp -s -- "$target" "$COMMAND_TEMP" || fail "Refusing unrelated, modified or foreign command: $target"
+  fi
+}
+command_record() {
+  local path=$1 value=$2
+  COMMAND_RECORD_TEMP=$(mktemp "$STATE/command.record.XXXXXX") || return 1
+  printf '%s\n' "$value" > "$COMMAND_RECORD_TEMP" && chmod 600 -- "$COMMAND_RECORD_TEMP" && sync -f "$COMMAND_RECORD_TEMP" && mv -f -- "$COMMAND_RECORD_TEMP" "$path" && sync -f "$STATE" || return 1
+  COMMAND_RECORD_TEMP=''
+}
+command_finalization_failed() {
+  printf 'ERROR: PersonalPlatform %s is accepted and healthy, but saving the installer or registering pp failed. Application writers remain running.\nRetry command registration with this installer:\n  /bin/bash %q --dir %q --command-dir %q --version %q' "$VERSION" "$INSTALLER_SOURCE" "$DIR" "$COMMAND_DIR" "$VERSION" >&2
+  [[ -z $BUNDLE_DIR ]] || printf ' --bundle-dir %q' "$BUNDLE_DIR" >&2
+  printf '\n' >&2
+  return 1
+}
+finalize_command() {
+  local checksum
+  INSTALLER_TEMP=$(mktemp "$STATE/deploy.new.XXXXXX") || { command_finalization_failed; return 1; }
+  if ! cp -- "$INSTALLER_SOURCE" "$INSTALLER_TEMP" || ! chmod 700 -- "$INSTALLER_TEMP" || ! sync -f "$INSTALLER_TEMP" || ! mv -f -T -- "$INSTALLER_TEMP" "$DIR/deploy.sh" || ! sync -f "$DIR"; then
+    command_finalization_failed; return 1
+  fi
+  INSTALLER_TEMP=''
+  # Remember custom directories even if the following atomic publication fails.
+  if ! command_record "$STATE/command.path" "$COMMAND_DIR"; then command_finalization_failed; return 1; fi
+  checksum=$(sha256sum "$COMMAND_TEMP"); checksum=${checksum%% *}
+  if ! sync -f "$COMMAND_TEMP" || ! mv -f -T -- "$COMMAND_TEMP" "$COMMAND_DIR/pp" || ! sync -f "$COMMAND_DIR"; then
+    command_finalization_failed; return 1
+  fi
+  COMMAND_TEMP=''
+  if ! command_record "$STATE/command.sha256" "$checksum"; then command_finalization_failed; return 1; fi
+  log "Server command: $COMMAND_DIR/pp"
+}
+preflight_command
 if [[ -d $PENDING && $RESUME == 0 ]]; then fail 'An operation is unfinished. Inspect --status, then use --resume for a forward retry or restore a matching backup manually.'; fi
 if (( RESUME )) && [[ ! -d $PENDING ]]; then fail 'No pending operation to resume.'; fi
 if [[ -e $ENV_FILE && -n $ENV_SOURCE ]]; then [[ -z $ACTIVE ]] && cmp "$ENV_FILE" "$ENV_SOURCE" >/dev/null || fail 'The saved environment already exists; --env-file cannot replace it.'; fi
@@ -243,6 +404,7 @@ acquire_bundle() {
 on_exit() {
   local status=$?
   trap - EXIT INT TERM
+  cleanup_command_files
   if (( status != 0 )) && [[ -d ${PENDING:-/nonexistent} ]]; then
     local phase; phase=$(state_value "$PENDING/phase")
     if [[ $phase == attempted || $phase == failed ]]; then
@@ -416,7 +578,7 @@ fi
 if [[ $ACTIVE == "$VERSION" && $RESUME == 0 ]]; then
   compose "$STAGE" "$ENV_FILE" exec -T backend wget -q -T 5 -O /dev/null http://127.0.0.1:8000/api/core/health/ready
   log "$VERSION is already active and healthy. Data and credentials were retained."
-  cp -- "${BASH_SOURCE[0]}" "$STATE/deploy.new"; chmod 700 "$STATE/deploy.new"; mv -f -- "$STATE/deploy.new" "$DIR/deploy.sh"
+  finalize_command
   exit 0
 fi
 if (( !RESUME )); then
@@ -512,7 +674,7 @@ atomic "$STATE/database.origin" "$DATABASE_ORIGIN"; atomic "$STATE/app.origin" "
 atomic "$STATE/database.id" "$DATABASE_ID"; atomic "$STATE/volumes.fingerprint" "$VOLUME_FINGERPRINT"
 atomic "$STATE/active" "$VERSION"
 rm -rf -- "$PENDING"
-cp -- "${BASH_SOURCE[0]}" "$STATE/deploy.new"; chmod 700 "$STATE/deploy.new"; mv -f -- "$STATE/deploy.new" "$DIR/deploy.sh"
+finalize_command
 log "PersonalPlatform $VERSION is healthy. Directory: $DIR"
 [[ -z $BACKUP ]] || log "Matching backup retained: $BACKUP"
 frontend_address=$(compose "$STAGE" "$ENV_FILE" port frontend 8080)

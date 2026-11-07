@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, chmodSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, chmodSync, statSync, symlinkSync, renameSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +10,7 @@ import { after, test } from 'node:test';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const script = join(repository, 'scripts/deploy.sh');
-const temporary = mkdtempSync(join(tmpdir(), 'pp-deploy-unit-'));
+const temporary = realpathSync(mkdtempSync(join(tmpdir(), 'pp-deploy-unit-')));
 after(() => rmSync(temporary, { recursive: true, force: true }));
 const bash = existsSync('/opt/homebrew/bin/bash') ? '/opt/homebrew/bin/bash' : '/bin/bash';
 const digest = c => `sha256:${c.repeat(64)}`;
@@ -106,24 +106,27 @@ if(args[0]==='compose'){
 }
 process.exit(1);
 `;
-function fixture() {
+function fixture(options = {}) {
   const root = join(temporary, `case-${++sequence}`), bin = join(root, 'bin');
   mkdirSync(bin, { recursive: true });
   const executable = (name, body) => { const file = join(bin, name); writeFileSync(file, body); chmodSync(file, 0o755); };
   executable('uname', '#!/bin/sh\nprintf "Linux\\n"\n');
-  executable('flock', '#!/bin/sh\nexit 0\n'); // Real kernel locking is verified in Linux runtime acceptance.
+  executable('flock', '#!/bin/sh\nif [ \"${DOCKER_TEST_COMMAND_LOCK_FAIL:-0}\" = 1 ] && [ \"$2\" = 7 ]; then exit 1; fi\nexit 0\n'); // Real kernel locking is verified in Linux runtime acceptance.
   executable('sync', '#!/bin/sh\nexit 0\n');
   executable('docker', `#!${process.execPath}\n${dockerFixture}`);
   executable('realpath', `#!${process.execPath}\nconst fs=require('fs'),p=require('path'),a=process.argv.slice(2),v=a.at(-1);console.log(a.includes('-e')?fs.realpathSync(v):p.resolve(v));\n`);
   if (process.platform !== 'linux') {
-    for (const name of ['cp', 'chmod', 'rm', 'mkdir']) executable(name, `#!${process.execPath}\nconst cp=require('child_process');const r=cp.spawnSync('/bin/${name}',process.argv.slice(2).filter(x=>x!=='--'),{stdio:'inherit'});process.exit(r.status??1);\n`);
+    for (const name of ['chmod', 'mkdir']) executable(name, `#!${process.execPath}\nconst cp=require('child_process');const r=cp.spawnSync('/bin/${name}',process.argv.slice(2).filter(x=>x!=='--'),{stdio:'inherit'});process.exit(r.status??1);\n`);
   }
+  executable('rm', `#!${process.execPath}\nconst cp=require('child_process'),a=process.argv.slice(2).filter(x=>process.platform==='linux'||x!=='--');if(process.env.DOCKER_TEST_FAIL_COMMAND_CLEANUP==='1'&&a.some(x=>x.includes('/.pp.new.')))process.exit(77);const r=cp.spawnSync('/bin/rm',a,{stdio:'inherit'});process.exit(r.status??1);\n`);
+  executable('cp', `#!${process.execPath}\nconst cp=require('child_process'),a=process.argv.slice(2).filter(x=>process.platform==='linux'||x!=='--');if(process.env.DOCKER_TEST_FAIL_INSTALLER_SAVE==='1'&&a.at(-1).includes('/.deploy/deploy.new.'))process.exit(74);const r=cp.spawnSync('/bin/cp',a,{stdio:'inherit'});process.exit(r.status??1);\n`);
+  executable('stat', `#!${process.execPath}\nconst fs=require('fs'),cp=require('child_process'),a=process.argv.slice(2),file=a.at(-1);if(a[0]==='-c'&&a[1]==='%u'&&file===process.env.DOCKER_TEST_COMMAND_PARENT&&process.env.DOCKER_TEST_COMMAND_PARENT_OWNER){console.log(process.env.DOCKER_TEST_COMMAND_PARENT_OWNER);process.exit(0);}if(process.platform!=='linux'&&a[0]==='-c'&&['%a','%u'].includes(a[1])){const s=fs.statSync(file);console.log(a[1]==='%a'?(s.mode&0o7777).toString(8):s.uid);process.exit(0);}const r=cp.spawnSync('/usr/bin/stat',a,{stdio:'inherit'});process.exit(r.status??1);\n`);
   executable('tar', `#!${process.execPath}\nconst cp=require('child_process');const args=process.argv.slice(2).filter(x=>process.platform==='linux'||x!=='--quoting-style=escape');const r=cp.spawnSync('/usr/bin/tar',args,{stdio:'inherit'});process.exit(r.status??1);\n`);
-  executable('mv', `#!${process.execPath}\nconst cp=require('child_process'),a=process.argv.slice(2).filter(x=>x!=='--'),publish=a.at(-1).endsWith('/.deploy/pending');if(publish&&process.env.DOCKER_TEST_KILL_JOURNAL==='before'){process.kill(process.ppid,'SIGKILL');process.exit(9);}const r=cp.spawnSync('/bin/mv',a,{stdio:'inherit'});if(a.at(-1).endsWith('/.deploy/active')&&r.status===0&&process.env.DOCKER_TEST_KILL_ACTIVE==='1')process.kill(process.ppid,'SIGKILL');if(publish&&r.status===0&&process.env.DOCKER_TEST_KILL_JOURNAL==='after')process.kill(process.ppid,'SIGKILL');process.exit(r.status??1);\n`);
-  executable('curl', `#!${process.execPath}\nconst fs=require('fs'),p=require('path'),a=process.argv.slice(2);if(process.env.DOCKER_TEST_DOWNLOAD_FAIL==='1')process.exit(22);if(a.includes('%{url_effective}')){console.log('https://github.com/AmazingUmi/PersonalPlatform/releases/tag/v0.1.0');process.exit(0);}const output=a[a.indexOf('-o')+1],url=a.find(v=>v.startsWith('https://'));fs.copyFileSync(p.join(process.env.DOCKER_TEST_ASSETS,url.split('/').at(-1)),output);\n`);
-  const target = join(root, 'install'), assets = bundle(join(root, 'assets'));
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, DOCKER_TEST_ROOT: root, DOCKER_TEST_ASSETS: assets, COMPOSE_PROJECT_NAME: 'ambient-wrong-project', POSTGRES_PASSWORD: 'ambient-must-not-win' };
-  return { root, target, assets, env, run: (args = [], overrides = {}) => spawnSync(bash, [script, '--dir', target, ...args], { encoding: 'utf8', env: { ...env, ...overrides }, timeout: 30_000 }), calls: () => existsSync(join(root, 'calls')) ? readFileSync(join(root, 'calls'), 'utf8').trim().split('\n').map(line => JSON.parse(line)) : [] };
+  executable('mv', `#!${process.execPath}\nconst cp=require('child_process'),a=process.argv.slice(2).filter(x=>x!=='--'&&(process.platform==='linux'||x!=='-T')),publish=a.at(-1).endsWith('/.deploy/pending');if(process.env.DOCKER_TEST_FAIL_COMMAND_PUBLISH==='1'&&a.at(-1)===process.env.DOCKER_TEST_COMMAND_DIR+'/pp')process.exit(75);if(process.env.DOCKER_TEST_FAIL_COMMAND_RECORD==='1'&&a.at(-1).endsWith('/.deploy/command.sha256'))process.exit(76);if(publish&&process.env.DOCKER_TEST_KILL_JOURNAL==='before'){process.kill(process.ppid,'SIGKILL');process.exit(9);}const r=cp.spawnSync('/bin/mv',a,{stdio:'inherit'});if(a.at(-1).endsWith('/.deploy/active')&&r.status===0&&process.env.DOCKER_TEST_KILL_ACTIVE==='1')process.kill(process.ppid,'SIGKILL');if(publish&&r.status===0&&process.env.DOCKER_TEST_KILL_JOURNAL==='after')process.kill(process.ppid,'SIGKILL');process.exit(r.status??1);\n`);
+  executable('curl', `#!${process.execPath}\nconst fs=require('fs'),p=require('path'),a=process.argv.slice(2);fs.appendFileSync(p.join(process.env.DOCKER_TEST_ROOT,'downloads'),JSON.stringify(a)+'\\n');if(process.env.DOCKER_TEST_DOWNLOAD_FAIL==='1')process.exit(22);if(a.includes('%{url_effective}')){console.log('https://github.com/AmazingUmi/PersonalPlatform/releases/tag/v0.1.0');process.exit(0);}const output=a[a.indexOf('-o')+1],url=a.find(v=>v.startsWith('https://'));fs.copyFileSync(p.join(process.env.DOCKER_TEST_ASSETS,url.split('/').at(-1)),output);\n`);
+  const target = join(root, options.targetName ?? 'install'), commandDir = join(root, options.commandName ?? 'commands'), assets = bundle(join(root, 'assets'));
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, DOCKER_TEST_ROOT: root, DOCKER_TEST_ASSETS: assets, DOCKER_TEST_COMMAND_DIR: commandDir, COMPOSE_PROJECT_NAME: 'ambient-wrong-project', POSTGRES_PASSWORD: 'ambient-must-not-win' };
+  return { root, target, assets, commandDir, command: join(commandDir, 'pp'), env, run: (args = [], overrides = {}) => spawnSync(bash, [script, '--dir', target, '--command-dir', commandDir, ...args], { encoding: 'utf8', env: { ...env, ...overrides }, timeout: 30_000 }), runSaved: (args = [], overrides = {}) => spawnSync(bash, [script, '--dir', target, ...args], { encoding: 'utf8', env: { ...env, ...overrides }, timeout: 30_000 }), launch: (args = [], overrides = {}, cwd = '/') => spawnSync(bash, [join(commandDir, 'pp'), ...args], { encoding: 'utf8', env: { ...env, ...overrides }, cwd, timeout: 30_000 }), calls: () => existsSync(join(root, 'calls')) ? readFileSync(join(root, 'calls'), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [] };
 }
 function privateEnv(f, password = 'private-admin-password') {
   const file = join(f.root, 'private.env');
@@ -289,5 +292,185 @@ test('forward retry completes a committed active version before pending cleanup,
     assert.equal(resumed.status, 0, resumed.stderr); assert.ok(!existsSync(pending)); assert.match(resumed.stdout, /v0.1.0 is healthy/);
     const applied = f.calls().filter(call => call.args[0] === 'compose' && call.args.includes('up')).at(-1).args;
     assert.ok(applied.includes('--force-recreate') && applied.includes('--no-deps')); assert.deepEqual(applied.slice(-2), ['backend', 'frontend']);
+  }
+});
+
+// Render the actual self-contained launcher without paying for an application
+// installation in argument/privilege tests. The saved installer is a recorder.
+function launcherFixture(options = {}) {
+  const f = fixture(options), source = readFileSync(script, 'utf8');
+  const render = source.match(/render_command\(\) \{\n[\s\S]*?\n\}\n(?=cleanup_command_files)/)[0];
+  const rendered = spawnSync(bash, ['-c', `DIR=$1; COMMAND_DIR=$2; ${render}\nrender_command`, 'render', f.target, f.commandDir], { encoding: 'utf8', env: f.env });
+  assert.equal(rendered.status, 0, rendered.stderr);
+  mkdirSync(f.target, { recursive: true }); mkdirSync(f.commandDir, { recursive: true });
+  writeFileSync(f.command, rendered.stdout); chmodSync(f.command, 0o755);
+  writeFileSync(join(f.target, 'deploy.sh'), '#!/bin/bash\nprintf "%s\\0" "$@" > "$DOCKER_TEST_ROOT/launcher-args"\nif [ "${DOCKER_TEST_COMMAND_SIGNAL:-0}" = 1 ]; then kill -TERM $$; fi\nexit "${DOCKER_TEST_COMMAND_EXIT:-0}"\n');
+  const sudo = join(f.root, 'bin/sudo');
+  writeFileSync(sudo, `#!${process.execPath}\nrequire('fs').writeFileSync(process.env.DOCKER_TEST_ROOT+'/sudo-args',JSON.stringify(process.argv.slice(2)));process.exit(93);\n`); chmodSync(sudo, 0o755);
+  return { ...f, forwarded: () => readFileSync(join(f.root, 'launcher-args'), 'utf8').split('\0').slice(0, -1), owner: uid => writeFileSync(f.command, readFileSync(f.command, 'utf8').replace(/ PP_OWNER_UID=\d+\n/, ` PP_OWNER_UID=${uid}\n`)) };
+}
+
+test('launcher binds quoted paths and forwards update/status/resume arguments, status and signals from any cwd', () => {
+  const f = launcherFixture({ targetName: 'install "quote" \'single\' $(touch executed)', commandName: 'commands "quote" \'single\' $(touch executed)' });
+  const bound = ['--dir', f.target, '--command-dir', f.commandDir];
+  const defaultUpdate = spawnSync('/bin/bash', [f.command, 'update'], { encoding: 'utf8', env: f.env, cwd: '/', timeout: 5000 });
+  assert.equal(defaultUpdate.status, 0, defaultUpdate.stderr); assert.deepEqual(f.forwarded(), bound);
+  const bundleDir = `${f.root}/assets $(touch evaluated) "x" 'y'`;
+  const update = f.launch(['update', '--version', 'v1.2.3', '--bundle-dir', bundleDir], { PP_DIRECTORY: '/wrong', PP_COMMAND_DIRECTORY: '/wrong', PP_OWNER_UID: '0', DIR: '/wrong', COMMAND_DIR: '/wrong', DOCKER_TEST_COMMAND_EXIT: '27' }, f.root);
+  assert.equal(update.status, 27, update.stderr); assert.deepEqual(f.forwarded(), [...bound, '--version', 'v1.2.3', '--bundle-dir', bundleDir]);
+  assert.ok(!existsSync(join(f.root, 'executed')) && !existsSync(join(f.root, 'evaluated')));
+  for (const command of ['status', 'resume']) {
+    const result = f.launch([command]); assert.equal(result.status, 0, result.stderr); assert.deepEqual(f.forwarded(), [...bound, `--${command}`]);
+  }
+  const signaled = f.launch(['status'], { DOCKER_TEST_COMMAND_SIGNAL: '1' }); assert.equal(signaled.signal, 'SIGTERM', signaled.stderr);
+  assert.ok(!existsSync(join(f.root, 'sudo-args')));
+});
+
+test('launcher help is available without its private directory or sudo, including native Bash 3', () => {
+  const f = launcherFixture(); f.owner(0);
+  renameSync(f.target, `${f.target}.private-unavailable`);
+  for (const args of [[], ['help'], ['--help'], ['-h']]) {
+    const result = spawnSync('/bin/bash', [f.command, ...args], { encoding: 'utf8', env: f.env, cwd: '/', timeout: 5000 });
+    assert.equal(result.status, 0, result.stderr); assert.match(result.stdout, /Usage: pp update/);
+  }
+  assert.ok(!existsSync(join(f.root, 'sudo-args')) && !existsSync(join(f.root, 'launcher-args')));
+});
+
+test('launcher rejects unknown commands, forbidden flags and incomplete values before invoking the manager or sudo', () => {
+  const f = launcherFixture(); f.owner(0);
+  for (const args of [['unknown'], ['--version', 'v0.1.0'], ['update', '--dir', f.root], ['update', '--command-dir', f.root], ['update', '--adopt'], ['update', '--resume'], ['update', '--status'], ['update', '--env-file', 'secret'], ['update', '--version'], ['update', '--bundle-dir', ''], ['status', '--version', 'v0.1.0'], ['resume', '--dir', f.root], ['help', 'extra']]) {
+    const result = f.launch(args); assert.notEqual(result.status, 0, args.join(' ')); assert.match(result.stderr, /Unknown|takes no arguments|Missing/);
+  }
+  assert.ok(!existsSync(join(f.root, 'sudo-args')) && !existsSync(join(f.root, 'launcher-args')));
+});
+
+test('launcher refuses a different non-root owner and uses ordinary sudo only for a root-owned deployment', t => {
+  const f = launcherFixture(); const uid = process.getuid();
+  f.owner(uid + 1 || 1);
+  const mismatch = f.launch(['status']); assert.notEqual(mismatch.status, 0); assert.match(mismatch.stderr, /Run pp as that deployment owner/);
+  assert.ok(!existsSync(join(f.root, 'sudo-args')) && !existsSync(join(f.root, 'launcher-args')));
+  if (uid === 0) { t.diagnostic('Root-owned sudo routing is exercised by non-root process tests; this test process is already root.'); return; }
+  f.owner(0);
+  const result = f.launch(['update', '--version', 'v0.1.0']); assert.equal(result.status, 93, result.stderr);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root, 'sudo-args'), 'utf8')), ['--', '/bin/bash', join(f.target, 'deploy.sh'), '--dir', f.target, '--command-dir', f.commandDir, '--version', 'v0.1.0']);
+  assert.ok(!existsSync(join(f.root, 'launcher-args')));
+});
+
+test('command directory, lock and launcher conflicts fail before downloads or application mutation', () => {
+  for (const kind of ['directory-mode', 'directory-link', 'lock-mode', 'lock-link', 'target-directory', 'target-link', 'target-mode', 'target-unrelated', 'target-foreign', 'held-lock']) {
+    const f = fixture(); mkdirSync(f.commandDir);
+    const retained = join(f.root, 'retained'); writeFileSync(retained, 'do not touch\n');
+    if (kind === 'directory-mode') chmodSync(f.commandDir, 0o777);
+    if (kind === 'directory-link') { rmSync(f.commandDir, { recursive: true }); symlinkSync(f.root, f.commandDir); }
+    if (kind === 'lock-mode') { writeFileSync(join(f.commandDir, '.personalplatform-pp.lock'), 'lock'); chmodSync(join(f.commandDir, '.personalplatform-pp.lock'), 0o666); }
+    if (kind === 'lock-link') symlinkSync(retained, join(f.commandDir, '.personalplatform-pp.lock'));
+    if (kind === 'target-directory') mkdirSync(f.command);
+    if (kind === 'target-link') symlinkSync(retained, f.command);
+    if (kind === 'target-mode' || kind === 'target-unrelated') { writeFileSync(f.command, 'unrelated command\n'); chmodSync(f.command, kind === 'target-mode' ? 0o777 : 0o755); }
+    if (kind === 'target-foreign') {
+      const foreign = launcherFixture(); writeFileSync(f.command, readFileSync(foreign.command)); chmodSync(f.command, 0o755);
+    }
+    const before = existsSync(f.command) && statSync(f.command).isFile() ? readFileSync(f.command, 'utf8') : null;
+    const result = f.run(['--version', 'v0.1.0'], kind === 'held-lock' ? { DOCKER_TEST_COMMAND_LOCK_FAIL: '1' } : {});
+    assert.notEqual(result.status, 0, kind); assert.equal(f.calls().length, 0, kind); assert.ok(!existsSync(join(f.root, 'downloads')), kind); assertNoStartup(f);
+    assert.equal(readFileSync(retained, 'utf8'), 'do not touch\n');
+    if (before !== null) assert.equal(readFileSync(f.command, 'utf8'), before, kind);
+    if (kind !== 'directory-link') assert.ok(!readdirSync(f.commandDir).some(name => name.startsWith('.pp.new.')), kind);
+  }
+});
+
+test('successful installation registers a readable executable and same-version rerun repairs it using the saved command directory', () => {
+  const f = fixture({ commandName: 'private bin with spaces' }), env = privateEnv(f), success = { DOCKER_TEST_SUCCESS: '1' };
+  const initial = f.run(['--version', 'v0.1.0', '--bundle-dir', f.assets, '--env-file', env], success);
+  assert.equal(initial.status, 0, initial.stderr); assert.equal(statSync(f.commandDir).mode & 0o777, 0o755); assert.equal(statSync(f.command).mode & 0o777, 0o755);
+  assert.equal(statSync(join(f.target, 'deploy.sh')).mode & 0o777, 0o700);
+  assert.equal(readFileSync(join(f.target, '.deploy/command.path'), 'utf8'), `${f.commandDir}\n`);
+  assert.equal(readFileSync(join(f.target, '.deploy/command.sha256'), 'utf8'), `${hash(readFileSync(f.command))}\n`);
+  const privateBefore = readFileSync(join(f.target, '.env.release'), 'utf8');
+  rmSync(f.command);
+  const repaired = f.runSaved(['--version', 'v0.1.0', '--bundle-dir', f.assets], success);
+  assert.equal(repaired.status, 0, repaired.stderr); assert.match(repaired.stdout, /already active and healthy/); assert.ok(existsSync(f.command));
+  assert.equal(readFileSync(join(f.target, '.env.release'), 'utf8'), privateBefore);
+  assert.equal(f.calls().filter(call => call.args.includes('up')).length, 1); assert.ok(!f.calls().some(call => call.args.includes('stop')));
+  // Preserve an explicitly private existing directory's mode.
+  chmodSync(f.commandDir, 0o700);
+  const repeated = f.runSaved(['--version', 'v0.1.0', '--bundle-dir', f.assets], success); assert.equal(repeated.status, 0, repeated.stderr); assert.equal(statSync(f.commandDir).mode & 0o777, 0o700);
+  const callCount = f.calls().length, changedDirectory = f.run(['--version', 'v0.1.0', '--command-dir', join(f.root, 'different')], success);
+  assert.notEqual(changedDirectory.status, 0); assert.match(changedDirectory.stderr, /different command directory/); assert.equal(f.calls().length, callCount);
+  writeFileSync(f.command, `${readFileSync(f.command, 'utf8')}# changed by hand\n`);
+  const modified = f.runSaved(['--version', 'v0.1.0'], success); assert.notEqual(modified.status, 0); assert.match(modified.stderr, /modified/); assert.equal(f.calls().length, callCount);
+});
+
+test('registration conflicts during forward retry cannot trigger the pending deployment recovery trap', () => {
+  const f = fixture(), env = privateEnv(f), success = { DOCKER_TEST_SUCCESS: '1' };
+  const interrupted = f.run(['--version', 'v0.1.0', '--bundle-dir', f.assets, '--env-file', env], { ...success, DOCKER_TEST_KILL_ACTIVE: '1' });
+  assert.equal(interrupted.signal, 'SIGKILL', interrupted.stderr);
+  writeFileSync(f.command, 'unrelated executable\n'); chmodSync(f.command, 0o755);
+  writeFileSync(join(f.root, 'calls'), '');
+  const resumed = f.run(['--resume'], success);
+  assert.notEqual(resumed.status, 0); assert.match(resumed.stderr, /Refusing unrelated/); assert.equal(f.calls().length, 0);
+  assert.equal(readFileSync(join(f.target, '.deploy/pending/phase'), 'utf8'), 'attempted\n');
+});
+
+test('installer-save and launcher-publication failures leave an accepted deployment running and offer the new absolute installer retry', () => {
+  for (const failure of ['DOCKER_TEST_FAIL_INSTALLER_SAVE', 'DOCKER_TEST_FAIL_COMMAND_PUBLISH']) {
+    const f = fixture(), env = privateEnv(f), success = { DOCKER_TEST_SUCCESS: '1' };
+    mkdirSync(join(f.target, '.deploy'), { recursive: true }); writeFileSync(join(f.target, '.deploy/managed'), '1\n');
+    writeFileSync(join(f.target, 'deploy.sh'), '#!/bin/bash\necho old-installer-does-not-know-command-dir >&2\nexit 72\n');
+    const result = f.run(['--version', 'v0.1.0', '--bundle-dir', f.assets, '--env-file', env], { ...success, [failure]: '1' });
+    assert.notEqual(result.status, 0, failure); assert.match(result.stderr, /accepted and healthy/); assert.match(result.stderr, /writers remain running/); assert.ok(result.stderr.includes(`/bin/bash ${script} --dir`), result.stderr);
+    assert.equal(readFileSync(join(f.target, '.deploy/active'), 'utf8'), 'v0.1.0\n'); assert.ok(!existsSync(join(f.target, '.deploy/pending')));
+    assert.ok(!existsSync(f.command)); assert.ok(!f.calls().some(call => call.args.includes('stop') || call.args.includes('start')));
+    assert.ok(!readdirSync(f.commandDir).some(name => name.startsWith('.pp.new.')));
+    assert.ok(!readdirSync(join(f.target, '.deploy')).some(name => /^(deploy.new|command.record)\./.test(name)));
+    const retried = f.run(['--version', 'v0.1.0', '--bundle-dir', f.assets], success);
+    assert.equal(retried.status, 0, retried.stderr); assert.ok(existsSync(f.command)); assert.equal(f.calls().filter(call => call.args.includes('up')).length, 1);
+  }
+});
+
+test('a newly published exact launcher can be retried when its old private checksum was not updated', () => {
+  const f = fixture(), env = privateEnv(f), success = { DOCKER_TEST_SUCCESS: '1' };
+  const installed = f.run(['--version', 'v0.1.0', '--bundle-dir', f.assets, '--env-file', env], success); assert.equal(installed.status, 0, installed.stderr);
+  const canonical = readFileSync(f.command, 'utf8'), previous = `${canonical}# older managed launcher template\n`, previousHash = `${hash(previous)}\n`;
+  writeFileSync(f.command, previous); writeFileSync(join(f.target, '.deploy/command.sha256'), previousHash);
+  const failedRecord = f.runSaved(['--version', 'v0.1.0', '--bundle-dir', f.assets], { ...success, DOCKER_TEST_FAIL_COMMAND_RECORD: '1' });
+  assert.notEqual(failedRecord.status, 0); assert.match(failedRecord.stderr, /accepted and healthy/); assert.equal(readFileSync(f.command, 'utf8'), canonical);
+  assert.equal(readFileSync(join(f.target, '.deploy/command.sha256'), 'utf8'), previousHash); assert.ok(!existsSync(join(f.target, '.deploy/pending')));
+  const retried = f.runSaved(['--version', 'v0.1.0', '--bundle-dir', f.assets], success);
+  assert.equal(retried.status, 0, retried.stderr); assert.equal(readFileSync(join(f.target, '.deploy/command.sha256'), 'utf8'), `${hash(canonical)}\n`);
+  assert.ok(!f.calls().some(call => call.args.includes('stop') || call.args.includes('start')));
+});
+
+
+test('bound deployment and command paths reject writable or foreign-owned ancestors before Docker or downloads', () => {
+  for (const binding of ['deployment', 'command']) for (const hazard of ['writable', 'foreign-owner']) {
+    const f = fixture(binding === 'deployment' ? { targetName: 'unsafe-parent/install' } : { commandName: 'unsafe-parent/commands' });
+    const leaf = binding === 'deployment' ? f.target : f.commandDir, parent = dirname(leaf);
+    mkdirSync(leaf, { recursive: true }); chmodSync(leaf, 0o755);
+    if (hazard === 'writable') chmodSync(parent, 0o777);
+    const result = f.run(['--version', 'v0.1.0'], { DOCKER_TEST_INFO_FAIL: '1', ...(hazard === 'foreign-owner' ? { DOCKER_TEST_COMMAND_PARENT: parent, DOCKER_TEST_COMMAND_PARENT_OWNER: String(process.getuid() + 1000) } : {}) });
+    assert.notEqual(result.status, 0); assert.match(result.stderr, /ancestor/, `${binding}/${hazard}: ${result.stderr}`);
+    assert.equal(f.calls().length, 0); assert.ok(!existsSync(join(f.root, 'downloads'))); assertNoStartup(f);
+  }
+});
+
+
+test('failed command temporary cleanup preserves the deployment failure status and pending recovery behavior', () => {
+  const f = fixture(), env = privateEnv(f);
+  const result = f.run(['--version', 'v0.1.0', '--bundle-dir', f.assets, '--env-file', env], { DOCKER_TEST_FAIL_COMMAND_CLEANUP: '1' });
+  assert.equal(result.status, 91, result.stderr);
+  assert.equal(readFileSync(join(f.target, '.deploy/pending/phase'), 'utf8'), 'failed\n');
+  assert.match(result.stderr, /Data and recovery artifacts were retained/);
+});
+
+test('saved installer directory and symlink targets are refused before Docker or downloads', () => {
+  for (const kind of ['directory', 'symlink']) {
+    const f = fixture(), saved = join(f.target, 'deploy.sh');
+    mkdirSync(join(f.target, '.deploy'), { recursive: true }); writeFileSync(join(f.target, '.deploy/managed'), '1\n');
+    const retained = join(f.root, 'retained-installer'); mkdirSync(retained); writeFileSync(join(retained, 'keep'), 'unchanged\n');
+    if (kind === 'directory') mkdirSync(saved); else symlinkSync(retained, saved);
+    const result = f.run(['--version', 'v0.1.0'], { DOCKER_TEST_INFO_FAIL: '1' });
+    assert.notEqual(result.status, 0); assert.match(result.stderr, /installer|symlink/); assert.equal(f.calls().length, 0);
+    assert.ok(!existsSync(join(f.root, 'downloads'))); assert.equal(readFileSync(join(retained, 'keep'), 'utf8'), 'unchanged\n');
   }
 });

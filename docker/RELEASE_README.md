@@ -10,11 +10,13 @@
 sudo bash deploy.sh
 ```
 
-脚本用于 Linux，除 Docker/Compose 外还需要 Bash、curl、tar、sha256sum、openssl 和 flock。默认安装到 `/opt/personal-platform`，首次询问管理员用户名和密码（密码隐藏输入），自动生成数据库密码，并选择最新稳定发行版；要指定版本则追加 `--version` 和 `release.json` 中的版本号，例如 `--version v0.1.0`。后续执行 `sudo bash /opt/personal-platform/deploy.sh` 即可检查同版本健康或备份后更新。应用、账号、附件、WebDAV 密钥和私有配置沿用原部署。脚本不安装 Docker，也不配置域名或 HTTPS。
+脚本用于 Linux，除 Docker/Compose 外还需要 Bash、curl、tar、sha256sum、openssl 和 flock。默认安装到 `/opt/personal-platform`，首次询问管理员用户名和密码（密码隐藏输入），自动生成数据库密码，并选择最新稳定发行版；要指定版本则追加 `--version` 和 `release.json` 中的版本号，例如 `--version v0.1.0`。成功后注册 `/usr/local/bin/pp`，后续执行 `pp update` 即可检查同版本健康或备份后更新；`pp status` 查看状态，`pp help` 查看用法。root 管理的部署在需要时请求 sudo 验证。应用、账号、附件、WebDAV 密钥和私有配置沿用原部署。脚本不安装 Docker，也不配置域名或 HTTPS。
 
 已有 `v0.1.0` 部署包不包含这个后来增加的脚本，也不会被替换。可按[项目部署指南](https://github.com/AmazingUmi/PersonalPlatform/blob/main/doc/DEPLOYMENT.md) 中交付的固定源代码提交地址，先下载完整脚本再执行；无需重发应用镜像。若要接管当前手动发行部署，使用 `bash /path/to/deploy.sh --dir /actual/manual/release/directory --adopt --version v0.1.0`，其中实际目录包含真实 `.env.release` 及本包文件。脚本核验项目和卷身份后保留原数据；源码构建或任意自定义拓扑须先手动核对。
 
-脚本管理的更新在启动新后端前保存数据库、完整存储、旧配置及版本身份。新后端尝试启动后失败时，保留备份和待处理状态并停止写入；先运行保存的脚本加 `--status` 查看，再用 `--resume` 继续记录的同一目标。不适合继续时，需匹配旧版本的完整备份恢复，不能只换旧镜像或删除状态。脚本管理目录中的 `backups/` 和 `.deploy/` 为私有恢复资料，不自动清理。
+已用旧脚本管理的部署，重新下载新版脚本并对原 `--dir` 运行一次，即可补装 `pp`。命令绑定原目录；`--command-dir PATH` 可选择执行用户拥有且在 PATH 中的另一命令目录，后续沿用。遇到无关或其他部署的同名入口时拒绝覆盖；非 root 部署须明确选择有写权限的命令目录。
+
+脚本管理的更新在启动新后端前保存数据库、完整存储、旧配置及版本身份。新后端尝试启动后失败时，保留备份和待处理状态并停止写入；先运行 `pp status` 查看，再用 `pp resume` 继续记录的同一目标。不适合继续时，需匹配旧版本的完整备份恢复，不能只换旧镜像或删除状态。脚本管理目录中的 `backups/` 和 `.deploy/` 为私有恢复资料，不自动清理。
 
 以下是手动安装方式：
 

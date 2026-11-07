@@ -23,13 +23,25 @@ curl -fL --proto '=https' --tlsv1.2 'https://raw.githubusercontent.com/AmazingUm
 
 默认部署目录是 `/opt/personal-platform`。首次运行询问管理员用户名，并要求输入两次密码，密码输入不显示；数据库密码自动生成。用户名为 3–32 个小写字母、数字、下划线或连字符，管理员密码为 8–256 个字符。凭据保存在私有 `.env.release`，重跑和更新不重新生成密码。脚本先解析一次 GitHub 最新稳定发行版，再固定这一版的配套镜像；也可以明确指定 `--version v0.1.0`。
 
-成功后，脚本将自身保存为 `/opt/personal-platform/deploy.sh`。后续更新执行：
+成功后，脚本将自身保存为 `/opt/personal-platform/deploy.sh`，并注册 `/usr/local/bin/pp`。在任意目录更新执行：
 
 ```bash
-sudo bash /opt/personal-platform/deploy.sh
+pp update
 ```
 
-脚本下载并校验部署包、拉取两个配套镜像后，才会停止前后端写入和调度，备份数据库、整个存储卷（含 WebDAV 密钥）、原私有配置、旧版本元数据和实际镜像/卷身份，再启动新应用。常规更新沿用原数据库容器，不升级 PostgreSQL。健康和就绪检查通过后才记录新版本为当前版本；同版本重复运行只检查健康，不重置账号或重建数据。
+| 命令 | 用途 |
+|---|---|
+| `pp update` | 更新到最新稳定发行版 |
+| `pp update --version v0.1.0` | 选择明确的稳定版本，不接受降级 |
+| `pp status` | 查看当前版本和未完成操作 |
+| `pp resume` | 排除故障后继续记录的同一目标版本 |
+| `pp help` | 查看用法，无须访问私有部署资料或 sudo |
+
+命令绑定原部署目录，root 管理的部署在普通用户调用时按系统 sudo 规则请求验证；以其他普通用户管理的部署，须由原管理用户执行。命令不修改 sudoers。服务器 PATH 需包含命令目录，默认可直接使用 `/usr/local/bin/pp`。原来的完整路径命令 `sudo bash /opt/personal-platform/deploy.sh` 仍可使用。
+
+脚本下载并校验部署包、拉取两个配套镜像后，才会停止前后端写入和调度，备份数据库、整个存储卷（含 WebDAV 密钥）、原私有配置、旧版本元数据和实际镜像/卷身份，再启动新应用。常规更新沿用原数据库容器，不升级 PostgreSQL。健康和就绪检查通过后才记录新版本为当前版本；同版本重复运行检查健康并登记命令入口，不重置账号或重建数据。
+
+已用旧脚本部署的服务器，先按上面的固定提交地址重新下载新版脚本，再执行 `sudo bash personal-platform-deploy.sh --dir /opt/personal-platform` 补装 `pp`；非默认安装须填写原来的真实目录。单纯运行旧版保存的脚本不能获得后来新增的命令功能。新脚本遇到已有的无关 `pp`、其他部署的入口或被手动修改过的入口会明确拒绝覆盖，并在停写前退出。
 
 安装目录中保留 `.env.release`、`releases/`、私有 `backups/` 和 `.deploy/` 状态。不要手工覆盖这些状态文件或删除恢复资料。备份默认不自动清理，请按服务器磁盘容量另行安排留存和异地副本。此处管理的是服务器上这一套已有数据卷，不会自动导入电脑上的开发数据库。
 
@@ -38,6 +50,7 @@ sudo bash /opt/personal-platform/deploy.sh
 | 参数 | 用途 |
 |---|---|
 | `--dir /path/to/deployment` | 指定稳定部署目录；之后每次操作都使用同一路径 |
+| `--command-dir /path/to/bin` | 首次选择 `pp` 命令目录，默认 `/usr/local/bin`；后续沿用保存的目录，一个命令目录绑定一套部署 |
 | `--version v0.1.0` | 安装或更新到明确的稳定版本；不接受降级或预发行版本 |
 | `--env-file /private/initial.env` | 首次安装读取已准备的私有生产配置，适合非交互执行；更新不接受用它替换现有凭据 |
 | `--bundle-dir /path/to/assets --version v0.1.0` | 使用提前下载的 `personalplatform-v0.1.0.tar.gz` 和外部 `SHA256SUMS`；仍会做相同校验并从镜像仓库拉取镜像，需要访问镜像仓库 |
@@ -51,6 +64,8 @@ sudo bash /opt/personal-platform/deploy.sh
 sudo bash personal-platform-deploy.sh --dir /srv/personal-platform --version v0.1.0 --env-file /private/personal-platform.env
 ```
 
+非 root 部署可显式选用自己拥有的命令目录，例如追加 `--command-dir "$HOME/.local/bin"`，并确保该目录已在自己的 PATH 中。目录、锁和入口须由执行部署的用户拥有，且不能允许其他用户写入；部署和命令目录的父路径也须由该用户或 root 控制，避免整个目录被其他用户替换。root 管理的部署宜使用 `/opt`、`/srv` 等受 root 控制的路径。脚本不会编辑 shell 配置。`pp` 固定使用登记的目录，拒绝 `--dir`、`--command-dir`、`--env-file` 或 `--adopt` 等身份修改参数。若健康验收后登记命令遇到文件系统错误，已接受的服务保持运行；按错误中给出的本次新脚本路径与原 `--dir` 重跑即可重试登记。
+
 ### 接管已有手动发行部署
 
 `--dir` 必须指向当前实际使用的、正在运行的发行部署目录，其中应有真实 `.env.release` 及 `docker/docker-compose.release.yml`、`docker/docker-compose.runtime.yml` 和版本元数据。先另存一份完整备份，再明确接管；例如原目录为 `/srv/personalplatform-v0.1.0`：
@@ -59,14 +74,14 @@ sudo bash personal-platform-deploy.sh --dir /srv/personal-platform --version v0.
 sudo bash personal-platform-deploy.sh --dir /srv/personalplatform-v0.1.0 --adopt --version v0.1.0
 ```
 
-脚本会核对项目标签与数据库、存储的实际挂载身份；同版本接管不切换应用。接管后继续在这个目录运行 `sudo bash /srv/personalplatform-v0.1.0/deploy.sh`。首次部署遇到已有同名项目或卷会拒绝，不能用修改项目名的方式绕过并把空数据库当作旧数据。源码构建、任意自定义卷或其他非标准拓扑可能被拒绝，应先按本指南手动核对迁移，不能强行自动接管。
+脚本会核对项目标签与数据库、存储的实际挂载身份；同版本接管不切换应用，并将 `pp` 绑定到这个真实目录，之后执行 `pp update`。首次部署遇到已有同名项目或卷会拒绝，不能用修改项目名的方式绕过并把空数据库当作旧数据。源码构建、任意自定义卷或其他非标准拓扑可能被拒绝，应先按本指南手动核对迁移，不能强行自动接管。
 
 ### 更新失败和恢复
 
 ```bash
-sudo bash /opt/personal-platform/deploy.sh --status
+pp status
 # 排除网络、镜像或运行环境问题后，继续已记录的同一目标：
-sudo bash /opt/personal-platform/deploy.sh --resume
+pp resume
 ```
 
 下载或拉取失败发生在停写之前，原应用继续运行。备份失败且新后端尚未尝试启动时，脚本只恢复本次停止的旧服务。新后端一旦尝试启动，数据库可能已迁移；此后失败或中断会保留待处理状态、备份和数据，并停止应用写入。普通重跑不能越过此状态，也不能换一个版本替代未完成操作；`--resume` 是向同一目标继续重试。
