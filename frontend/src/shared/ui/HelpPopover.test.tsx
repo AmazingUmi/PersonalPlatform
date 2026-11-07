@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HelpPopover } from "./HelpPopover";
 import { I18nProvider } from "../i18n";
@@ -29,6 +29,48 @@ describe("question-mark help", () => {
     expect(parent).not.toHaveBeenCalled();
     fireEvent.pointerDown(screen.getByText("Outside"));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+  it("keeps Escape dismissal through hover re-entry caused by removing the panel", async () => {
+    render(<><HelpPopover label="Connection">Explanation</HelpPopover><button>Outside</button></>);
+    const trigger = screen.getByRole("button", { name: "Help: Connection" });
+    fireEvent.mouseEnter(trigger);
+    fireEvent.click(trigger);
+    await waitFor(() => expect(screen.getByRole("dialog")).toHaveFocus());
+    // A clamped panel can cover its trigger while the pointer stays still.
+    fireEvent.mouseLeave(trigger);
+    fireEvent.mouseEnter(screen.getByRole("dialog"));
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+    // Removing the covering panel synthesizes mouse-enter on the trigger.
+    fireEvent.mouseEnter(trigger);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    // A subsequent real leave/re-entry begins a fresh hover interaction.
+    fireEvent.mouseLeave(trigger);
+    fireEvent.mouseEnter(trigger);
+    expect(screen.getByRole("dialog")).toBeVisible();
+    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.click(trigger);
+    await waitFor(() => expect(screen.getByRole("dialog")).toHaveFocus());
+    fireEvent.keyDown(document, { key: "Escape" });
+    act(() => { screen.getByRole("button", { name: "Outside" }).focus(); trigger.focus(); });
+    expect(screen.getByRole("dialog")).toBeVisible();
+  });
+  it("does not let a dismissed click's deferred focus steal a new hover panel", () => {
+    let focusFrame: FrameRequestCallback | undefined;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation(callback => { focusFrame = callback; return 1; });
+    render(<HelpPopover label="Connection">Explanation</HelpPopover>);
+    const trigger = screen.getByRole("button", { name: "Help: Connection" });
+    fireEvent.click(trigger);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(trigger).toHaveFocus();
+    fireEvent.mouseLeave(trigger);
+    fireEvent.mouseEnter(trigger);
+    const hoverPanel = screen.getByRole("dialog");
+    expect(hoverPanel).not.toHaveFocus();
+    act(() => focusFrame?.(0));
+    expect(hoverPanel).not.toHaveFocus();
+    expect(trigger).toHaveFocus();
   });
   it("uses Chinese accessible controls and cleans up a portal on unmount", () => {
     const view = render(<I18nProvider initialLanguage="zh"><HelpPopover label="备份">说明</HelpPopover></I18nProvider>);
