@@ -9,6 +9,19 @@ permissions:
   contents: read
 
 jobs:
+  deploy-lifecycle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Exercise the standalone Linux installer using the public release and
+      # isolated projects. No host npm install or application build is needed.
+      - name: Verify one-command installation and data-preserving updates
+        run: npm run verify:deploy
+
   docker-production:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -76,6 +89,7 @@ jobs:
       - run: npm test
       - run: npm run test:benchmark:runtime
       - run: npm run test:release
+      - run: npm run test:deploy
       - run: npm run test:integration
       - name: Dependency security scan
         run: npm audit --audit-level=high

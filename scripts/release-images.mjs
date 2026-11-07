@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -108,6 +108,8 @@ export function createBundle(sourceRoot, output, release) {
   mkdirSync(join(bundle, "docker"), { recursive: true });
   const files = ["docker/docker-compose.release.yml", "docker/docker-compose.runtime.yml"];
   for (const file of files) copyFileSync(join(sourceRoot, file), join(bundle, file));
+  copyFileSync(join(sourceRoot, "scripts/deploy.sh"), join(bundle, "deploy.sh"));
+  chmodSync(join(bundle, "deploy.sh"), 0o755);
   copyFileSync(join(sourceRoot, "docker/RELEASE_README.md"), join(bundle, "README.md"));
   let environment = readFileSync(join(sourceRoot, ".env.release.example"), "utf8");
   for (const key of ["POSTGRES_PASSWORD", "BOOTSTRAP_ADMIN_PASSWORD", "DATA_BACKUP_ENCRYPTION_KEY"]) {
@@ -123,7 +125,7 @@ export function createBundle(sourceRoot, output, release) {
   writeFileSync(join(bundle, ".env.release.example"), environment);
   const metadata = `${JSON.stringify(release, null, 2)}\n`;
   writeFileSync(join(bundle, "release.json"), metadata);
-  const content = [...files, "README.md", ".env.release.example", "release.json"].sort();
+  const content = [...files, "deploy.sh", "README.md", ".env.release.example", "release.json"].sort();
   writeFileSync(join(bundle, "SHA256SUMS"), content.map((file) => `${hash(readFileSync(join(bundle, file)))}  ${file}\n`).join(""));
   const archive = `${base}.tar.gz`;
   const packed = spawnSync("tar", ["-czf", join(output, archive), "-C", output, base], { encoding: "utf8" });

@@ -4,7 +4,21 @@
 
 ## 首次启动
 
-先使用同一 GitHub Release 的外部 `SHA256SUMS` 检查下载的压缩包，再解压进入 `personalplatform-v0.1.0/`。在解压目录执行：
+包含 `deploy.sh` 的新版部署包可在解压目录执行：
+
+```bash
+sudo bash deploy.sh
+```
+
+脚本用于 Linux，除 Docker/Compose 外还需要 Bash、curl、tar、sha256sum、openssl 和 flock。默认安装到 `/opt/personal-platform`，首次询问管理员用户名和密码（密码隐藏输入），自动生成数据库密码，并选择最新稳定发行版；要指定版本则追加 `--version` 和 `release.json` 中的版本号，例如 `--version v0.1.0`。后续执行 `sudo bash /opt/personal-platform/deploy.sh` 即可检查同版本健康或备份后更新。应用、账号、附件、WebDAV 密钥和私有配置沿用原部署。脚本不安装 Docker，也不配置域名或 HTTPS。
+
+已有 `v0.1.0` 部署包不包含这个后来增加的脚本，也不会被替换。可按[项目部署指南](https://github.com/AmazingUmi/PersonalPlatform/blob/main/doc/DEPLOYMENT.md) 中交付的固定源代码提交地址，先下载完整脚本再执行；无需重发应用镜像。若要接管当前手动发行部署，使用 `bash /path/to/deploy.sh --dir /actual/manual/release/directory --adopt --version v0.1.0`，其中实际目录包含真实 `.env.release` 及本包文件。脚本核验项目和卷身份后保留原数据；源码构建或任意自定义拓扑须先手动核对。
+
+脚本管理的更新在启动新后端前保存数据库、完整存储、旧配置及版本身份。新后端尝试启动后失败时，保留备份和待处理状态并停止写入；先运行保存的脚本加 `--status` 查看，再用 `--resume` 继续记录的同一目标。不适合继续时，需匹配旧版本的完整备份恢复，不能只换旧镜像或删除状态。脚本管理目录中的 `backups/` 和 `.deploy/` 为私有恢复资料，不自动清理。
+
+以下是手动安装方式：
+
+先使用同一 GitHub Release 的外部 `SHA256SUMS` 检查下载的压缩包，再进入对应的解压目录（首版为 `personalplatform-v0.1.0/`）。在解压目录执行：
 
 ```bash
 sha256sum -c SHA256SUMS
@@ -34,7 +48,7 @@ docker compose --env-file .env.release -f docker/docker-compose.release.yml ps
 
 更新前停止写入并备份相匹配的数据库、整个存储卷、平台配置及版本/镜像摘要；私有环境文件和密钥单独安全保存。存储卷中的 `storage/.core/backup.key` 用于解密保存的 WebDAV 密码，若配置了环境变量密钥则保留原值。Settings JSON/WebDAV 逻辑备份不包含完整的部署状态，不能单独代替灾难恢复备份。
 
-下载并校验新版本部署包后，保留真实密码、项目名、端口、WebDAV origin 允许列表和密钥，只将 `.env.release` 的两个镜像引用更新为新包中配套的值，再执行 `pull` 和 `up -d --no-build --wait --wait-timeout 180`。源码构建部署切换到发行包时，也须先核对项目名、实际卷名及自定义配置，避免误用新空卷。
+脚本管理的部署使用保存的 `deploy.sh` 更新；不要并行手工修改它的发行目录或状态。手动管理时，下载并校验新版本部署包后，保留真实密码、项目名、端口、WebDAV origin 允许列表和密钥，只将 `.env.release` 的两个镜像引用更新为新包中配套的值，再执行 `pull` 和 `up -d --no-build --wait --wait-timeout 180`。源码构建部署切换到发行包时，也须先核对项目名、实际卷名及自定义配置，避免误用新空卷。
 
 停止并保留数据：
 

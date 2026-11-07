@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -99,6 +99,8 @@ test("the deployment archive uses an explicit file allowlist, blank secrets, dig
   const source = join(temporary, "source");
   const output = join(temporary, "dist");
   mkdirSync(join(source, "docker"), { recursive: true });
+  mkdirSync(join(source, "scripts"));
+  writeFileSync(join(source, "scripts/deploy.sh"), "#!/usr/bin/env bash\necho fixture-installer\n");
   for (const file of ["docker-compose.release.yml", "docker-compose.runtime.yml"]) writeFileSync(join(source, "docker", file), "services: {}\n");
   writeFileSync(join(source, "docker/RELEASE_README.md"), "Install instructions\n");
   writeFileSync(join(source, ".env.release.example"), "BACKEND_IMAGE=placeholder\nFRONTEND_IMAGE=placeholder\nPOSTGRES_PASSWORD=\nBOOTSTRAP_ADMIN_PASSWORD=\nDATA_BACKUP_ENCRYPTION_KEY=\n");
@@ -109,7 +111,9 @@ test("the deployment archive uses an explicit file allowlist, blank secrets, dig
   } };
   const bundle = createBundle(source, output, release);
   verifyBundle(bundle);
-  assert.deepEqual(readdirSync(bundle).sort(), [".env.release.example", "README.md", "SHA256SUMS", "docker", "release.json"]);
+  assert.deepEqual(readdirSync(bundle).sort(), [".env.release.example", "README.md", "SHA256SUMS", "deploy.sh", "docker", "release.json"]);
+  assert.equal(statSync(join(bundle, "deploy.sh")).mode & 0o777, 0o755);
+  assert.match(readFileSync(join(bundle, "SHA256SUMS"), "utf8"), /  deploy\.sh\n/);
   assert.match(readFileSync(join(bundle, ".env.release.example"), "utf8"), new RegExp(`BACKEND_IMAGE=${names.backend}@${digest("d")}`));
   assert.match(readFileSync(join(output, "SHA256SUMS"), "utf8"), /personalplatform-v0\.1\.0\.tar\.gz/);
   writeFileSync(join(bundle, "docker/docker-compose.release.yml"), "tampered\n");

@@ -32,9 +32,23 @@ make dev                   # 等价于 docker compose up --build
 
 ### 生产部署
 
-生产运行编译后的 Node 后端和 Nginx 静态前端，支持发行镜像与源码构建两种入口。首次公开镜像版本为 `v0.1.0`，目标平台为 `linux/amd64` 和 `linux/arm64`；是否已可下载，以 [Releases](https://github.com/AmazingUmi/PersonalPlatform/releases) 中完成发布的版本为准。
+生产运行编译后的 Node 后端和 Nginx 静态前端，发行镜像支持 `linux/amd64` 和 `linux/arm64`。[已发布版本](https://github.com/AmazingUmi/PersonalPlatform/releases) 可通过独立脚本安装和更新，也可手动部署或从源码构建。
 
-**使用发行镜像**：服务器只需 Docker Engine 和 Compose v2.20+，不需要 Node、npm 或源码。在对应 Release 下载部署包及 `SHA256SUMS`，校验并解压，在解压目录执行：
+**一条命令安装**：Linux 服务器先准备 Docker Engine、Compose v2.20+、Bash、curl、tar、sha256sum、openssl 和 flock。将下面的 `<SCRIPT_COMMIT>` 换成交付记录中的脚本源代码提交，然后下载完整脚本再执行：
+
+```bash
+curl -fL --proto '=https' --tlsv1.2 'https://raw.githubusercontent.com/AmazingUmi/PersonalPlatform/<SCRIPT_COMMIT>/scripts/deploy.sh' -o personal-platform-deploy.sh && sudo bash personal-platform-deploy.sh
+```
+
+默认安装到 `/opt/personal-platform`，选择最新稳定发行版。首次运行会询问管理员用户名和密码，密码输入不显示，并自动生成数据库密码。以后安装或更新只需：
+
+```bash
+sudo bash /opt/personal-platform/deploy.sh
+```
+
+脚本更新前先拉取配套镜像，再停写并备份数据库、附件、密钥和私有配置，保留原项目及数据卷；同版本重复运行只检查健康。指定版本、非交互配置、接管已有手动部署及失败后的 `--resume` 见 [部署指南](doc/DEPLOYMENT.md#一条命令安装和更新)。脚本本身可安装已有的 `v0.1.0`，不需要为它重发应用镜像。域名、HTTPS 代理和 Docker 安装仍由服务器管理员准备。
+
+**手动使用发行镜像**：服务器只需 Docker Engine 和 Compose v2.20+，不需要 Node、npm 或源码。在对应 Release 下载部署包及 `SHA256SUMS`，校验并解压，在解压目录执行：
 
 ```bash
 cp .env.release.example .env.release
