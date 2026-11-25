@@ -47,6 +47,7 @@ const environment = {
   SESSION_COOKIE_SECURE: "",
   TRUST_PROXY: "",
   DATABASE_POOL_MAX: undefined,
+  TRASH_RETENTION_DAYS: undefined,
   PG_SHARED_BUFFERS: undefined,
   PG_WORK_MEM: undefined,
   PG_MAINTENANCE_WORK_MEM: undefined,
@@ -107,6 +108,16 @@ const releaseImages = {
   BACKEND_IMAGE: "ghcr.io/amazingumi/personalplatform-backend:v0.1.0",
   FRONTEND_IMAGE: "ghcr.io/amazingumi/personalplatform-frontend:v0.1.0",
 };
+
+test("Trash retention reaches the backend in development, production and release", () => {
+  for (const file of ["docker-compose.yml", "docker/docker-compose.prod.yml", "docker/docker-compose.release.yml"]) {
+    for (const value of [undefined, "45", ""]) {
+      const result = config([file], { ...releaseImages, TRASH_RETENTION_DAYS: value });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(JSON.parse(result.stdout).services.backend.environment.TRASH_RETENTION_DAYS, value ?? "30");
+    }
+  }
+});
 
 test("pull-only release preserves every runtime setting and the same persistent volumes", () => {
   const source = config(["docker/docker-compose.prod.yml"]);

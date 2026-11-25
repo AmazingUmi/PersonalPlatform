@@ -4,7 +4,9 @@ import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-reg
 import {
   assertPresentedHash, editorBaseHash, headerPresentedHash, lockOwnedTables, parseSnapshotRow, readPresentedHash, syncWriteFenced,
 } from "../../core/data-management/sync-fence.js";
+import { record, validTimestamp } from "../../core/data-management/snapshot-schema.js";
 import type { JobHandle } from "../../core/scheduler/index.js";
+import type { OwnedTrashEntry, TrashMutationContext, TrashRestoreContext } from "../../core/trash/types.js";
 
 interface TaskRow {
   id: string;
@@ -57,13 +59,58 @@ async function lockedTask(
   tx: Tx,
   taskId: string,
   userId: string,
-): Promise<(TaskRow & { baseHash: string }) | null> {
+): Promise<(TaskRow & { snapshot: string }) | null> {
   const { rows } = await tx.query<TaskRow & { snapshot: string }>(
     `SELECT ${TASK_COLUMNS}, row_to_json(t)::text AS snapshot
      FROM tasks.tasks t WHERE id = $1 AND user_id = $2 FOR UPDATE`,
     [taskId, userId],
   );
-  return rows[0] ? withTaskHash(rows[0]) : null;
+  return rows[0] ?? null;
+}
+
+export async function deleteTask(ctx: TrashMutationContext, taskId: string, presentedHash: string | undefined): Promise<void> {
+  const { database: tx, userId } = ctx;
+  await lockOwnedTables(tx, ["tasks.tasks"]);
+  const current = await lockedTask(tx, taskId, userId);
+  if (!current) throw new AppError(404, "not_found", "task not found");
+  assertPresentedHash(await syncWriteFenced(tx, userId), presentedHash, taskHash(current.snapshot));
+
+  const { title, description, status, start_at, due_at, priority, completed_at, created_at, updated_at } = parseSnapshotRow(current.snapshot);
+  await ctx.moveToTrash({
+    entityType: "task", entityId: current.id, title: current.title,
+    summary: current.description?.slice(0, 160) || null,
+    payload: { title, description, status, start_at, due_at, priority, completed_at, created_at, updated_at },
+  });
+  await tx.query("DELETE FROM tasks.tasks WHERE id = $1 AND user_id = $2", [taskId, userId]);
+}
+
+function nullableTaskTimestamp(value: unknown): boolean {
+  return value === null || (typeof value === "string" && validTimestamp(value));
+}
+
+async function restoreFromTrash(ctx: TrashRestoreContext, entry: OwnedTrashEntry): Promise<{ restoredId: string }> {
+  const { database: tx, userId, restoredId } = ctx;
+  const payload = record(entry.payload) ? entry.payload : {};
+  const { title, description, status, start_at, due_at, priority, completed_at, created_at, updated_at } = payload;
+  if (entry.entityType !== "task" || entry.payloadVersion !== 1 || entry.attachmentKeys.length !== 0
+    || typeof title !== "string" || (description !== null && typeof description !== "string")
+    || (status !== "todo" && status !== "done")
+    || typeof priority !== "number" || !Number.isInteger(priority) || priority < 0 || priority > 3
+    || !nullableTaskTimestamp(start_at) || !nullableTaskTimestamp(due_at) || !nullableTaskTimestamp(completed_at)
+    || typeof created_at !== "string" || !validTimestamp(created_at)
+    || typeof updated_at !== "string" || !validTimestamp(updated_at)) {
+    throw new AppError(422, "trash_payload_invalid", "The archived task data is unsupported or invalid.");
+  }
+
+  await lockOwnedTables(tx, ["tasks.tasks"]);
+  const original = await tx.query("SELECT 1 FROM tasks.tasks WHERE id = $1 AND user_id = $2", [entry.entityId, userId]);
+  if (original.rowCount) throw new AppError(409, "original_live", "The original task already exists.");
+  await tx.query(
+    `INSERT INTO tasks.tasks (id, user_id, title, description, status, start_at, due_at, priority, completed_at, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+    [restoredId, userId, title, description, status, start_at, due_at, priority, completed_at, created_at, updated_at],
+  );
+  return { restoredId };
 }
 
 async function registerApi(ctx: AppContext): Promise<void> {
@@ -223,8 +270,9 @@ async function registerApi(ctx: AppContext): Promise<void> {
       const presented = readPresentedHash(body.baseHash);
       const outcome = await db.withTransaction(async (tx) => {
         await lockOwnedTables(tx, ["tasks.tasks"]);
-        const previous = await lockedTask(tx, request.params.id, user.id);
-        if (!previous) throw new AppError(404, "not_found", "task not found");
+        const current = await lockedTask(tx, request.params.id, user.id);
+        if (!current) throw new AppError(404, "not_found", "task not found");
+        const previous = withTaskHash(current);
         assertValidInterval(
           ("startAt" in body ? (body.startAt as string | null) : previous.start_at),
           ("dueAt" in body ? (body.dueAt as string | null) : previous.due_at),
@@ -278,15 +326,8 @@ async function registerApi(ctx: AppContext): Promise<void> {
   );
 
   ctx.api.delete<{ Params: { id: string } }>("/tasks/:id", async (request, reply) => {
-    const user = await ctx.auth.requireUser(request);
     const presented = headerPresentedHash(request.headers["x-base-hash"]);
-    await db.withTransaction(async (tx) => {
-      await lockOwnedTables(tx, ["tasks.tasks"]);
-      const current = await lockedTask(tx, request.params.id, user.id);
-      if (!current) throw new AppError(404, "not_found", "task not found");
-      assertPresentedHash(await syncWriteFenced(tx, user.id), presented, current.baseHash);
-      await tx.query("DELETE FROM tasks.tasks WHERE id = $1 AND user_id = $2", [request.params.id, user.id]);
-    });
+    await ctx.trash.withMutation(request, (mutation) => deleteTask(mutation, request.params.id, presented));
     return reply.code(204).send();
   });
 
@@ -442,5 +483,5 @@ async function healthcheck(ctx: AppContext): Promise<AppHealth> {
   return { status: "ok", checks: { database: { status: "ok" } } };
 }
 
-const app: BackendAppModule = { id, registerApi, registerJobs, healthcheck };
+const app: BackendAppModule = { id, registerApi, registerJobs, healthcheck, restoreFromTrash };
 export default app;

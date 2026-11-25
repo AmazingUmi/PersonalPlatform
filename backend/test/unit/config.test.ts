@@ -9,6 +9,7 @@ import {
   loadConfig,
   resolveEnvironment,
   resolveSessionCookieSecure,
+  resolveTrashRetentionDays,
   resolveTrustProxy,
 } from "../../src/core/config/index.js";
 
@@ -78,6 +79,24 @@ storage:
     }
   });
 
+  it("loads the Trash retention override and rejects invalid startup config", () => {
+    writePlatformYaml("platform:\n  name: Trash\n");
+    const previousRoot = process.env.PLATFORM_ROOT;
+    const previousRetention = process.env.TRASH_RETENTION_DAYS;
+    process.env.PLATFORM_ROOT = root;
+    try {
+      process.env.TRASH_RETENTION_DAYS = "45";
+      assert.equal(loadConfig().trashRetentionDays, 45);
+      process.env.TRASH_RETENTION_DAYS = "";
+      assert.throws(() => loadConfig(), /TRASH_RETENTION_DAYS/);
+    } finally {
+      if (previousRoot === undefined) delete process.env.PLATFORM_ROOT;
+      else process.env.PLATFORM_ROOT = previousRoot;
+      if (previousRetention === undefined) delete process.env.TRASH_RETENTION_DAYS;
+      else process.env.TRASH_RETENTION_DAYS = previousRetention;
+    }
+  });
+
   it("parses platform.trust_proxy from the yaml config (AUTH-H1-03)", () => {
     writePlatformYaml("platform:\n  name: Proxied\n  trust_proxy: loopback\n");
     const previous = process.env.PLATFORM_ROOT;
@@ -88,6 +107,20 @@ storage:
     } finally {
       if (previous === undefined) delete process.env.PLATFORM_ROOT;
       else process.env.PLATFORM_ROOT = previous;
+    }
+  });
+});
+
+describe("resolveTrashRetentionDays", () => {
+  it("defaults to 30 and accepts both inclusive bounds", () => {
+    assert.equal(resolveTrashRetentionDays({}), 30);
+    assert.equal(resolveTrashRetentionDays({ TRASH_RETENTION_DAYS: "1" }), 1);
+    assert.equal(resolveTrashRetentionDays({ TRASH_RETENTION_DAYS: "365" }), 365);
+  });
+
+  it("rejects empty, non-decimal, fractional and out-of-range values", () => {
+    for (const value of ["", " ", "0", "-1", "366", "1.5", "3e1", "0x1e", " 30", "30\n", "NaN"]) {
+      assert.throws(() => resolveTrashRetentionDays({ TRASH_RETENTION_DAYS: value }), /TRASH_RETENTION_DAYS/);
     }
   });
 });

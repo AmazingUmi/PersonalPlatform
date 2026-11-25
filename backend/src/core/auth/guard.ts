@@ -14,7 +14,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { sendError } from "../api/errors.js";
 import type { Database } from "../database/index.js";
 import { resolveSession, type AuthUserView } from "./service.js";
-import { SESSION_COOKIE_NAME } from "./sessions.js";
+import { hashSessionToken, SESSION_COOKIE_NAME } from "./sessions.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -28,6 +28,23 @@ export interface AuthGuardDeps {
   now?: () => Date;
 }
 
+interface AuthenticatedRequest {
+  readonly user: Readonly<AuthUserView>;
+  readonly sessionHash: string;
+}
+
+const authenticatedRequests = new WeakMap<FastifyRequest, AuthenticatedRequest>();
+
+/** Core-only evidence that a Cookie guard resolved this request. */
+export function authenticatedRequest(request: FastifyRequest): AuthenticatedRequest | undefined {
+  return authenticatedRequests.get(request);
+}
+
+function attachUser(request: FastifyRequest, session: AuthenticatedRequest): void {
+  authenticatedRequests.set(request, session);
+  request.user = { ...session.user };
+}
+
 class DatastoreUnavailableError extends Error {
   constructor(cause: unknown) {
     super("session resolution failed", { cause });
@@ -38,12 +55,13 @@ class DatastoreUnavailableError extends Error {
 async function resolveRequestUser(
   request: FastifyRequest,
   deps: AuthGuardDeps,
-): Promise<AuthUserView | null> {
+): Promise<AuthenticatedRequest | null> {
   if (!deps.database) return null;
   const token = request.cookies?.[SESSION_COOKIE_NAME];
   if (!token) return null;
   try {
-    return await resolveSession(deps.database.context(), token, deps.now?.() ?? new Date());
+    const user = await resolveSession(deps.database.context(), token, deps.now?.() ?? new Date());
+    return user ? Object.freeze({ user: Object.freeze(user), sessionHash: hashSessionToken(token) }) : null;
   } catch (error) {
     throw new DatastoreUnavailableError(error);
   }
@@ -54,12 +72,12 @@ async function resolveOrReject(
   request: FastifyRequest,
   reply: FastifyReply,
   deps: AuthGuardDeps,
-): Promise<AuthUserView | null | undefined> {
+): Promise<AuthenticatedRequest | null | undefined> {
   if (!deps.database) {
     sendError(reply, 503, "database_unavailable", "database is not available", request.id);
     return undefined;
   }
-  let user: AuthUserView | null;
+  let user: AuthenticatedRequest | null;
   try {
     user = await resolveRequestUser(request, deps);
   } catch (error) {
@@ -79,7 +97,7 @@ export function createRequireAuth(deps: AuthGuardDeps) {
       sendError(reply, 401, "unauthorized", "authentication required", request.id);
       return;
     }
-    request.user = user;
+    attachUser(request, user);
   };
 }
 
@@ -92,10 +110,10 @@ export function createRequireAdmin(deps: AuthGuardDeps) {
       sendError(reply, 401, "unauthorized", "authentication required", request.id);
       return;
     }
-    if (user.role !== "admin") {
+    if (user.user.role !== "admin") {
       sendError(reply, 403, "forbidden", "administrator role required", request.id);
       return;
     }
-    request.user = user;
+    attachUser(request, user);
   };
 }

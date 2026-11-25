@@ -134,6 +134,7 @@ interface BackendAppModule {
   registerEvents?(ctx: AppContext): Promise<Unsubscribe[]>; // optional
   registerJobs?(ctx: AppContext): Promise<JobHandle[]>;     // optional
   healthcheck?(ctx: AppContext): Promise<AppHealth>;        // optional
+  restoreFromTrash?(ctx: TrashRestoreContext, entry: OwnedTrashEntry): Promise<{ restoredId: string }>;
 }
 ```
 
@@ -153,8 +154,15 @@ interface BackendAppModule {
 | `scheduler` | App-scoped scheduler facade (`backend/src/core/scheduler/index.ts`) |
 | `time` | Platform time service (`backend/src/core/time/index.ts`) |
 | `auth` | Request identity (`backend/src/core/auth/`): `user`/`requireUser`/`requireRole` — always available like `api`/`log`/`time`; apps never touch cookies or `core.sessions` |
+| `trash` | Transaction-bound archive operations and guarded attachment access for covered records |
 
 Contexts are built by `createAppContext` in `backend/src/core/app-registry/context.ts`.
+
+### Unified Trash
+
+Use `ctx.trash.withMutation(request, mutate)` for a covered browser delete. In the supplied transaction, retain the App's normal owner predicates, locks and stale-write checks. Archive an explicit snapshot of the owned record with `moveToTrash`, then delete the live row through that same transaction. Core supplies the authenticated owner, App, actor and retention timestamps.
+
+An App's optional `restoreFromTrash` hook validates its archive payload version and fields. Write through the supplied transaction under the same owner and lock rules. Use `ctx.restoredId` for the new live record, resolve taxonomies within the owner, and preserve the archived business values. A same-owner record under the original ID blocks restore and preserves the archive. For Assets, supply owned attachment descriptors in the preparation and final delete callbacks. On restore, `restoreAttachments` stages the owned bytes and returns the new App-relative keys. Use the attachment read and retirement guards for paths that read metadata-backed bytes and unlink referenced keys.
 
 ## Migrations
 

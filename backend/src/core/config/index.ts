@@ -7,9 +7,21 @@ export interface PlatformConfig {
   platform: { name: string; environment: string; timezone?: string; trustProxy?: string };
   apps: { manifests_directory: string; enabled?: Record<string, boolean> };
   storage: { driver: string; root: string };
+  trashRetentionDays: number;
 }
 
 type Env = Record<string, string | undefined>;
+
+export function resolveTrashRetentionDays(env: Env = process.env): number {
+  const raw = env.TRASH_RETENTION_DAYS;
+  if (raw === undefined) return 30;
+
+  const days = Number(raw);
+  if (!Number.isInteger(days) || days < 1 || days > 365 || String(days) !== raw) {
+    throw new Error("TRASH_RETENTION_DAYS must be an integer from 1 to 365");
+  }
+  return days;
+}
 
 function envFlag(env: Env, name: string): boolean | undefined {
   const raw = env[name]?.trim().toLowerCase();
@@ -117,6 +129,7 @@ export function loadConfig(): PlatformConfig {
       driver: String(storage["driver"] ?? "local"),
       root: String(storage["root"] ?? "storage"),
     },
+    trashRetentionDays: resolveTrashRetentionDays(),
   };
 }
 

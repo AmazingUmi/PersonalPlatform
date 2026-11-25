@@ -6,12 +6,16 @@ import {
   assertPresentedHash, editorBaseHash, headerPresentedHash, lockOwnedTables, lockOwnerSet, parseSnapshotRow, parseSnapshotRows, readPresentedHash, syncWriteFenced,
   type HashPart,
 } from "../../core/data-management/sync-fence.js";
-import { digest } from "../../core/data-management/snapshot-schema.js";
+import { digest, record, validTimestamp, type Row } from "../../core/data-management/snapshot-schema.js";
 import type { JobHandle } from "../../core/scheduler/index.js";
 import { StorageError } from "../../core/storage/index.js";
+import type {
+  OwnedTrashEntry, TrashDraft, TrashLiveAttachment, TrashMutationContext, TrashPrepareContext, TrashRestoreContext,
+} from "../../core/trash/types.js";
 
 /** Database surface derived from AppContext (never from core internals — notes precedent). */
 type Db = AppContext["database"];
+type AppStorage = AppContext["storage"];
 
 interface CategoryRow {
   id: string;
@@ -304,21 +308,21 @@ async function categoriesForItems(db: Db, itemIds: string[]): Promise<Map<string
   return map;
 }
 
-async function attachmentSha(ctx: AppContext, userId: string, storageKey: string): Promise<string> {
+async function attachmentSha(storage: AppStorage, userId: string, storageKey: string): Promise<string> {
   try {
-    return digest(await ctx.storage.forUser(userId).read(storageKey));
+    return digest(await storage.forUser(userId).read(storageKey));
   } catch {
     throw new AppError(409, "sync_stale", "An attachment could not be verified. Reload the item.");
   }
 }
 
 async function itemProof(
-  tx: AppContext["database"],
-  ctx: AppContext,
+  tx: Db,
+  storage: AppStorage,
   userId: string,
   itemId: string,
   lockRows: boolean,
-): Promise<{ hash: string; files: { id: string; storageKey: string }[]; view: ItemView } | null> {
+): Promise<{ hash: string; files: TrashLiveAttachment[]; item: Row; attachments: Row[]; view: ItemView } | null> {
   if (lockRows) await lockOwnerSet(tx, userId, "assets");
   const lock = lockRows ? " FOR UPDATE" : "";
   const itemSql = lockRows
@@ -366,25 +370,159 @@ async function itemProof(
     );
     attachments = files.rows.map((file) => parseSnapshotRow(file.snapshot));
   }
-  const stored: { id: string; storageKey: string }[] = [];
+  const stored: TrashLiveAttachment[] = [];
+  const item = parseSnapshotRow(row.item_snapshot);
   const parts: HashPart[] = [
-    { table: "assets.items", row: parseSnapshotRow(row.item_snapshot) },
+    { table: "assets.items", row: item },
     ...linkRows.map((link) => ({ table: "assets.item_categories", row: link })),
   ];
   for (const attachment of attachments) {
     const storageKey = String(attachment.storage_key ?? "");
-    const sha = await attachmentSha(ctx, userId, storageKey);
-    stored.push({ id: String(attachment.id), storageKey });
+    const sha = await attachmentSha(storage, userId, storageKey);
+    stored.push({ attachmentId: String(attachment.id), storageKey, size: Number(attachment.size), sha256: sha });
     parts.push({ table: "assets.attachments", row: attachment, contentSha256: sha });
   }
   const hash = editorBaseHash(parts);
-  return { hash, files: stored, view: { ...toItemView(row, categoryViews), baseHash: hash } };
+  return { hash, files: stored, item, attachments, view: { ...toItemView(row, categoryViews), baseHash: hash } };
 }
 
 async function requireItemView(ctx: AppContext, userId: string, itemId: string): Promise<ItemView> {
-  const proof = await itemProof(ctx.database, ctx, userId, itemId, false);
+  const proof = await ctx.trash.withAttachmentRead((tx) => itemProof(tx, ctx.storage, userId, itemId, false));
   if (!proof) throw new AppError(404, "not_found", "item not found");
   return { ...proof.view, baseHash: proof.hash };
+}
+
+export async function prepareAssetItemDelete(
+  ctx: TrashPrepareContext,
+  storage: AppStorage,
+  itemId: string,
+  presentedHash: string | undefined,
+): Promise<TrashDraft> {
+  const { database: tx, userId } = ctx;
+  await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments", "assets.categories"]);
+  const current = await itemProof(tx, storage, userId, itemId, true);
+  if (!current) throw new AppError(404, "not_found", "item not found");
+  assertPresentedHash(await syncWriteFenced(tx, userId), presentedHash, current.hash);
+
+  const { rows } = await tx.query<{ category: unknown }>(
+    `SELECT json_build_object('id', c.id, 'name', c.name, 'color', c.color, 'created_at', c.created_at) AS category
+     FROM assets.item_categories ic JOIN assets.categories c ON c.id = ic.category_id
+     WHERE ic.item_id = $1 AND c.user_id = $2 ORDER BY c.id`,
+    [itemId, userId],
+  );
+  const { name, description, quantity, acquired_at, target_location, created_at, updated_at } = current.item;
+  const attachments = current.attachments.map(({ id, filename, content_type, size, created_at }) => ({
+    id, filename, content_type, size, created_at,
+  }));
+  return {
+    entityType: "asset_item", entityId: current.view.id, title: current.view.name,
+    summary: current.view.description?.slice(0, 160) || null,
+    payload: {
+      name, description, quantity, acquired_at, target_location, created_at, updated_at,
+      categories: rows.map((row) => row.category), attachments,
+    },
+    attachments: current.files,
+  };
+}
+
+export async function deleteAssetItem(
+  ctx: TrashMutationContext,
+  storage: AppStorage,
+  itemId: string,
+  presentedHash: string | undefined,
+): Promise<void> {
+  const draft = await prepareAssetItemDelete(ctx, storage, itemId, presentedHash);
+  await ctx.moveToTrash(draft);
+  await ctx.database.query("DELETE FROM assets.items WHERE id = $1 AND user_id = $2", [itemId, ctx.userId]);
+}
+
+type ArchivedCategory = { id: string; name: string; color: string | null; created_at: string };
+type ArchivedAssetAttachment = { id: string; filename: string; content_type: string | null; size: number; created_at: string };
+
+function archivedCategory(category: unknown): category is ArchivedCategory {
+  return record(category) && typeof category.id === "string" && isUuid(category.id)
+    && typeof category.name === "string" && (category.color === null || typeof category.color === "string")
+    && typeof category.created_at === "string" && validTimestamp(category.created_at);
+}
+
+function archivedAssetAttachment(attachment: unknown): attachment is ArchivedAssetAttachment {
+  return record(attachment) && typeof attachment.id === "string" && isUuid(attachment.id)
+    && typeof attachment.filename === "string" && (attachment.content_type === null || typeof attachment.content_type === "string")
+    && typeof attachment.size === "number" && Number.isSafeInteger(attachment.size) && attachment.size >= 0
+    && typeof attachment.created_at === "string" && validTimestamp(attachment.created_at);
+}
+
+function archivedAcquiredDate(value: unknown): boolean {
+  if (value === null) return true;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const day = new Date(`${value}T00:00:00Z`);
+  return Number.isFinite(day.getTime()) && day.toISOString().slice(0, 10) === value;
+}
+
+async function restoreCategory(tx: Db, userId: string, category: ArchivedCategory): Promise<string> {
+  const existing = await tx.query<{ id: string }>(
+    `SELECT id FROM assets.categories WHERE user_id = $1 AND (id = $2 OR name = $3)
+     ORDER BY (id = $2) DESC LIMIT 1 FOR KEY SHARE`,
+    [userId, category.id, category.name],
+  );
+  if (existing.rows[0]) return existing.rows[0].id;
+  const inserted = await tx.query<{ id: string }>(
+    `INSERT INTO assets.categories (id, user_id, name, color, created_at) VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (user_id, name) DO NOTHING RETURNING id`,
+    [randomUUID(), userId, category.name, category.color, category.created_at],
+  );
+  if (inserted.rows[0]) return inserted.rows[0].id;
+  const concurrent = await tx.query<{ id: string }>(
+    "SELECT id FROM assets.categories WHERE user_id = $1 AND name = $2 FOR KEY SHARE",
+    [userId, category.name],
+  );
+  if (!concurrent.rows[0]) throw categoryNotFoundError([category.id]);
+  return concurrent.rows[0].id;
+}
+
+async function restoreFromTrash(ctx: TrashRestoreContext, entry: OwnedTrashEntry): Promise<{ restoredId: string }> {
+  const { database: tx, userId, restoredId } = ctx;
+  const payload = record(entry.payload) ? entry.payload : {};
+  const { name, description, quantity, acquired_at, target_location, created_at, updated_at, categories, attachments } = payload;
+  if (entry.entityType !== "asset_item" || entry.payloadVersion !== 1 || typeof name !== "string"
+    || (description !== null && typeof description !== "string")
+    || typeof quantity !== "number" || !Number.isInteger(quantity) || quantity < -2_147_483_648 || quantity > 2_147_483_647
+    || !archivedAcquiredDate(acquired_at) || (target_location !== null && typeof target_location !== "string")
+    || typeof created_at !== "string" || !validTimestamp(created_at)
+    || typeof updated_at !== "string" || !validTimestamp(updated_at)
+    || !Array.isArray(categories) || !categories.every(archivedCategory)
+    || !Array.isArray(attachments) || !attachments.every(archivedAssetAttachment)) {
+    throw new AppError(422, "trash_payload_invalid", "The archived asset data is unsupported or invalid.");
+  }
+  const attachmentMetadata = new Map(attachments.map((attachment) => [attachment.id, attachment]));
+  if (attachmentMetadata.size !== attachments.length || attachments.length !== entry.attachmentKeys.length
+    || entry.attachmentKeys.some((file) => attachmentMetadata.get(file.attachmentId)?.size !== file.size)) {
+    throw new AppError(422, "trash_payload_invalid", "The archived asset attachment metadata does not match its files.");
+  }
+
+  await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments", "assets.categories"]);
+  await lockOwnerSet(tx, userId, "assets");
+  const original = await tx.query("SELECT 1 FROM assets.items WHERE id = $1 AND user_id = $2", [entry.entityId, userId]);
+  if (original.rowCount) throw new AppError(409, "original_live", "The original asset already exists.");
+  const restoredFiles = attachments.length ? await ctx.restoreAttachments() : [];
+  await tx.query(
+    `INSERT INTO assets.items (id, user_id, name, description, quantity, acquired_at, target_location, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [restoredId, userId, name, description, quantity, acquired_at, target_location, created_at, updated_at],
+  );
+  const categoryIds = new Set<string>();
+  for (const category of categories) categoryIds.add(await restoreCategory(tx, userId, category));
+  await replaceItemCategories(tx, userId, restoredId, [...categoryIds]);
+  for (const file of restoredFiles) {
+    const meta = attachmentMetadata.get(file.attachmentId);
+    if (!meta) throw new AppError(422, "trash_payload_invalid", "The archived attachment metadata is missing.");
+    await tx.query(
+      `INSERT INTO assets.attachments (id, user_id, item_id, filename, content_type, size, storage_key, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [file.id, userId, restoredId, meta.filename, meta.content_type, meta.size, file.storageKey, meta.created_at],
+    );
+  }
+  return { restoredId };
 }
 
 // ---------------------------------------------------------------------------
@@ -491,14 +629,17 @@ async function enqueueCleanup(
 async function processCleanupQueue(ctx: AppContext): Promise<{ processed: number; failed: number }> {
   const { rows } = await ctx.database.query<CleanupJobRow>(
     `SELECT id, kind, storage_key, attachment_id, user_id, reason, status, attempts, last_error, created_at, updated_at
-     FROM assets.cleanup_jobs WHERE status = 'pending' ORDER BY created_at LIMIT 100`,
+     FROM assets.cleanup_jobs WHERE status = 'pending' ORDER BY updated_at, created_at LIMIT 100`,
   );
   let failed = 0;
   for (const job of rows) {
     try {
       if (job.kind === "delete_storage") {
         if (job.storage_key === null) throw new Error("delete_storage job without storage_key");
-        await ctx.storage.forUser(job.user_id).delete(job.storage_key);
+        if (!await ctx.trash.retireLiveAttachment(job.user_id, job.storage_key)) {
+          await ctx.database.query("UPDATE assets.cleanup_jobs SET updated_at = now() WHERE id = $1", [job.id]);
+          continue;
+        }
       } else {
         if (job.attachment_id === null) throw new Error("drop_dangling_attachment job without attachment_id");
         await ctx.database.query(
@@ -540,46 +681,48 @@ async function reconcileStorage(ctx: AppContext): Promise<{
   probeFailed: number;
 }> {
   const queue = await processCleanupQueue(ctx);
-  const { rows } = await ctx.database.query<{ id: string; storage_key: string; user_id: string }>(
-    "SELECT id, storage_key, user_id FROM assets.attachments",
-  );
-  let danglingDropped = 0;
-  let probeFailed = 0;
-  for (const attachment of rows) {
-    let confirmedMissing = false;
-    try {
-      const storage = ctx.storage.forUser(attachment.user_id);
-      if (await storage.exists(attachment.storage_key)) continue;
-      try {
-        await storage.read(attachment.storage_key);
-      } catch (error) {
-        // Only read's typed not_found is evidence of absence. An exception
-        // from forUser/exists, even not_found, remains a failed probe.
-        if (error instanceof StorageError && error.code === "not_found") confirmedMissing = true;
-        else throw error;
-      }
-    } catch (error) {
-      probeFailed += 1;
-      ctx.log.warn({
-        attachmentId: attachment.id,
-        userId: attachment.user_id,
-        code: error instanceof StorageError ? error.code : "unknown",
-        error,
-      }, "attachment storage probe failed; metadata retained");
-      continue;
-    }
-    if (!confirmedMissing) continue;
-    const deleted = await ctx.database.query(
-      "DELETE FROM assets.attachments WHERE id = $1 AND user_id = $2 AND storage_key = $3",
-      [attachment.id, attachment.user_id, attachment.storage_key],
+  return ctx.trash.withAttachmentRead(async (tx) => {
+    const { rows } = await tx.query<{ id: string; storage_key: string; user_id: string }>(
+      "SELECT id, storage_key, user_id FROM assets.attachments",
     );
-    const dropped = deleted.rowCount ?? 0;
-    danglingDropped += dropped;
-    if (dropped > 0) {
-      ctx.log.warn({ attachmentId: attachment.id, userId: attachment.user_id }, "dropped attachment metadata with missing file");
+    let danglingDropped = 0;
+    let probeFailed = 0;
+    for (const attachment of rows) {
+      let confirmedMissing = false;
+      try {
+        const storage = ctx.storage.forUser(attachment.user_id);
+        if (await storage.exists(attachment.storage_key)) continue;
+        try {
+          await storage.read(attachment.storage_key);
+        } catch (error) {
+          // Only read's typed not_found is evidence of absence. An exception
+          // from forUser/exists, even not_found, remains a failed probe.
+          if (error instanceof StorageError && error.code === "not_found") confirmedMissing = true;
+          else throw error;
+        }
+      } catch (error) {
+        probeFailed += 1;
+        ctx.log.warn({
+          attachmentId: attachment.id,
+          userId: attachment.user_id,
+          code: error instanceof StorageError ? error.code : "unknown",
+          error,
+        }, "attachment storage probe failed; metadata retained");
+        continue;
+      }
+      if (!confirmedMissing) continue;
+      const deleted = await tx.query(
+        "DELETE FROM assets.attachments WHERE id = $1 AND user_id = $2 AND storage_key = $3",
+        [attachment.id, attachment.user_id, attachment.storage_key],
+      );
+      const dropped = deleted.rowCount ?? 0;
+      danglingDropped += dropped;
+      if (dropped > 0) {
+        ctx.log.warn({ attachmentId: attachment.id, userId: attachment.user_id }, "dropped attachment metadata with missing file");
+      }
     }
-  }
-  return { queue, danglingDropped, probeFailed };
+    return { queue, danglingDropped, probeFailed };
+  });
 }
 
 /** Enqueue and immediately try to drain: most compensations succeed inline. */
@@ -947,9 +1090,9 @@ async function registerApi(ctx: AppContext): Promise<void> {
       }
 
       try {
-        await ctx.database.withTransaction(async (tx) => {
+        await ctx.trash.withAttachmentRead(async (tx) => {
           await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments"]);
-          const proof = await itemProof(tx, ctx, user.id, request.params.id, true);
+          const proof = await itemProof(tx, ctx.storage, user.id, request.params.id, true);
           if (!proof) throw new AppError(404, "not_found", "item not found");
           assertPresentedHash(await syncWriteFenced(tx, user.id), presented, proof.hash);
           if (sets.length > 0) {
@@ -977,32 +1120,12 @@ async function registerApi(ctx: AppContext): Promise<void> {
   );
 
   ctx.api.delete<{ Params: { id: string } }>("/items/:id", async (request, reply) => {
-    const user = await ctx.auth.requireUser(request);
-    // Drop the item row first, under the stale-hash guard, then remove files.
-    // A database failure rolls back with every file still in place. A storage
-    // failure after that commit enqueues delete_storage for this owner
-    // (FP-12.1). All file operations run inside the owner's storage root (AUTH-4).
     const presented = headerPresentedHash(request.headers["x-base-hash"]);
-    const proof = await db.withTransaction(async (tx) => {
-      await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments"]);
-      const current = await itemProof(tx, ctx, user.id, request.params.id, true);
-      if (!current) throw new AppError(404, "not_found", "item not found");
-      assertPresentedHash(await syncWriteFenced(tx, user.id), presented, current.hash);
-      await tx.query("DELETE FROM assets.items WHERE id = $1 AND user_id = $2", [request.params.id, user.id]);
-      return current;
-    });
-    for (const row of proof.files) {
-      try {
-        await ctx.storage.forUser(user.id).delete(row.storageKey);
-      } catch {
-        await compensate(ctx, user.id, {
-          kind: "delete_storage",
-          storage_key: row.storageKey,
-          attachment_id: null,
-          reason: "item file delete failed after metadata removal",
-        });
-      }
-    }
+    await ctx.trash.withMutation(
+      request,
+      (mutation) => deleteAssetItem(mutation, ctx.storage, request.params.id, presented),
+      (prepare) => prepareAssetItemDelete(prepare, ctx.storage, request.params.id, presented),
+    );
     return reply.code(204).send();
   });
 
@@ -1045,17 +1168,17 @@ async function registerApi(ctx: AppContext): Promise<void> {
       const attachmentId = randomUUID();
       const storageKey = `attachments/${request.params.id}/${attachmentId}`;
       const presented = headerPresentedHash(request.headers["x-base-hash"]);
-      await db.withTransaction(async (tx) => {
+      await ctx.trash.withAttachmentRead(async (tx) => {
         await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments"]);
-        const current = await itemProof(tx, ctx, user.id, request.params.id, true);
+        const current = await itemProof(tx, ctx.storage, user.id, request.params.id, true);
         if (!current) throw new AppError(404, "not_found", "item not found");
         assertPresentedHash(await syncWriteFenced(tx, user.id), presented, current.hash);
       });
       await ctx.storage.forUser(user.id).save(storageKey, data);
       try {
-        const { rows } = await db.withTransaction(async (tx) => {
+        const { rows } = await ctx.trash.withAttachmentRead(async (tx) => {
           await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments"]);
-          const current = await itemProof(tx, ctx, user.id, request.params.id, true);
+          const current = await itemProof(tx, ctx.storage, user.id, request.params.id, true);
           if (!current) throw new AppError(404, "not_found", "item not found");
           assertPresentedHash(await syncWriteFenced(tx, user.id), presented, current.hash);
           return tx.query<AttachmentViewRow>(
@@ -1100,15 +1223,19 @@ async function registerApi(ctx: AppContext): Promise<void> {
     "/items/:id/attachments/:attachmentId",
     async (request, reply) => {
       const user = await ctx.auth.requireUser(request);
-      const { rows } = await db.query<{ storage_key: string; filename: string; content_type: string | null }>(
-        "SELECT storage_key, filename, content_type FROM assets.attachments WHERE id = $1 AND item_id = $2 AND user_id = $3",
-        [request.params.attachmentId, request.params.id, user.id],
-      );
-      if (!rows[0]) throw new AppError(404, "not_found", "attachment not found");
-      const data = await ctx.storage.forUser(user.id).read(rows[0].storage_key);
+      const { data, filename } = await ctx.trash.withAttachmentRead(async (tx) => {
+        const { rows } = await tx.query<{ storage_key: string; filename: string }>(
+          "SELECT storage_key, filename FROM assets.attachments WHERE id = $1 AND item_id = $2 AND user_id = $3",
+          [request.params.attachmentId, request.params.id, user.id],
+        );
+        const attachment = rows[0];
+        if (!attachment) throw new AppError(404, "not_found", "attachment not found");
+        const data = await ctx.storage.forUser(user.id).read(attachment.storage_key);
+        return { data, filename: attachment.filename };
+      });
       return reply
         .type("application/octet-stream")
-        .header("content-disposition", attachmentDisposition(rows[0].filename))
+        .header("content-disposition", attachmentDisposition(filename))
         .header("x-content-type-options", "nosniff")
         .header("content-security-policy", "default-src 'none'; sandbox; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
         .send(data);
@@ -1123,18 +1250,20 @@ async function registerApi(ctx: AppContext): Promise<void> {
     async (request, reply) => {
       const user = await ctx.auth.requireUser(request);
       const presented = headerPresentedHash(request.headers["x-base-hash"]);
-      const removed = await db.withTransaction(async (tx) => {
+      const removed = await ctx.trash.withAttachmentRead(async (tx) => {
         await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments"]);
-        const current = await itemProof(tx, ctx, user.id, request.params.id, true);
+        const current = await itemProof(tx, ctx.storage, user.id, request.params.id, true);
         if (!current) throw new AppError(404, "not_found", "item not found");
-        const file = current.files.find((entry) => entry.id === request.params.attachmentId);
+        const file = current.files.find((entry) => entry.attachmentId === request.params.attachmentId);
         if (!file) throw new AppError(404, "not_found", "attachment not found");
         assertPresentedHash(await syncWriteFenced(tx, user.id), presented, current.hash);
         await tx.query("DELETE FROM assets.attachments WHERE id = $1 AND user_id = $2", [request.params.attachmentId, user.id]);
         return file;
       });
       try {
-        await ctx.storage.forUser(user.id).delete(removed.storageKey);
+        if (!await ctx.trash.retireLiveAttachment(user.id, removed.storageKey)) {
+          throw new Error("attachment storage is still referenced or reserved");
+        }
       } catch {
         await compensate(ctx, user.id, {
           kind: "delete_storage",
@@ -1203,5 +1332,5 @@ async function healthcheck(ctx: AppContext): Promise<AppHealth> {
   return { status: "ok", checks: { database: { status: "ok" } } };
 }
 
-const app: BackendAppModule = { id, registerApi, registerJobs, healthcheck };
+const app: BackendAppModule = { id, registerApi, registerJobs, healthcheck, restoreFromTrash };
 export default app;

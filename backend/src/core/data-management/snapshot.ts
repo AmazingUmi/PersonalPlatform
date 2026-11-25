@@ -3,6 +3,7 @@ import { lstat, mkdir, open, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { AppError } from '../api/errors.js';
 import type { Database, DatabaseContext } from '../database/index.js';
+import { withAttachmentGuard } from '../storage/attachment-guard.js';
 import { createAppStorage } from '../storage/local.js';
 import { sanitizeKey } from '../storage/index.js';
 import { dataLockNames } from './data-lock.js';
@@ -63,7 +64,7 @@ export async function captureOwnSnapshot(tx: DatabaseContext, options: SnapshotO
 export async function exportSnapshot(options: SnapshotOptions): Promise<Snapshot> {
   const {database,actor,scope} = options;
   authorize(actor,scope);
-  return database.withTransaction(async tx => {
+  return withAttachmentGuard(database, 'shared', async tx => {
     await tx.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
     await tx.query("SET LOCAL statement_timeout = '30s'");
     await tx.query("SET LOCAL transaction_timeout = '120s'");

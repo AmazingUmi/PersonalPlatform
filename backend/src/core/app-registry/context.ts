@@ -8,6 +8,7 @@ import type { AppScheduler, Scheduler } from "../scheduler/index.js";
 import type { TimeService } from "../time/index.js";
 import { createAppStorage } from "../storage/local.js";
 import type { AppStorage } from "../storage/index.js";
+import type { AppTrash } from "../trash/types.js";
 import type { AppContext, AuthService, ManifestCapabilities } from "./types.js";
 
 /** Raised when an App uses a service its manifest did not declare (FP-9.5). */
@@ -29,6 +30,7 @@ export interface CreateAppContextOptions {
   time: TimeService;
   /** Manifest-declared capabilities gate which services actually work. */
   capabilities: ManifestCapabilities;
+  trash?: AppTrash;
 }
 
 /** Build the controlled surface handed to an App at startup. */
@@ -95,6 +97,10 @@ export function createAppContext(options: CreateAppContextOptions): AppContext {
     },
   };
 
+  const trashUnavailable = async (): Promise<never> => {
+    throw new AppError(503, "database_unavailable", "database is not available");
+  };
+
   return {
     appId,
     config: loadAppConfig(appId),
@@ -111,5 +117,10 @@ export function createAppContext(options: CreateAppContextOptions): AppContext {
     scheduler: capabilities.scheduler ? options.scheduler.forApp(appId) : unavailableScheduler(),
     time: options.time,
     auth,
+    trash: options.trash ?? {
+      withMutation: trashUnavailable,
+      withAttachmentRead: trashUnavailable,
+      retireLiveAttachment: trashUnavailable,
+    },
   };
 }

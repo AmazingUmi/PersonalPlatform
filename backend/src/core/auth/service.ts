@@ -180,6 +180,25 @@ export async function purgeExpiredSessions(db: DatabaseContext, now: Date): Prom
   return result.rowCount ?? 0;
 }
 
+/** Hold account status and ownership stable until the caller's transaction ends. */
+export async function lockActiveUser(db: DatabaseContext, id: string): Promise<AuthUserView | null> {
+  const { rows } = await db.query<Pick<UserRow, "id" | "username" | "display_name" | "role">>(
+    `SELECT id, username, display_name, role FROM core.users
+     WHERE id = $1 AND status = 'active' FOR SHARE`,
+    [id],
+  );
+  return rows[0] ? toUserView(rows[0]) : null;
+}
+
+/** Lock a Cookie session after locking its owner so revocation cannot cross the mutation. */
+export async function lockSessionExpiry(db: DatabaseContext, userId: string, sessionHash: string): Promise<Date | undefined> {
+  const { rows } = await db.query<{ expires_at: Date }>(
+    "SELECT expires_at FROM core.sessions WHERE user_id = $1 AND token_hash = $2 FOR SHARE",
+    [userId, sessionHash],
+  );
+  return rows[0]?.expires_at;
+}
+
 // ---------------------------------------------------------------------------
 // user management (admin surface)
 // ---------------------------------------------------------------------------

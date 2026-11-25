@@ -51,7 +51,7 @@ interface RingingAlarm {
  * when the user has granted permission. One-shot alarms (no repeat days)
  * disable themselves after ringing. No sounds, no background workers.
  */
-export function AlarmSection() {
+export function AlarmSection({ linkedAlarmId }: { linkedAlarmId?: string }) {
   const { t, language } = useI18n();
   const [editorFor, setEditorFor] = useState<AlarmView | null | undefined>(undefined);
   const [editorDirty, setEditorDirty] = useState(false);
@@ -65,6 +65,7 @@ export function AlarmSection() {
   const [deleting, setDeleting] = useState<AlarmView | null>(null);
   const [ringing, setRinging] = useState<RingingAlarm[]>([]);
   const firedKeys = useRef<Set<string>>(new Set());
+  const linkedAlarmRef = useRef<HTMLLIElement>(null);
   const now = useClockNow(true);
 
   const [permission, setPermission] = useState<PermissionState>(() =>
@@ -86,6 +87,13 @@ export function AlarmSection() {
   });
 
   const items = alarms.data?.items ?? [];
+  const linkedAlarmFound = items.some((alarm) => alarm.id === linkedAlarmId);
+
+  useEffect(() => {
+    if (!linkedAlarmFound) return;
+    linkedAlarmRef.current?.focus({ preventScroll: true });
+    linkedAlarmRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [linkedAlarmId, linkedAlarmFound]);
 
   // Fire detection: a 60s window after each alarm's local HH:MM. Runs on the
   // second tick while the app is open. The fire key is `<alarmId>:<occurrence>`:
@@ -189,6 +197,9 @@ export function AlarmSection() {
           </PixelButton>
         </div>
       ) : null}
+      {linkedAlarmId && alarms.data && !linkedAlarmFound && !alarms.error ? (
+        <StatusMessage tone="warning">{t("The linked alarm is unavailable.", "链接指向的闹钟不可用。")}</StatusMessage>
+      ) : null}
 
       {!alarms.loading && !alarms.error && items.length === 0 ? (
         <EmptyState
@@ -201,7 +212,13 @@ export function AlarmSection() {
       {items.length > 0 ? (
         <ul className="clock-alarms__list">
           {items.map((alarm) => (
-            <li key={alarm.id} className={alarm.enabled ? "clock-alarm" : "clock-alarm clock-alarm--off"}>
+            <li
+              key={alarm.id}
+              className={alarm.enabled ? "clock-alarm" : "clock-alarm clock-alarm--off"}
+              aria-current={alarm.id === linkedAlarmId ? "true" : undefined}
+              tabIndex={alarm.id === linkedAlarmId ? -1 : undefined}
+              ref={alarm.id === linkedAlarmId ? linkedAlarmRef : undefined}
+            >
               <div className="clock-alarm__main">
                 <span className="clock-alarm__time">{alarm.time}</span>
                 <span className="clock-alarm__label">{alarm.label || t("Alarm", "闹钟")}</span>
@@ -259,7 +276,7 @@ export function AlarmSection() {
       {deleting ? (
         <ConfirmDialog
           title={t("Delete alarm", "删除闹钟")}
-          message={t(`Delete the ${deleting.time} alarm${deleting.label ? ` "${deleting.label}"` : ""}?`, `删除 ${deleting.time} 闹钟${deleting.label ? `“${deleting.label}”` : ""}？`)}
+          message={t(`Move the ${deleting.time} alarm${deleting.label ? ` "${deleting.label}"` : ""} to Trash?`, `将 ${deleting.time} 闹钟${deleting.label ? `“${deleting.label}”` : ""}移入回收站？`)}
           busy={remove.busy}
           onCancel={() => setDeleting(null)}
           onConfirm={async () => {

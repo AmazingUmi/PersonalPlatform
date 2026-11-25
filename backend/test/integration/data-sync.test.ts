@@ -2,22 +2,31 @@ import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { readdir, rm } from "node:fs/promises";
+import { readFile, readdir, rm, utimes } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import assetsApp from "../../src/apps/assets/index.js";
+import tasks from "../../src/apps/tasks/index.js";
+import type { BackendAppModule } from "../../src/core/app-registry/types.js";
 import { logout } from "../../src/core/auth/service.js";
 import { canonicalJson } from "../../src/core/data-management/incremental.js";
 import { digest } from "../../src/core/data-management/snapshot-schema.js";
-import { syncObjectName } from "../../src/core/data-management/sync-document.js";
+import { syncObjectName, type SyncHead } from "../../src/core/data-management/sync-document.js";
 import { syncKeyOf } from "../../src/core/data-management/sync-protocol.js";
+import { SYNC_RETENTION_MAX_FILES } from "../../src/core/data-management/sync-retention.js";
 import { Database } from "../../src/core/database/index.js";
 import { runMigrations } from "../../src/core/database/migrate.js";
 import { runAppMigrations } from "../../src/core/database/startup-migrations.js";
 import type { InjectOptions } from "fastify";
 import type { Response } from "light-my-request";
+import { createLogger } from "../../src/core/logging/index.js";
 import type { Platform } from "../../src/core/platform.js";
-import { createAppStorage } from "../../src/core/storage/local.js";
+import { withAttachmentGuard } from "../../src/core/storage/attachment-guard.js";
+import { createAppStorage, LocalStorageDriver } from "../../src/core/storage/local.js";
+import { TrashBlobStore } from "../../src/core/trash/blobs.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
+import { multipartBody } from "../helpers/multipart.js";
 import { buildFixturePlatform, createTestUser, loginCookie } from "../helpers/platform.js";
 
 const repo = resolve(import.meta.dirname, "../../..");
@@ -45,6 +54,7 @@ interface DavBox {
   poisonBin: boolean;
   raceCreate412: boolean;
   holdHead: Promise<void> | null;
+  headPutStarted: (() => void) | null;
   holdHeadGet: Promise<void> | null;
   holdContent: Promise<void> | null;
   contentStarted: (() => void) | null;
@@ -97,6 +107,42 @@ function databaseNamed(name: string): string {
   return url.toString();
 }
 
+function interceptConnectionQueries(db: Database, onCheckout: () => (sql: string) => void): () => void {
+  const originalGetClient = db.getClient;
+  db.getClient = async () => {
+    const client = await originalGetClient.call(db);
+    const originalQuery = client.query;
+    const originalRelease = client.release;
+    const observe = onCheckout();
+    client.query = (async (sql: string, params?: unknown[]) => {
+      const result = await Reflect.apply(originalQuery, client, [sql, params]);
+      observe(sql);
+      return result;
+    }) as typeof client.query;
+    client.release = error => {
+      client.query = originalQuery;
+      client.release = originalRelease;
+      originalRelease.call(client, error);
+    };
+    return client;
+  };
+  return () => { db.getClient = originalGetClient; };
+}
+
+function loseGuardedCommit(db: Database): () => void {
+  let once = true;
+  return interceptConnectionQueries(db, () => {
+    let locked = false;
+    return sql => {
+      if (sql.startsWith("LOCK TABLE")) locked = true;
+      if (sql === "COMMIT" && locked && once) {
+        once = false;
+        throw new Error("commit acknowledgement lost");
+      }
+    };
+  });
+}
+
 async function openDav(): Promise<DavBox> {
   const objects = new Map<string, DavObject>();
   const requests: { method: string; url: string }[] = [];
@@ -105,6 +151,7 @@ async function openDav(): Promise<DavBox> {
   const box = {
     objects, requests, puts, lastAuthorization: "", failStatus: 0, dropHeadPut: false, poisonBin: false,
     raceCreate412: false, holdHead: null as Promise<void> | null, holdHeadGet: null as Promise<void> | null, holdContent: null as Promise<void> | null,
+    headPutStarted: null as (() => void) | null,
     contentStarted: null as (() => void) | null,
     onObjectGet: null as ((url: string) => Promise<void>) | null,
   };
@@ -125,6 +172,9 @@ async function openDav(): Promise<DavBox> {
       if (url.includes("-head.json") && box.holdHead) {
         const wait = box.holdHead;
         box.holdHead = null;
+        const started = box.headPutStarted;
+        box.headPutStarted = null;
+        started?.();
         await wait;
       }
       if (!url.includes("-head.json") && !url.includes("pps-probe-") && box.holdContent) {
@@ -203,21 +253,23 @@ async function call(method: "GET" | "POST" | "PUT" | "DELETE", url: string, cook
   return platform.app.inject(options);
 }
 
-async function enable(cookie: string): Promise<void> {
-  const response = await call("PUT", "/api/core/data/sync", cookie, { enabled: true, intervalSeconds: 0 });
+async function enable(cookie: string, target = platform): Promise<void> {
+  const response = await target.app.inject({
+    method: "PUT", url: "/api/core/data/sync", headers: { cookie }, payload: { enabled: true, intervalSeconds: 0 },
+  });
   assert.equal(response.statusCode, 200, response.body);
 }
 
-async function linkNew(cookie: string, dav: DavBox): Promise<string> {
-  await saveDestination(cookie, dav.endpoint);
-  const created = await call("POST", "/api/core/data/sync", cookie, { action: "create" });
+async function linkNew(cookie: string, dav: DavBox, target = platform): Promise<string> {
+  await saveDestinationOn(target, cookie, dav.endpoint);
+  const created = await target.app.inject({ method: "POST", url: "/api/core/data/sync", headers: { cookie }, payload: { action: "create" } });
   assert.equal(created.statusCode, 200, created.body);
   const body = created.json();
   assert.equal(body.enabled, false);
   assert.equal(body.phase, "bootstrap");
   assert.equal("editorGuard" in body, false);
   assert.match(body.pairingCode, /^ppss1\./);
-  await enable(cookie);
+  await enable(cookie, target);
   return body.pairingCode as string;
 }
 
@@ -287,7 +339,7 @@ interface Replica {
   close: () => Promise<void>;
 }
 
-async function openReplica(label: string): Promise<Replica> {
+async function openReplica(label: string, backend?: BackendAppModule): Promise<Replica> {
   const name = `pp_sync_${label}_${randomBytes(3).toString("hex")}`;
   await db.query(`CREATE DATABASE ${name}`);
   const url = databaseNamed(name);
@@ -296,12 +348,17 @@ async function openReplica(label: string): Promise<Replica> {
   const peerDb = new Database(url, undefined, { max: 1 });
   const username = `sync-${label}`;
   const user = await createTestUser(peerDb, username);
-  const built = await buildFixturePlatform({ manifests: [], database: peerDb, backendModules: {} });
+  const built = await buildFixturePlatform({
+    manifests: backend ? [{ id: backend.id }] : [],
+    database: peerDb,
+    backendModules: backend ? { [backend.id]: backend } : {},
+  });
   const cookie = await loginCookie(built.platform, user.username, `test-password-${username}`);
   return {
     name, db: peerDb, platform: built.platform, root: built.root, user, cookie,
     close: async () => {
       await built.platform.stop().catch(() => undefined);
+      built.cleanup();
       await peerDb.close().catch(() => undefined);
       await db.query(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid <> pg_backend_pid()`, [name]).catch(() => undefined);
       await db.query(`DROP DATABASE IF EXISTS ${name}`).catch(() => undefined);
@@ -351,6 +408,392 @@ async function peerItems(peer: Replica): Promise<{ id: string; syncKey: string }
   assert.equal(response.statusCode, 200, response.body);
   return response.json().items as { id: string; syncKey: string }[];
 }
+
+const taskTrashTitle = "Task before Trash";
+
+async function withTaskTrashPair(run: (dav: DavBox, source: Replica, peer: Replica, taskId: string) => Promise<void>): Promise<void> {
+  const dav = await openDav();
+  let source: Replica | undefined;
+  let peer: Replica | undefined;
+  try {
+    source = await openReplica("trash_source", tasks);
+    peer = await openReplica("trash_peer", tasks);
+    const created = await source.platform.app.inject({
+      method: "POST", url: "/api/apps/tasks/tasks", headers: { cookie: source.cookie },
+      payload: { title: taskTrashTitle },
+    });
+    assert.equal(created.statusCode, 201, created.body);
+    const { id } = created.json<{ id: string }>();
+    const pairing = await linkNew(source.cookie, dav, source.platform);
+    assert.equal((await settlePeer(source)).result, "published");
+    await peerJoin(peer, dav.endpoint, pairing);
+    assert.equal((await settlePeer(peer)).result, "bootstrap");
+    assert.equal((await readReplicaTask(peer, id)).title, taskTrashTitle);
+    await run(dav, source, peer, id);
+  } finally {
+    try { await peer?.close(); }
+    finally {
+      try { await source?.close(); }
+      finally { await dav.close(); }
+    }
+  }
+}
+
+async function readReplicaTask(replica: Replica, id: string): Promise<{ id: string; title: string; baseHash: string }> {
+  const response = await replica.platform.app.inject({
+    method: "GET", url: `/api/apps/tasks/tasks/${id}`, headers: { cookie: replica.cookie },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  return response.json();
+}
+
+async function trashTask(replica: Replica, id: string): Promise<string> {
+  const { baseHash } = await readReplicaTask(replica, id);
+  const deleted = await replica.platform.app.inject({
+    method: "DELETE", url: `/api/apps/tasks/tasks/${id}`, headers: { cookie: replica.cookie, "x-base-hash": baseHash },
+  });
+  assert.equal(deleted.statusCode, 204, deleted.body);
+  const list = await replica.platform.app.inject({ method: "GET", url: "/api/core/trash", headers: { cookie: replica.cookie } });
+  assert.equal(list.statusCode, 200, list.body);
+  const entry = list.json<{ items: { id: string; entityId: string }[] }>().items.find((item) => item.entityId === id);
+  assert.ok(entry, "the browser deletion archived the original task");
+  return entry.id;
+}
+
+async function restoreTask(replica: Replica, trashId: string, originalId: string): Promise<string> {
+  const restored = await replica.platform.app.inject({
+    method: "POST", url: `/api/core/trash/${trashId}/restore`, headers: { cookie: replica.cookie },
+  });
+  assert.equal(restored.statusCode, 200, restored.body);
+  const { restoredId } = restored.json<{ restoredId: string }>();
+  assert.notEqual(restoredId, originalId);
+  assert.equal((await readReplicaTask(replica, restoredId)).title, taskTrashTitle);
+  assert.equal((await replica.db.query("SELECT id FROM core.trash_items WHERE id = $1", [trashId])).rowCount, 0);
+  return restoredId;
+}
+
+function currentTombstones(dav: DavBox): string[] {
+  const head = [...dav.objects.entries()].find(([name]) => name.endsWith("-head.json"));
+  assert.ok(head, "the paired deployment published a head");
+  const doc = JSON.parse(head[1].body.toString("utf8")) as SyncHead;
+  assert.equal(doc.formatVersion, 1);
+  assert.ok(!Object.keys(doc.tables).some((table) => table.startsWith("core.trash_")));
+  const object = dav.objects.get(davPath(doc.tombstones.filename));
+  assert.ok(object, "the current head references a tombstone object");
+  return JSON.parse(object.body.toString("utf8")) as string[];
+}
+
+async function assertTaskRestoreConverged(dav: DavBox, source: Replica, peer: Replica, originalId: string, restoredId: string) {
+  for (const replica of [source, peer, source]) assert.equal((await settlePeer(replica)).openConflicts, 0);
+  const originalKey = syncKeyOf("tasks.tasks", { id: originalId });
+  const restoredKey = syncKeyOf("tasks.tasks", { id: restoredId });
+  assert.deepEqual(currentTombstones(dav), [originalKey]);
+  for (const replica of [source, peer]) {
+    const { rows } = await replica.db.query("SELECT id, title FROM tasks.tasks WHERE user_id = $1", [replica.user.id]);
+    assert.deepEqual(rows, [{ id: restoredId, title: taskTrashTitle }]);
+    const state = await replica.db.query("SELECT sync_key, tombstoned FROM core.sync_row_state WHERE user_id = $1 AND sync_key = ANY($2::text[])",
+      [replica.user.id, [originalKey, restoredKey]]);
+    assert.equal(state.rows.find((row) => row.sync_key === originalKey)?.tombstoned, true);
+    assert.equal(state.rows.find((row) => row.sync_key === restoredKey)?.tombstoned, false);
+    assert.equal((await replica.db.query("SELECT 1 FROM core.trash_items WHERE user_id = $1", [replica.user.id])).rowCount, 0);
+  }
+}
+
+describe("Task Trash restoration across paired WebDAV deployments", () => {
+  it("publishes an original tombstone and fresh task when restored before publication", async () => {
+    await withTaskTrashPair(async (dav, source, peer, originalId) => {
+      const trashId = await trashTask(source, originalId);
+      assert.deepEqual(currentTombstones(dav), []);
+      assert.equal((await readReplicaTask(peer, originalId)).title, taskTrashTitle);
+      const restoredId = await restoreTask(source, trashId, originalId);
+      assert.deepEqual(currentTombstones(dav), []);
+      await assertTaskRestoreConverged(dav, source, peer, originalId, restoredId);
+    });
+  });
+
+  it("publishes the fresh task in the next cycle when restored during the tombstone head PUT", async () => {
+    await withTaskTrashPair(async (dav, source, peer, originalId) => {
+      const trashId = await trashTask(source, originalId);
+      let release!: () => void;
+      dav.holdHead = new Promise<void>((resolveHold) => { release = resolveHold; });
+      const atPut = new Promise<void>((resolvePut) => { dav.headPutStarted = resolvePut; });
+      const inFlight = peerCycle(source);
+      try {
+        const paused = await Promise.race([atPut.then(() => true), inFlight.then(() => false), delay(3_000, false, { ref: false })]);
+        assert.ok(paused, "publication reached the head compare-and-swap");
+        const originalKey = syncKeyOf("tasks.tasks", { id: originalId });
+        const journal = await source.db.query("SELECT pending_tombstones, pending_applied FROM core.sync_bindings WHERE user_id = $1", [source.user.id]);
+        assert.deepEqual(journal.rows, [{ pending_tombstones: [originalKey], pending_applied: false }]);
+        assert.deepEqual(currentTombstones(dav), []);
+        const restoredId = await restoreTask(source, trashId, originalId);
+        release();
+        const published = await inFlight;
+        assert.equal(published.status, 200, published.raw);
+        assert.equal(published.body.result, "published", published.raw);
+        assert.deepEqual(currentTombstones(dav), [originalKey]);
+        assert.equal((await settlePeer(peer)).openConflicts, 0);
+        assert.equal((await peer.db.query("SELECT id FROM tasks.tasks WHERE user_id = $1", [peer.user.id])).rowCount, 0);
+        await assertTaskRestoreConverged(dav, source, peer, originalId, restoredId);
+      } finally {
+        release();
+        await inFlight.catch(() => undefined);
+      }
+    });
+  });
+
+  it("keeps the original tombstone when both replicas receive it before restoration", async () => {
+    await withTaskTrashPair(async (dav, source, peer, originalId) => {
+      const trashId = await trashTask(source, originalId);
+      assert.equal((await settlePeer(source)).result, "published");
+      assert.equal((await settlePeer(peer)).openConflicts, 0);
+      const originalKey = syncKeyOf("tasks.tasks", { id: originalId });
+      assert.deepEqual(currentTombstones(dav), [originalKey]);
+      for (const replica of [source, peer]) {
+        const state = await replica.db.query("SELECT tombstoned FROM core.sync_row_state WHERE user_id = $1 AND sync_key = $2", [replica.user.id, originalKey]);
+        assert.deepEqual(state.rows, [{ tombstoned: true }]);
+        assert.equal((await replica.db.query("SELECT id FROM tasks.tasks WHERE id = $1", [originalId])).rowCount, 0);
+      }
+      const restoredId = await restoreTask(source, trashId, originalId);
+      await assertTaskRestoreConverged(dav, source, peer, originalId, restoredId);
+    });
+  });
+
+  it("keeps an edited peer original in conflict until the source confirms deletion", async () => {
+    await withTaskTrashPair(async (dav, source, peer, originalId) => {
+      const trashId = await trashTask(source, originalId);
+      const restoredId = await restoreTask(source, trashId, originalId);
+      const { baseHash } = await readReplicaTask(peer, originalId);
+      const edited = await peer.platform.app.inject({
+        method: "PATCH", url: `/api/apps/tasks/tasks/${originalId}`, headers: { cookie: peer.cookie },
+        payload: { title: "Edited on peer", baseHash },
+      });
+      assert.equal(edited.statusCode, 200, edited.body);
+      assert.equal((await settlePeer(peer)).result, "published");
+      assert.equal((await settlePeer(source)).openConflicts, 1);
+      assert.deepEqual(currentTombstones(dav), []);
+
+      const conflicts = await source.platform.app.inject({
+        method: "GET", url: "/api/core/data/sync/conflicts", headers: { cookie: source.cookie },
+      });
+      assert.equal(conflicts.statusCode, 200, conflicts.body);
+      const items = conflicts.json<{ items: { id: string; syncKey: string; reason: string; local: unknown; remote: { title: string } }[] }>().items;
+      assert.equal(items.length, 1);
+      const conflict = items[0]!;
+      assert.equal(conflict.syncKey, syncKeyOf("tasks.tasks", { id: originalId }));
+      assert.equal(conflict.reason, "deleted-locally");
+      assert.equal(conflict.local, null);
+      assert.equal(conflict.remote.title, "Edited on peer");
+      assert.equal((await readReplicaTask(source, restoredId)).title, taskTrashTitle);
+      assert.equal((await readReplicaTask(peer, originalId)).title, "Edited on peer");
+
+      const confirmed = await source.platform.app.inject({
+        method: "POST", url: `/api/core/data/sync/conflicts/${conflict.id}`, headers: { cookie: source.cookie },
+        payload: { choice: "keep-local" },
+      });
+      assert.equal(confirmed.statusCode, 200, confirmed.body);
+      await assertTaskRestoreConverged(dav, source, peer, originalId, restoredId);
+    });
+  });
+});
+
+async function waitForExclusiveAttachmentGuard(databaseName: string): Promise<number> {
+  const deadline = Date.now() + 3_000;
+  for (;;) {
+    const { rows } = await db.query<{ pid: number }>(`
+      SELECT waiting.pid FROM pg_locks waiting JOIN pg_database catalog ON catalog.oid = waiting.database
+      WHERE catalog.datname = $1 AND waiting.locktype = 'advisory' AND waiting.objsubid = 1
+        AND waiting.mode = 'ExclusiveLock' AND NOT waiting.granted`, [databaseName]);
+    if (rows[0]) return rows[0].pid;
+    assert.ok(Date.now() < deadline, "exclusive attachment work should wait for the old metadata reader");
+    await delay(10);
+  }
+}
+
+it("Sync retention waits for an attachment reader and preserves Trash-reserved sync files", async () => {
+  const dav = await openDav();
+  let source: Replica | undefined;
+  let readerDb: Database | undefined;
+  let reading: Promise<Buffer> | undefined;
+  let running: ReturnType<typeof peerCycle> | undefined;
+  let release = (): void => {};
+  try {
+    source = await openReplica("trash_prune", assetsApp);
+    const { db: sourceDb, user, root: sourceRoot } = source;
+    const ownerStorage = peerAssets(source);
+    const storageRoot = join(sourceRoot, "storage");
+    const keyPath = (key: string) => join(storageRoot, "users", user.id, "apps", "assets", key);
+    const old = new Date("2026-01-01T00:00:00Z");
+    const newer = new Date("2026-01-02T00:00:00Z");
+    const saved = async (key: string, bytes: Buffer, modified: Date) => {
+      await ownerStorage.save(key, bytes);
+      await utimes(keyPath(key), modified, modified);
+    };
+    const outboxKey = `sync/${randomUUID()}`;
+    const intentKey = `sync/${randomUUID()}`;
+    const candidateKey = `sync/${randomUUID()}`;
+    const bytes = Buffer.from("synced attachment already selected by a reader");
+    const intentBytes = Buffer.from("source reserved by an unsettled intent");
+    const itemId = randomUUID();
+    const attachmentId = randomUUID();
+    await sourceDb.query("INSERT INTO assets.items (id, user_id, name) VALUES ($1, $2, 'Synced asset')", [itemId, user.id]);
+    await sourceDb.query(`
+      INSERT INTO assets.attachments (id, user_id, item_id, filename, size, storage_key)
+      VALUES ($1, $2, $3, 'read-later.bin', $4, $5)`, [attachmentId, user.id, itemId, bytes.length, outboxKey]);
+    await saved(outboxKey, bytes, old);
+    await linkNew(source.cookie, dav, source.platform);
+    assert.equal((await settlePeer(source)).result, "published");
+
+    await Promise.all([
+      saved(intentKey, intentBytes, old),
+      saved(candidateKey, Buffer.from("ordinary unreferenced file"), old),
+      ...Array.from({ length: SYNC_RETENTION_MAX_FILES + 2 }, () => saved(`sync/${randomUUID()}`, Buffer.from("newer orphan"), newer)),
+    ]);
+    const blobs = new TrashBlobStore({ database: sourceDb, storageRoot, log: createLogger("fatal") });
+    const pendingId = await withAttachmentGuard(sourceDb, "shared", (tx) => blobs.prepareDelete(tx, {
+      userId: user.id, appId: "assets", trashId: randomUUID(),
+    }, [{ attachmentId: randomUUID(), storageKey: intentKey, size: intentBytes.length, sha256: digest(intentBytes) }]));
+    assert.ok(pendingId, "the second old source has a durable pending reservation");
+
+    readerDb = new Database(databaseNamed(source.name), undefined, { max: 1 });
+    let selected!: () => void;
+    const hasMetadata = new Promise<void>((resolveSelected) => { selected = resolveSelected; });
+    const readBytes = new Promise<void>((resolveRead) => { release = resolveRead; });
+    reading = withAttachmentGuard(readerDb, "shared", async (tx) => {
+      await tx.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const { rows } = await tx.query<{ storage_key: string }>("SELECT storage_key FROM assets.attachments WHERE id = $1", [attachmentId]);
+      assert.equal(rows[0]?.storage_key, outboxKey);
+      selected();
+      await readBytes;
+      return readFile(keyPath(rows[0]!.storage_key));
+    });
+    assert.ok(await Promise.race([hasMetadata.then(() => true), reading.then(() => false), delay(3_000, false, { ref: false })]));
+
+    const assetUrl = `/api/apps/assets/items/${itemId}`;
+    const item = await source.platform.app.inject({ method: "GET", url: assetUrl, headers: { cookie: source.cookie } });
+    assert.equal(item.statusCode, 200, item.body);
+    const deleted = await source.platform.app.inject({
+      method: "DELETE", url: assetUrl, headers: { cookie: source.cookie, "x-base-hash": item.json().baseHash },
+    });
+    assert.equal(deleted.statusCode, 204, deleted.body);
+    assert.equal((await sourceDb.query("SELECT id FROM assets.attachments WHERE id = $1", [attachmentId])).rowCount, 0);
+    const ownerRelativeKey = `apps/assets/${outboxKey}`;
+    assert.equal((await sourceDb.query(`
+      SELECT 1 FROM core.trash_blob_cleanup WHERE user_id = $1 AND storage_key = $2 AND kind = 'live'`,
+    [user.id, ownerRelativeKey])).rowCount, 1);
+
+    running = peerCycle(source);
+    const pruningPid = await waitForExclusiveAttachmentGuard(source.name);
+    const tableLocks = await db.query("SELECT 1 FROM pg_locks WHERE pid = $1 AND locktype = 'relation' AND granted", [pruningPid]);
+    assert.equal(tableLocks.rowCount, 0, "pruner acquires the attachment guard before taking table locks");
+    assert.ok((await readFile(keyPath(candidateKey))).length > 0);
+    release();
+    assert.deepEqual(await reading, bytes);
+    const published = await running;
+    assert.equal(published.status, 200, published.raw);
+    assert.equal(published.body.result, "published", published.raw);
+    await assert.rejects(readFile(keyPath(candidateKey)), { code: "ENOENT" });
+    assert.deepEqual(await readFile(keyPath(outboxKey)), bytes);
+    assert.deepEqual(await readFile(keyPath(intentKey)), intentBytes);
+
+    await blobs.sweep();
+    await assert.rejects(readFile(keyPath(outboxKey)), { code: "ENOENT" });
+    assert.deepEqual(await readFile(keyPath(intentKey)), intentBytes);
+  } finally {
+    release();
+    await Promise.allSettled([reading, running]);
+    try { await readerDb?.close(); }
+    finally {
+      try { await source?.close(); }
+      finally { await dav.close(); }
+    }
+  }
+});
+
+it("Continuous Sync capture reads old attachment bytes before Trash retirement acquires its lock", async (t) => {
+  const dav = await openDav();
+  let source: Replica | undefined;
+  let editorDb: Database | undefined;
+  let editor: Awaited<ReturnType<typeof buildFixturePlatform>> | undefined;
+  let running: ReturnType<typeof peerCycle> | undefined;
+  let retiring: Promise<void> | undefined;
+  let release = (): void => {};
+  try {
+    source = await openReplica("trash_capture", assetsApp);
+    editorDb = new Database(databaseNamed(source.name), undefined, { max: 1 });
+    editor = await buildFixturePlatform({
+      root: source.root, manifests: [{ id: "assets" }], database: editorDb, backendModules: { assets: assetsApp },
+    });
+    const itemId = randomUUID();
+    const attachmentId = randomUUID();
+    const storageKey = `sync/${randomUUID()}`;
+    const bytes = Buffer.from([0, 127, 128, 255, 20, 0]);
+    const storageRoot = join(source.root, "storage");
+    const sourcePath = join(storageRoot, "users", source.user.id, "apps", "assets", storageKey);
+    await source.db.query("INSERT INTO assets.items (id, user_id, name) VALUES ($1, $2, 'Capture target')", [itemId, source.user.id]);
+    await source.db.query(`
+      INSERT INTO assets.attachments (id, user_id, item_id, filename, size, storage_key)
+      VALUES ($1, $2, $3, 'capture.bin', $4, $5)`, [attachmentId, source.user.id, itemId, bytes.length, storageKey]);
+    await peerAssets(source).save(storageKey, bytes);
+    await linkNew(source.cookie, dav, source.platform);
+    assert.equal((await settlePeer(source)).result, "published");
+
+    let selected!: () => void;
+    let captureBytes: Buffer | undefined;
+    let paused = false;
+    const hasMetadata = new Promise<void>((resolveSelected) => { selected = resolveSelected; });
+    const readBytes = new Promise<void>((resolveRead) => { release = resolveRead; });
+    const originalRead = LocalStorageDriver.prototype.read;
+    t.mock.method(LocalStorageDriver.prototype, "read", async function (this: LocalStorageDriver, key: string) {
+      if (key !== storageKey || paused) return originalRead.call(this, key);
+      paused = true;
+      selected();
+      await readBytes;
+      captureBytes = await originalRead.call(this, key);
+      return captureBytes;
+    });
+    running = peerCycle(source);
+    const didStart = await Promise.race([hasMetadata.then(() => true), running.then(() => false), delay(3_000, false, { ref: false })]);
+    assert.ok(didStart, "the real sync cycle selected attachment metadata and entered the file read");
+
+    const url = `/api/apps/assets/items/${itemId}`;
+    const item = await editor.platform.app.inject({ method: "GET", url, headers: { cookie: source.cookie } });
+    assert.equal(item.statusCode, 200, item.body);
+    const deleted = await editor.platform.app.inject({
+      method: "DELETE", url, headers: { cookie: source.cookie, "x-base-hash": item.json().baseHash },
+    });
+    assert.equal(deleted.statusCode, 204, deleted.body);
+    assert.equal((await editorDb.query("SELECT id FROM assets.attachments WHERE id = $1", [attachmentId])).rowCount, 0);
+
+    const blobs = new TrashBlobStore({ database: editorDb, storageRoot, log: createLogger("fatal") });
+    retiring = blobs.sweep();
+    await waitForExclusiveAttachmentGuard(source.name);
+    assert.deepEqual(await readFile(sourcePath), bytes);
+    release();
+    const captured = await running;
+    assert.equal(captured.status, 200, captured.raw);
+    assert.deepEqual(captureBytes, bytes);
+    await retiring;
+    await assert.rejects(readFile(sourcePath), { code: "ENOENT" });
+
+    const next = await settlePeer(source);
+    assert.equal(next.openConflicts, 0);
+    assert.deepEqual(currentTombstones(dav), [
+      syncKeyOf("assets.attachments", { id: attachmentId }),
+      syncKeyOf("assets.items", { id: itemId }),
+    ]);
+  } finally {
+    release();
+    await Promise.allSettled([running, retiring]);
+    try {
+      await editor?.platform.stop();
+      editor?.cleanup();
+      await editorDb?.close();
+    } finally {
+      try { await source?.close(); }
+      finally { await dav.close(); }
+    }
+  }
+});
 
 describe("continuous sync routes and cycles", () => {
   it("guards the own-session API and keeps the pairing secret out of status and the database", async () => {
@@ -616,28 +1059,13 @@ describe("continuous sync routes and cycles", () => {
       await db.query("DELETE FROM core.sync_row_state WHERE user_id=$1", [bob.id]);
       await db.query("DELETE FROM core.sync_remote_objects WHERE user_id=$1", [bob.id]);
       await joinSync(bobCookie, dav, code);
-      const original = db.withTransaction.bind(db);
-      let lose = true;
-      db.withTransaction = async function loseCommit(fn) {
-        let locked = false;
-        const result = await original(async tx => {
-          const query = tx.query.bind(tx);
-          tx.query = (async (text: string, params?: unknown[]) => {
-            const out = await query(text, params);
-            if (text.includes("LOCK TABLE")) locked = true;
-            return out;
-          }) as typeof tx.query;
-          return fn(tx);
-        });
-        if (locked && lose) { lose = false; throw new Error("commit acknowledgement lost"); }
-        return result;
-      };
+      const restoreClient = loseGuardedCommit(db);
       try {
         const uncertain = await cycle(bobCookie);
         assert.equal(uncertain.status, 503, uncertain.raw);
         assert.equal((uncertain.body.error as { code: string }).code, "sync_outcome_unknown");
       } finally {
-        db.withTransaction = original;
+        restoreClient();
       }
       assert.equal((await db.query("SELECT id FROM assets.attachments WHERE user_id=$1 AND id=$2", [bob.id, attachment])).rowCount, 1);
       assert.equal((await syncFileNames(bob.id)).length, 1);
@@ -731,28 +1159,13 @@ describe("attachment file lifecycle", () => {
       assert.equal((await settle(aliceCookie)).result, "published");
       assert.equal((await peerCycle(peer)).status, 200);
       const conflictId = (await peerItems(peer)).find(item => item.syncKey.includes(attachment))!.id;
-      const original = peer.db.withTransaction.bind(peer.db);
-      let lose = true;
-      peer.db.withTransaction = async function loseCommit(fn) {
-        let locked = false;
-        const result = await original(async tx => {
-          const query = tx.query.bind(tx);
-          tx.query = (async (text: string, params?: unknown[]) => {
-            const out = await query(text, params);
-            if (text.includes("LOCK TABLE")) locked = true;
-            return out;
-          }) as typeof tx.query;
-          return fn(tx);
-        });
-        if (locked && lose) { lose = false; throw new Error("commit acknowledgement lost"); }
-        return result;
-      };
+      const restoreClient = loseGuardedCommit(peer.db);
       try {
         const uncertain = await peer.platform.app.inject({ method: "POST", url: `/api/core/data/sync/conflicts/${conflictId}`, headers: { cookie: peer.cookie }, payload: { choice: "keep-remote" } });
         assert.equal(uncertain.statusCode, 503, uncertain.body);
         assert.equal(uncertain.json().error.code, "sync_outcome_unknown");
       } finally {
-        peer.db.withTransaction = original;
+        restoreClient();
       }
       const stored = (await peer.db.query<{ storage_key: string }>("SELECT storage_key FROM assets.attachments WHERE id=$1", [attachment])).rows[0]!.storage_key;
       assert.notEqual(stored, previous);
@@ -802,25 +1215,19 @@ describe("attachment file lifecycle", () => {
       assert.equal((await settlePeer(peer)).result, "bootstrap");
       await peer.db.query("DELETE FROM assets.attachments WHERE id=$1", [attachment]);
       assert.equal((await settlePeer(peer)).result, "published");
-      const originalTx = db.withTransaction.bind(db);
-      db.withTransaction = function rollBackDelete(fn) {
-        return originalTx(async tx => {
-          const query = tx.query.bind(tx);
-          let deleted = false;
-          tx.query = (async (text: string, params?: unknown[]) => {
-            const out = await query(text, params);
-            if (text.includes('DELETE FROM "assets"."attachments"') || text.includes('DELETE FROM "assets"."items"')) deleted = true;
-            if (deleted && text.includes("sync_row_state")) throw new Error("forced rollback");
-            return out;
-          }) as typeof tx.query;
-          return fn(tx);
-        });
-      };
+      const interceptDelete = () => interceptConnectionQueries(db, () => {
+        let deleted = false;
+        return sql => {
+          if (sql.includes('DELETE FROM "assets"."attachments"') || sql.includes('DELETE FROM "assets"."items"')) deleted = true;
+          if (deleted && sql.includes("sync_row_state")) throw new Error("forced rollback");
+        };
+      });
+      let restoreClient = interceptDelete();
       try {
         const rolled = await cycle(aliceCookie);
         assert.notEqual(rolled.status, 200);
       } finally {
-        db.withTransaction = originalTx;
+        restoreClient();
       }
       assert.equal((await db.query("SELECT id FROM assets.attachments WHERE id=$1", [attachment])).rowCount, 1);
       assert.deepEqual(await assets(alice.id).read("original/solo"), bytes);
@@ -829,24 +1236,12 @@ describe("attachment file lifecycle", () => {
       await assert.rejects(() => assets(alice.id).read("original/solo"));
       await peer.db.query("DELETE FROM assets.items WHERE id=$1", [cascadedItem]);
       assert.equal((await settlePeer(peer)).result, "published");
-      db.withTransaction = function rollBackCascade(fn) {
-        return originalTx(async tx => {
-          const query = tx.query.bind(tx);
-          let deleted = false;
-          tx.query = (async (text: string, params?: unknown[]) => {
-            const out = await query(text, params);
-            if (text.includes('DELETE FROM "assets"."items"') || text.includes('DELETE FROM "assets"."attachments"')) deleted = true;
-            if (deleted && text.includes("sync_row_state")) throw new Error("forced rollback");
-            return out;
-          }) as typeof tx.query;
-          return fn(tx);
-        });
-      };
+      restoreClient = interceptDelete();
       try {
         const rolledItem = await cycle(aliceCookie);
         assert.notEqual(rolledItem.status, 200);
       } finally {
-        db.withTransaction = originalTx;
+        restoreClient();
       }
       assert.equal((await db.query("SELECT id FROM assets.items WHERE id=$1", [cascadedItem])).rowCount, 1);
       assert.deepEqual(await assets(alice.id).read("original/child"), cascadedBytes);
@@ -977,27 +1372,12 @@ describe("attachment file lifecycle", () => {
       }
       assert.equal((await peer.db.query<{ title: string }>("SELECT title FROM tasks.tasks WHERE id=$1", [task])).rows[0]!.title, "v1");
       assert.equal(Number((await peer.db.query<{ baseline_generation: string }>("SELECT baseline_generation::text FROM core.sync_bindings WHERE user_id=$1", [peer.user.id])).rows[0]!.baseline_generation), acceptedV1);
-      const original = peer.db.withTransaction.bind(peer.db);
-      let lose = true;
-      peer.db.withTransaction = async function loseCommit(fn) {
-        let locked = false;
-        const result = await original(async tx => {
-          const query = tx.query.bind(tx);
-          tx.query = (async (text: string, params?: unknown[]) => {
-            const out = await query(text, params);
-            if (text.includes("LOCK TABLE")) locked = true;
-            return out;
-          }) as typeof tx.query;
-          return fn(tx);
-        });
-        if (locked && lose) { lose = false; throw new Error("lost commit ack"); }
-        return result;
-      };
+      const restoreClient = loseGuardedCommit(peer.db);
       try {
         const unknown = await peerCycle(peer);
         assert.equal(unknown.status, 503, unknown.raw);
       } finally {
-        peer.db.withTransaction = original;
+        restoreClient();
       }
       assert.equal((await peer.db.query<{ title: string }>("SELECT title FROM tasks.tasks WHERE id=$1", [task])).rows[0]!.title, "v2");
       const marked = (await peer.db.query<{ baseline_generation: string; head_generation: string }>(
@@ -1034,27 +1414,12 @@ describe("attachment file lifecycle", () => {
       const v2 = Buffer.from(dav.objects.get(headName)!.body);
       const v2Head = JSON.parse(v2.toString("utf8")) as { generation: number; contentHash: string };
       await peerJoin(peer, dav.endpoint, code);
-      const original = peer.db.withTransaction.bind(peer.db);
-      let lose = true;
-      peer.db.withTransaction = async function loseCommit(fn) {
-        let locked = false;
-        const result = await original(async tx => {
-          const query = tx.query.bind(tx);
-          tx.query = (async (text: string, params?: unknown[]) => {
-            const out = await query(text, params);
-            if (text.includes("LOCK TABLE")) locked = true;
-            return out;
-          }) as typeof tx.query;
-          return fn(tx);
-        });
-        if (locked && lose) { lose = false; throw new Error("lost commit ack"); }
-        return result;
-      };
+      const restoreClient = loseGuardedCommit(peer.db);
       try {
         const unknown = await peerCycle(peer);
         assert.equal(unknown.status, 503, unknown.raw);
       } finally {
-        peer.db.withTransaction = original;
+        restoreClient();
       }
       assert.equal((await peer.db.query<{ title: string }>("SELECT title FROM tasks.tasks WHERE id=$1", [task])).rows[0]!.title, "v2");
       const marked = (await peer.db.query<{ baseline_hash: string | null; head_generation: string; remote_content_hash: string }>(
@@ -1129,6 +1494,106 @@ describe("attachment file lifecycle", () => {
 });
 
 describe("two isolated sync deployments", () => {
+  it("syncs a restored Asset, attachment bytes and category link under fresh keys without reviving the old keys", async () => {
+    const dav = await openDav();
+    let source: Replica | undefined;
+    let peer: Replica | undefined;
+    try {
+      source = await openReplica("asset_source", assetsApp);
+      peer = await openReplica("asset_peer", assetsApp);
+      const request = (replica: Replica, options: InjectOptions) => replica.platform.app.inject({
+        ...options, headers: { ...options.headers, cookie: replica.cookie },
+      });
+      const name = "Synchronized archive asset";
+      const category = { name: "Survey equipment", color: "mint" };
+      const filename = "survey.bin";
+      const bytes = Buffer.from([0, 12, 120, 255, 21]);
+      const originalCategory = await request(source, { method: "POST", url: "/api/apps/assets/categories", payload: category });
+      assert.equal(originalCategory.statusCode, 201, originalCategory.body);
+      const categoryId = originalCategory.json<{ id: string }>().id;
+      const originalItem = await request(source, {
+        method: "POST", url: "/api/apps/assets/items", payload: { name, categoryIds: [categoryId] },
+      });
+      assert.equal(originalItem.statusCode, 201, originalItem.body);
+      const originalId = originalItem.json<{ id: string }>().id;
+      const itemUrl = `/api/apps/assets/items/${originalId}`;
+      const upload = multipartBody([{ name: "file", filename, contentType: "application/octet-stream", data: bytes }]);
+      const uploaded = await request(source, { method: "POST", url: `${itemUrl}/attachments`, ...upload });
+      assert.equal(uploaded.statusCode, 201, uploaded.body);
+      const originalAttachmentId = uploaded.json<{ id: string }>().id;
+      const originalKeys = [
+        syncKeyOf("assets.items", { id: originalId }),
+        syncKeyOf("assets.attachments", { id: originalAttachmentId }),
+        syncKeyOf("assets.item_categories", { item_id: originalId, category_id: categoryId }),
+      ].sort();
+
+      const pairing = await linkNew(source.cookie, dav, source.platform);
+      assert.equal((await settlePeer(source)).result, "published");
+      await peerJoin(peer, dav.endpoint, pairing);
+      assert.equal((await settlePeer(peer)).result, "bootstrap");
+      const peerItem = await request(peer, { method: "GET", url: itemUrl });
+      assert.equal(peerItem.statusCode, 200, peerItem.body);
+      const { baseHash, categories } = peerItem.json<{ baseHash: string; categories: { id: string }[] }>();
+      assert.deepEqual(categories, [{ id: categoryId, ...category }]);
+      const originalStorageKey = await peerKey(peer, originalAttachmentId);
+      assert.match(originalStorageKey, /^sync\//);
+      assert.deepEqual(await peerAssets(peer).read(originalStorageKey), bytes);
+
+      // The user trashes the actual WebDAV-materialized bytes on the peer.
+      const deleted = await request(peer, { method: "DELETE", url: itemUrl, headers: { "x-base-hash": baseHash } });
+      assert.equal(deleted.statusCode, 204, deleted.body);
+      const list = await request(peer, { method: "GET", url: "/api/core/trash?appId=assets" });
+      assert.equal(list.statusCode, 200, list.body);
+      const [entry] = list.json<{ items: { id: string; entityId: string }[] }>().items;
+      assert.ok(entry);
+      assert.equal(entry.entityId, originalId);
+      assert.equal((await settlePeer(peer)).result, "published");
+      assert.equal((await settlePeer(source)).openConflicts, 0);
+      assert.equal((await request(source, { method: "GET", url: itemUrl })).statusCode, 404);
+      assert.deepEqual(currentTombstones(dav), originalKeys);
+
+      const restored = await request(peer, { method: "POST", url: `/api/core/trash/${entry.id}/restore` });
+      assert.equal(restored.statusCode, 200, restored.body);
+      const { restoredId } = restored.json<{ restoredId: string }>();
+      assert.notEqual(restoredId, originalId);
+      const restoredFiles = await peer.db.query<{ id: string; storage_key: string }>(
+        "SELECT id, storage_key FROM assets.attachments WHERE user_id=$1 AND item_id=$2", [peer.user.id, restoredId],
+      );
+      assert.equal(restoredFiles.rowCount, 1);
+      const { id: restoredAttachmentId, storage_key: restoredStorageKey } = restoredFiles.rows[0]!;
+      assert.notEqual(restoredAttachmentId, originalAttachmentId);
+      assert.equal(restoredStorageKey, `attachments/${restoredId}/${restoredAttachmentId}`);
+      assert.equal((await request(peer, { method: "DELETE", url: itemUrl, headers: { "x-base-hash": baseHash } })).statusCode, 404);
+      assert.equal((await settlePeer(peer)).result, "published");
+      assert.equal((await settlePeer(source)).openConflicts, 0);
+      assert.equal((await settlePeer(peer)).openConflicts, 0);
+      assert.deepEqual(currentTombstones(dav), originalKeys);
+
+      for (const replica of [source, peer]) {
+        const items = await replica.db.query("SELECT id, name FROM assets.items WHERE user_id=$1", [replica.user.id]);
+        assert.deepEqual(items.rows, [{ id: restoredId, name }]);
+        const relations = await replica.db.query("SELECT item_id, category_id FROM assets.item_categories WHERE item_id=ANY($1::uuid[])", [[originalId, restoredId]]);
+        assert.deepEqual(relations.rows, [{ item_id: restoredId, category_id: categoryId }]);
+        const attachments = await replica.db.query("SELECT id, item_id, filename FROM assets.attachments WHERE user_id=$1", [replica.user.id]);
+        assert.deepEqual(attachments.rows, [{ id: restoredAttachmentId, item_id: restoredId, filename }]);
+        const file = await request(replica, { method: "GET", url: `/api/apps/assets/items/${restoredId}/attachments/${restoredAttachmentId}` });
+        assert.equal(file.statusCode, 200, file.body);
+        assert.deepEqual(file.rawPayload, bytes);
+        const oldFile = await request(replica, { method: "GET", url: `${itemUrl}/attachments/${originalAttachmentId}` });
+        assert.equal(oldFile.statusCode, 404, oldFile.body);
+        const states = await replica.db.query("SELECT sync_key, tombstoned FROM core.sync_row_state WHERE user_id=$1 AND sync_key=ANY($2::text[]) ORDER BY sync_key", [replica.user.id, originalKeys]);
+        assert.deepEqual(states.rows, originalKeys.map(sync_key => ({ sync_key, tombstoned: true })));
+        assert.equal((await replica.db.query("SELECT id FROM core.trash_items WHERE user_id=$1", [replica.user.id])).rowCount, 0);
+      }
+    } finally {
+      try { await peer?.close(); }
+      finally {
+        try { await source?.close(); }
+        finally { await dav.close(); }
+      }
+    }
+  });
+
   it("merges both directions across different local accounts without wiping either database", async () => {
     const dav = await openDav();
     const peerName = `pp_sync_${randomBytes(4).toString("hex")}`;
@@ -1561,6 +2026,14 @@ describe("sync review regressions", () => {
     }
   });
 
+  for (const kind of ["notes", "assets"] as const) {
+    for (const choice of ["keep-local", "keep-remote"] as const) {
+      it(`converges with ${choice} after recreating deleted ${kind} taxonomy under a new ID`, async () => {
+        await assertRecreatedTaxonomyLinks(choice, kind);
+      });
+    }
+  }
+
   it("refuses resolve and destination changes while a cycle holds the lease", async () => {
     const dav = await openDav();
     try {
@@ -1583,6 +2056,83 @@ describe("sync review regressions", () => {
     } finally { await dav.close(); }
   });
 });
+
+async function assertRecreatedTaxonomyLinks(choice: "keep-local" | "keep-remote", kind: "notes" | "assets"): Promise<void> {
+  const taxonomy = kind === "notes" ? "notes.tags" : "assets.categories";
+  const links = kind === "notes" ? "notes.note_tags" : "assets.item_categories";
+  const taxonomyId = kind === "notes" ? "tag_id" : "category_id";
+  const recordId = kind === "notes" ? "note_id" : "item_id";
+  const oldId = randomUUID();
+  const replacementId = randomUUID();
+  const restoredId = randomUUID();
+  const unrelatedId = randomUUID();
+  const originalKey = syncKeyOf(taxonomy, { id: oldId });
+  const name = "shared-taxonomy";
+  const dav = await openDav();
+  let peer: Replica | undefined;
+  try {
+    peer = await openReplica(`recreated_${kind}`);
+    await db.query(`INSERT INTO ${taxonomy} (id, user_id, name) VALUES ($1,$2,$3)`, [oldId, alice.id, name]);
+    const pairing = await linkNew(aliceCookie, dav);
+    assert.equal((await settle(aliceCookie)).result, "published");
+    await peerJoin(peer, dav.endpoint, pairing);
+    assert.equal((await settlePeer(peer)).openConflicts, 0);
+    assert.equal((await peer.db.query(`SELECT id FROM ${taxonomy} WHERE id=$1 AND user_id=$2`, [oldId, peer.user.id])).rowCount, 1);
+
+    await db.withTransaction(async tx => {
+      await tx.query(`DELETE FROM ${taxonomy} WHERE id=$1 AND user_id=$2`, [oldId, alice.id]);
+      await tx.query(`INSERT INTO ${taxonomy} (id, user_id, name) VALUES ($1,$2,$3)`, [replacementId, alice.id, name]);
+      if (kind === "notes") {
+        await tx.query("INSERT INTO notes.notes (id, user_id, content, occurred_at) VALUES ($1,$2,'restored note',now())", [restoredId, alice.id]);
+      } else {
+        await tx.query("INSERT INTO assets.items (id, user_id, name) VALUES ($1,$2,'restored item')", [restoredId, alice.id]);
+      }
+      await tx.query(`INSERT INTO ${links} (${recordId}, ${taxonomyId}) VALUES ($1,$2)`, [restoredId, replacementId]);
+      await tx.query("INSERT INTO tasks.tasks (id, user_id, title) VALUES ($1,$2,'unrelated alongside conflict')", [unrelatedId, alice.id]);
+    });
+
+    // Edit the peer's shared old ID without changing the exact natural key.
+    if (kind === "notes") {
+      await peer.db.query("UPDATE notes.tags SET created_at=created_at + interval '1 minute' WHERE id=$1 AND user_id=$2", [oldId, peer.user.id]);
+    } else {
+      await peer.db.query("UPDATE assets.categories SET color='#556677' WHERE id=$1 AND user_id=$2", [oldId, peer.user.id]);
+    }
+    assert.equal((await settlePeer(peer)).result, "published");
+
+    const diverged = await settle(aliceCookie);
+    assert.equal(diverged.openConflicts, 1);
+    const response = await call("GET", "/api/core/data/sync/conflicts", aliceCookie);
+    assert.equal(response.statusCode, 200, response.body);
+    const conflicts = response.json().items as { id: string; syncKey: string; reason: string; local: { id: string }; remote: { id: string } }[];
+    assert.equal(conflicts.length, 1);
+    const [conflict] = conflicts;
+    assert.equal(conflict!.syncKey, originalKey);
+    assert.equal(conflict!.reason, "natural-key");
+    assert.equal(conflict!.local.id, replacementId);
+    assert.equal(conflict!.remote.id, oldId);
+
+    const linkQuery = `SELECT ${taxonomyId} AS id FROM ${links} WHERE ${recordId}=$1`;
+    assert.deepEqual((await db.query(linkQuery, [restoredId])).rows, [{ id: replacementId }]);
+    assert.equal((await settlePeer(peer)).openConflicts, 0);
+    assert.equal((await peer.db.query("SELECT title FROM tasks.tasks WHERE id=$1 AND user_id=$2", [unrelatedId, peer.user.id])).rows[0]?.title, "unrelated alongside conflict");
+    assert.equal((await peer.db.query(`SELECT id FROM ${taxonomy} WHERE id=$1 AND user_id=$2`, [replacementId, peer.user.id])).rowCount, 0);
+    assert.equal((await peer.db.query(linkQuery, [restoredId])).rowCount, 0);
+
+    const resolved = await call("POST", `/api/core/data/sync/conflicts/${conflict!.id}`, aliceCookie, { choice });
+    assert.equal(resolved.statusCode, 200, resolved.body);
+    assert.equal((await settle(aliceCookie)).openConflicts, 0);
+    assert.equal((await settlePeer(peer)).openConflicts, 0);
+    assert.equal((await settle(aliceCookie)).openConflicts, 0);
+    const survivor = choice === "keep-local" ? replacementId : oldId;
+    for (const owner of [{ database: db, id: alice.id }, { database: peer.db, id: peer.user.id }]) {
+      assert.deepEqual((await owner.database.query(`SELECT id FROM ${taxonomy} WHERE user_id=$1 AND name=$2`, [owner.id, name])).rows, [{ id: survivor }]);
+      assert.deepEqual((await owner.database.query(linkQuery, [restoredId])).rows, [{ id: survivor }]);
+    }
+  } finally {
+    try { await peer?.close(); }
+    finally { await dav.close(); }
+  }
+}
 
 async function assertNaturalLinks(choice: "keep-local" | "keep-remote", kind: "notes" | "assets"): Promise<void> {
   const label = kind + " " + choice;

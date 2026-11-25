@@ -1,12 +1,18 @@
+import { useSearchParams } from "react-router-dom";
 import { api } from "../../shared/api";
 import type { FrontendAppModule } from "../../shared/appTypes";
 import { computeNextAlarm, type AlarmView } from "./AlarmSection";
 import { ClockPage } from "./ClockPage";
 import { ClockWidget } from "./ClockWidget";
 
+function ClockRoute() {
+  const [params] = useSearchParams();
+  return <ClockPage linkedAlarmId={params.get("alarm") ?? undefined} />;
+}
+
 const app: FrontendAppModule = {
   id: "clock",
-  routes: [{ path: "", label: "Clock", element: <ClockPage /> }],
+  routes: [{ path: "", label: "Clock", element: <ClockRoute /> }],
   widgets: [
     {
       id: "clock",

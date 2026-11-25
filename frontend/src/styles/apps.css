@@ -3181,6 +3181,12 @@
   border-color: var(--px-border-soft);
 }
 
+.clock-alarm[aria-current="true"] {
+  opacity: 1;
+  outline: var(--border-2) solid var(--app-accent, var(--px-border));
+  outline-offset: var(--border-2);
+}
+
 .clock-alarm__main {
   display: grid;
   gap: 2px;

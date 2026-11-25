@@ -88,6 +88,19 @@ afterEach(() => {
 });
 
 describe("AlarmSection firing orchestration", () => {
+  it("locates the alarm with the linked ID after loading", async () => {
+    const other = alarmView({ label: "Old alarm", enabled: false });
+    const restored = alarmView({ label: "Restored alarm", enabled: false });
+    stubAlarmApi([other, restored]);
+
+    await act(async () => { render(<AlarmSection linkedAlarmId={restored.id} />); });
+
+    const target = screen.getByText("Restored alarm").closest("li");
+    expect(target).toHaveAttribute("aria-current", "true");
+    expect(target).toHaveFocus();
+    expect(screen.getByText("Old alarm").closest("li")).not.toHaveAttribute("aria-current");
+  });
+
   it("A+B: two alarms at the same HH:MM each fire exactly once; the next tick in the same window does not re-fire", async () => {
     stubAlarmApi([
       alarmView({ time: "07:30", label: "Alpha" }),

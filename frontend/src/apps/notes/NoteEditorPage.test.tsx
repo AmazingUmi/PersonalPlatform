@@ -286,7 +286,7 @@ describe("NoteEditorPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     const dialog = await screen.findByTestId("confirm-dialog");
-    expect(screen.getByText(/delete this note\? this cannot be undone\./i)).toBeDefined();
+    expect(screen.getByText(/move this note to trash\?/i)).toBeDefined();
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
 
