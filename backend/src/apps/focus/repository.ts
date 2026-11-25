@@ -143,16 +143,22 @@ export async function saveSettings(db: Db, userId: string, next: SettingsView): 
  * drift.
  */
 export async function findActiveSession(tx: Db, userId: string): Promise<SessionRow | null> {
-  const { rows } = await tx.query<SessionPgRow>(
-    `SELECT ${SESSION_COLUMNS}
-     FROM focus.sessions
+  return (await activeSessionSnapshot(tx, userId, true))?.row ?? null;
+}
+
+export async function activeSessionSnapshot(
+  tx: Db, userId: string, lock = false,
+): Promise<{ row: SessionRow; snapshot: string } | null> {
+  const { rows } = await tx.query<SessionPgRow & { snapshot: string }>(
+    `SELECT ${SESSION_COLUMNS}, row_to_json(s)::text AS snapshot
+     FROM focus.sessions s
      WHERE user_id = $1 AND status IN ('running', 'paused')
      ORDER BY started_at DESC
      LIMIT 1
-     FOR UPDATE`,
+     ${lock ? "FOR UPDATE" : ""}`,
     [userId],
   );
-  return rows[0] ? toRow(rows[0]) : null;
+  return rows[0] ? { row: toRow(rows[0]), snapshot: rows[0].snapshot } : null;
 }
 
 /**

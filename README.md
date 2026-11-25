@@ -95,6 +95,21 @@ make dev-expose   # database/backend 发布到宿主机回环，frontend 开放�
 - **多用户数据隔离**：所有 App 的业务数据行都以 `user_id` 归属（NOT NULL 外键 → `core.users`，级联删除）；查询始终按当前用户过滤，访问他人资源返回 404。用户文件（如附件）根目录为 `storage/users/<userId>/apps/<appId>/`。
 - **创建更多用户**：管理员登录后在 Settings → Users 面板创建普通账号；管理员账号只能通过 bootstrap 产生。
 
+## Agent 接口
+
+在 **Settings → Agents** 创建 Agent，选择 `read`、`write`、`delete` 中需要的权限及允许访问的 App。保存创建或轮换时显示一次的 Bearer Token。Tasks、Notes、Assets、Focus 和 Clock 提供 Agent 工具，平台提供状态、App 列表和概览。
+
+Agent 所有者可发出 15 分钟内有效的一次性配对码。接收人须登录自己的账号，预览权限并确认自己的授权。首次批准第二个账号后，每次发现、读取或调用都须指定已授权用户名。MCP 使用 `X-PP-Acting-User` 请求头。轮换 Token 会保留各用户的授权，后续请求使用新 Token。各用户可在 Settings 收窄或撤销自己的授权。
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| POST | `/api/agent/mcp` | MCP Streamable HTTP，协议版本 `2025-11-25` |
+| GET | `/api/agent/v1/manifest` | 发现当前账号可用的 App、工具、参数定义和资源 |
+| POST | `/api/agent/v1/tools/:toolName` | 按工具定义传入 JSON 对象 |
+| GET | `/api/agent/v1/resources?uri=…` | 读取当前账号获准访问的资源 |
+
+这些接口使用 `Authorization: Bearer <token>`，浏览器管理接口 `/api/core/agents/*` 使用登录 Cookie。JSON 客户端可以发送 `X-PP-Acting-User`，也可以在发现与资源读取时使用查询参数 `actingUser`，或在工具调用时使用请求体字段 `_actingUser`。创建工具需要 UUID `idempotencyKey`。修改或删除已有记录时使用发现或读取到的当前 `baseHash`。Agent 删除会进入该账号的回收站，写入活动可在 Settings 查看。Assets 工具提供附件元数据，文件传输在浏览器中完成。已验证的 Inspector 命令和代理设置见 [Agent 接入部署说明](doc/DEPLOYMENT.md#agent-接入)。
+
 ## 本地开发与验收
 
 不使用容器时：

@@ -21,6 +21,12 @@ import { createRequireAdmin, createRequireAuth, purgeExpiredSessions, registerAu
 import { TrashBlobStore } from "./trash/blobs.js";
 import { registerTrashRoutes } from "./trash/routes.js";
 import { TrashService } from "./trash/service.js";
+import { AgentCatalog } from "./agent/catalog.js";
+import { AgentGateway } from "./agent/gateway.js";
+import { AgentIdentityService } from "./agent/identity.js";
+import { purgeAgentActivity } from "./agent/audit.js";
+import { registerAgentIngress } from "./agent/transport.js";
+import { registerAgentManagement } from "./agent/management-routes.js";
 
 export const TIMEZONE_SETTING_KEY = "platform.timezone";
 
@@ -89,6 +95,7 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
   }
 
   const contexts = new Map<string, AppContext>();
+  const agentCatalog = new AgentCatalog();
   const appTransitions = new Map<string, Promise<AppRecord>>();
   const trashBlobs = database ? new TrashBlobStore({ database, storageRoot, log }) : null;
   let trashSweep: Promise<void> | undefined;
@@ -180,6 +187,21 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
 
   const authDeps = { database, now: deps.clock };
   const installedApps = () => registry.getApps().map(record => record.id);
+  const agentIdentity = database ? new AgentIdentityService({ database, time, installedApps }) : null;
+  const agentUnavailable = async (): Promise<never> => {
+    throw new AppError(503, "database_unavailable", "database is not available");
+  };
+  const platformIdentity = { name: config.platform.name, environment: resolveEnvironment(config.platform.environment) };
+  const agentGateway = database && agentIdentity && trash && trashBlobs
+    ? new AgentGateway({
+      database, time, log, identity: agentIdentity, catalog: agentCatalog,
+      apps: () => registry.getApps().filter(record => !appTransitions.has(record.id)),
+      hasAgentHook: appId => Boolean(backendModules[appId]?.registerAgent),
+      platform: platformIdentity, trash, blobs: trashBlobs,
+    })
+    : { authenticate: agentUnavailable, manifest: agentUnavailable, invoke: agentUnavailable, resource: agentUnavailable };
+  registerAgentIngress(app, agentGateway, { ...config.agent, now: deps.clock });
+  registerAgentManagement(app, agentIdentity, createRequireAuth(authDeps));
   const backups = database ? new WebdavBackups({ database, storageRoot, installedApps }) : null;
   const sync = database && backups ? new ContinuousSync({ database, storageRoot, installedApps, backups, now: deps.clock }) : null;
   registerDataManagementRoutes(app, {
@@ -197,7 +219,7 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
     handlers: { getApps, setAppEnabled, getAppHealth, getSetting, putSetting },
     // Report the EFFECTIVE environment (env override applied) so the
     // informational endpoint never disagrees with the resolved cookie flags.
-    platform: { name: config.platform.name, environment: resolveEnvironment(config.platform.environment) },
+    platform: platformIdentity,
     time: { timezone: () => time.timezone() },
     requireAuth: createRequireAuth(authDeps),
     requireAdmin: createRequireAdmin(authDeps),
@@ -217,10 +239,11 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
     scheduler.stopByOwner(appId);
   }
 
-  async function activateApp(appId: string): Promise<void> {
+  async function activateApp(appId: string, generation: symbol): Promise<void> {
     const mod = backendModules[appId];
     const ctx = contexts.get(appId);
-    if (!mod || !ctx) return;
+    const record = registry.get(appId);
+    if (!mod || !ctx || !record) return;
 
     // Clear leftovers from a previously failed activation of this app.
     releaseAppResources(appId);
@@ -238,6 +261,15 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
     } catch (error) {
       await registry.markError(appId, `registerJobs failed: ${(error as Error).message}`);
       releaseAppResources(appId);
+      return;
+    }
+
+    if (agentIdentity && mod.registerAgent) {
+      try {
+        await agentCatalog.register(appId, generation, ctx, record.capabilities, mod.registerAgent.bind(mod));
+      } catch {
+        log.error({ appId }, "App Agent catalog registration failed");
+      }
     }
   }
 
@@ -251,6 +283,11 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
     scheduler.register({
       id: "core.data-backups.poll", owner: "core.data-backups",
       schedule: { intervalMs: 60_000 }, run: () => backups!.tick(),
+    });
+    scheduler.register({
+      id: "core.agent_retention", owner: "core.agent",
+      schedule: { intervalMs: 3_600_000 },
+      run: async () => { await purgeAgentActivity(database, time.now(), config.agent.auditRetentionDays); },
     });
     scheduler.register({
       id: "core.sessions.cleanup",
@@ -274,7 +311,7 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
   }
 
   for (const record of registry.getApps()) {
-    if (record.status === "enabled") await activateApp(record.id);
+    if (record.status === "enabled") await activateApp(record.id, agentCatalog.invalidate(record.id));
   }
   await sweepTrashBlobs();
   scheduler.start();
@@ -288,10 +325,12 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
   }
 
   async function setAppEnabled(id: string, enabled: boolean): Promise<AppRecord> {
+    const generation = agentCatalog.invalidate(id);
+    const change = () => changeAppEnabled(id, enabled, generation);
     const previous = appTransitions.get(id);
     const transition = (previous ?? Promise.resolve()).then(
-      () => changeAppEnabled(id, enabled),
-      () => changeAppEnabled(id, enabled),
+      change,
+      change,
     );
     appTransitions.set(id, transition);
     try {
@@ -301,7 +340,7 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
     }
   }
 
-  async function changeAppEnabled(id: string, enabled: boolean): Promise<AppRecord> {
+  async function changeAppEnabled(id: string, enabled: boolean, generation: symbol): Promise<AppRecord> {
     const record = await registry.setEnabled(id, enabled);
     releaseAppResources(id);
     if (record.status === "enabled") {
@@ -311,7 +350,7 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
         log.error({ error, appId: id }, "app migration during enable failed");
         await registry.markError(id, `migration failed: ${(error as Error).message}`);
       }
-      if (registry.getStatus(id) === "enabled") await activateApp(id);
+      if (registry.getStatus(id) === "enabled") await activateApp(id, generation);
     }
     // Activation/migration may have flipped the record to error; always return
     // the registry's final current state so the API never reports a stale
@@ -387,7 +426,10 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
     await trashSweep;
     scheduler.stopByOwner("core.data-backups");
     await backups?.stop();
-    for (const record of registry.getApps()) releaseAppResources(record.id);
+    for (const record of registry.getApps()) {
+      agentCatalog.invalidate(record.id);
+      releaseAppResources(record.id);
+    }
     scheduler.stopAll();
     eventBus.close();
   }

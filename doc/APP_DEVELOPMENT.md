@@ -134,6 +134,7 @@ interface BackendAppModule {
   registerEvents?(ctx: AppContext): Promise<Unsubscribe[]>; // optional
   registerJobs?(ctx: AppContext): Promise<JobHandle[]>;     // optional
   healthcheck?(ctx: AppContext): Promise<AppHealth>;        // optional
+  registerAgent?(ctx: AppAgentContext): Promise<void>;     // optional
   restoreFromTrash?(ctx: TrashRestoreContext, entry: OwnedTrashEntry): Promise<{ restoredId: string }>;
 }
 ```
@@ -163,6 +164,18 @@ Contexts are built by `createAppContext` in `backend/src/core/app-registry/conte
 Use `ctx.trash.withMutation(request, mutate)` for a covered browser delete. In the supplied transaction, retain the App's normal owner predicates, locks and stale-write checks. Archive an explicit snapshot of the owned record with `moveToTrash`, then delete the live row through that same transaction. Core supplies the authenticated owner, App, actor and retention timestamps.
 
 An App's optional `restoreFromTrash` hook validates its archive payload version and fields. Write through the supplied transaction under the same owner and lock rules. Use `ctx.restoredId` for the new live record, resolve taxonomies within the owner, and preserve the archived business values. A same-owner record under the original ID blocks restore and preserves the archive. For Assets, supply owned attachment descriptors in the preparation and final delete callbacks. On restore, `restoreAttachments` stages the owned bytes and returns the new App-relative keys. Use the attachment read and retirement guards for paths that read metadata-backed bytes and unlink referenced keys.
+
+### Agent tools and resources
+
+An App may implement `registerAgent(ctx)` under App Contract V1. Core stages registrations during activation and publishes the complete catalog for the current activation. Disabling the App removes its Agent entries. A failed Agent registration leaves the browser App available.
+
+- Register tools through `ctx.tool`. Names start with `<appId>_` and use explicit object schemas with `additionalProperties: false`. Set the action and its full required scope set. Core combines those scopes with the acting user's App allowlist for discovery and invocation. Reading uses `read`, editing uses `read` and `write`, and deleting uses `read` and `delete`. A standalone create can use `write`. Require `read` when create accepts existing references or checks existing state.
+- Register read-only resources through `ctx.resource` under `pp://apps/<appId>/`. An optional `ctx.overview` provider contributes a compact, read-only summary to `platform_overview`. Both use the invocation's owner and capability-gated database context.
+- Share App-owned operations with browser routes. Filter with the supplied `userId` and use the invocation transaction, App manifest capabilities, and platform time. Read operations return data without publishing events or reconciling stored state. On mutations Core defers App events until the transaction commits.
+- Require `baseHash` for existing-record mutations, compare it under the existing locks, and report a stale proof as `AppError(409, "conflict", ..., { current, retryHint })` with an owned snapshot and its current proof. Set `create: true` on create tools so Core requires a UUID `idempotencyKey`. Return the created ID as `resourceId`; replay returns the same ID.
+- Use the invocation's bound `trash` for covered delete tools. For Assets, register `prepareDelete` and share the App's preparation and deletion operations. Core provides the attachment guard and checks the same acting user and App generation before staging. Archive, live mutation, and success audit share the transaction.
+
+The Notes and Assets backend modules show registration, projections and browser-shared mutations. The Core types are in `backend/src/core/agent/types.ts`.
 
 ## Migrations
 

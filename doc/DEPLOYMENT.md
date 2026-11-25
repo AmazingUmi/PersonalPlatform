@@ -84,6 +84,33 @@ Nginx 覆盖客户端传入的 `X-Forwarded-For`，后端默认信任内部私�
 
 三个生产服务均使用 `json-file` 日志轮转，每个文件最多 `10m`、保留 3 个文件。后端仍默认 `INFO`；希望减少请求日志写入时可以显式设置 `LOG_LEVEL=warn`，错误日志仍保留。开发配置保持原有热更新行为。`make prod` 继续在目标机器构建；需要避免目标机器构建开销时，使用已完成发布的多架构镜像和发行部署包。
 
+## Agent 接入
+
+开发 `.env`、源码生产 `.env.production` 和发行镜像 `.env.release` 使用同一组设置，启动时校验。
+
+| 环境变量 | 默认值 | 允许值与行为 |
+|---|---|---|
+| `AGENT_API_ENABLED` | `true` | 接受 `true`、`1`、`yes`、`on` 或 `false`、`0`、`no`、`off`。关闭后，`/api/agent/*` 在凭据查询前返回 404。Cookie 管理和定时清理继续运行。 |
+| `AGENT_API_ALLOWED_ORIGINS` | 空 | 逗号分隔的 HTTP(S) origin，例如 `https://inspector.example.com,http://localhost:6274`。填写协议、主机和可选端口。MCP 请求携带 Origin 时须与列表匹配，否则返回 403。无 Origin 的客户端照常使用 Bearer Token。 |
+| `AGENT_AUDIT_RETENTION_DAYS` | `90` | 接受 1–365 的整数。Core 按小时清理超过保留期的活动记录及已过期的配对码。 |
+
+生产客户端连接站点的 HTTPS 入口。外层代理应保留 `Authorization`、`X-PP-Acting-User`、`Origin`、`MCP-Protocol-Version` 和 `Accept` 请求头。对 `/api/agent/mcp` 关闭响应缓冲和缓存，读取超时至少覆盖容器 Nginx 的 180 秒配置。容器 Nginx 已为这一路径单独配置。限流仍按实际代理拓扑解析客户端 IP，沿用本指南前述可信代理设置。[Nginx 代理指令](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffering)
+
+### 使用 MCP Inspector
+
+在客户端运行以下命令，把示例域名换成实际 HTTPS 入口，并填写 Agent Token 和已授权用户名。配对接收人填写自己的 **登录用户名**。Inspector 2.16.0 的 legacy 模式已通过本地 HTTPS、Nginx 和实际平台服务验证配对接入。[Inspector CLI 官方文档](https://github.com/modelcontextprotocol/inspector/blob/main/clients/cli/README.md)
+
+```bash
+npx @modelcontextprotocol/inspector@2.16.0 --cli \
+  'https://platform.example.com/api/agent/mcp' \
+  --transport http --protocol-era legacy --method tools/list \
+  --header 'Authorization: Bearer <token>' 'X-PP-Acting-User: <username>'
+```
+
+可将命令中的方法替换为 `--method resources/read --uri pp://platform/overview` 或 `--method tools/call --tool-name platform_status`，二者都需要 `read` 权限。Token 只用于私有客户端配置，配对码在 Settings 中提交。修改授权或启停 App 后，在客户端重新发现工具和资源。
+
+MCP 使用单条 JSON-RPC 消息的 POST，请求同时接受 `application/json` 与 `text/event-stream`。支持 `initialize`、`notifications/initialized`、`ping`、发现和调用工具，以及列出和读取资源。初始化后发送协商版本 `MCP-Protocol-Version: 2025-11-25`。客户端采用无会话模式，工具结果发出后对应的 SSE 流关闭。通过认证的 GET 和 DELETE 返回 405。[MCP Streamable HTTP 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+
 ## 更新与停止
 
 发行镜像更新时，先停止写入并完成与当前版本匹配的备份，再下载、校验并解压新版本部署包。保留原私有 `.env.release` 中的密码、项目名、端口、WebDAV origin 允许列表和密钥设置，只把 `BACKEND_IMAGE` / `FRONTEND_IMAGE` 更新为新包中配套的引用；不要用空白模板覆盖真实凭据。审阅新版本说明后执行：

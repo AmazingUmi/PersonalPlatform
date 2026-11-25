@@ -6,7 +6,7 @@ import { after, before, describe, it } from "node:test";
 import { Database } from "../../src/core/database/index.js";
 import clockApp from "../../src/apps/clock/index.js";
 import type { Platform } from "../../src/core/platform.js";
-import { buildFixturePlatform, ensureTestAdmin, loginCookie } from "../helpers/platform.js";
+import { buildFixturePlatform, createTestUser, ensureTestAdmin, loginCookie } from "../helpers/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 import { runMigrations } from "../../src/core/database/migrate.js";
 
@@ -516,5 +516,95 @@ describe("disabled lifecycle", () => {
     assert.equal(enabled.status, 200);
     const restored = await json<{ items: AlarmView[] }>("GET", "/api/apps/clock/alarms");
     assert.ok(restored.body.items.some((entry) => entry.id === alarm.id), "data survives the cycle");
+  });
+});
+
+describe("Clock Agent tools", () => {
+  it("shares Browser alarm proofs, limits create results, and archives Agent deletions", async () => {
+    const owner = await createTestUser(db, "clock-agent-owner");
+    const ownerCookie = await loginCookie(platform, owner.username, "test-password-clock-agent-owner");
+    const browser = { cookie: ownerCookie };
+
+    async function tokenFor(name: string, scopes: string[]) {
+      const created = await platform.app.inject({
+        method: "POST", url: "/api/core/agents", headers: browser,
+        payload: { name, scopes, allowedApps: ["clock"] },
+      });
+      assert.equal(created.statusCode, 201, created.body);
+      return created.json<{ token: string; agent: { id: string } }>();
+    }
+
+    const writer = await tokenFor("Clock creator", ["write"]);
+    const agent = await tokenFor("Clock operator", ["read", "write", "delete"]);
+    const auth = (token: string) => ({ authorization: "Bearer " + token });
+    const invoke = (token: string, name: string, payload: object = {}) => platform.app.inject({
+      method: "POST", url: `/api/agent/v1/tools/${name}`, headers: auth(token), payload,
+    });
+    const writerManifest = await platform.app.inject({ url: "/api/agent/v1/manifest", headers: auth(writer.token) });
+    assert.equal(writerManifest.statusCode, 200, writerManifest.body);
+    assert.deepEqual(writerManifest.json().tools.map((tool: { name: string }) => tool.name), ["clock_alarm_create"]);
+    const creation = { time: "09:15", label: "Agent alarm", idempotencyKey: randomUUID() };
+    const first = await invoke(writer.token, "clock_alarm_create", creation);
+    assert.equal(first.statusCode, 200, first.body);
+    const { id } = first.json<{ data: { id: string } }>().data;
+    assert.deepEqual(first.json(), { ok: true, data: { id } });
+    assert.deepEqual((await invoke(writer.token, "clock_alarm_create", creation)).json(), first.json());
+    assert.equal((await invoke(writer.token, "clock_alarm_update", { id, baseHash: "a".repeat(64), enabled: false })).statusCode, 403);
+
+    const list = await invoke(agent.token, "clock_alarms_list", { limit: 1, enabled: true });
+    assert.equal(list.statusCode, 200, list.body);
+    const { items } = list.json<{ data: { items: AlarmView[] } }>().data;
+    assert.equal(items.length, 1);
+    assert.equal(items[0]!.id, id);
+    assert.match(items[0]!.baseHash, SYNC_HASH);
+    const url = `/api/apps/clock/alarms/${id}`;
+    const browserEdit = await platform.app.inject({
+      method: "PATCH", url, headers: browser, payload: { label: "Browser-edited alarm", baseHash: items[0]!.baseHash },
+    });
+    assert.equal(browserEdit.statusCode, 200, browserEdit.body);
+    const current = browserEdit.json<AlarmView>();
+    const obsolete = await invoke(agent.token, "clock_alarm_update", { id, baseHash: items[0]!.baseHash, enabled: false });
+    assert.equal(obsolete.statusCode, 409, obsolete.body);
+    assert.deepEqual(obsolete.json().error.details.current, current);
+    assert.equal((await invoke(agent.token, "clock_alarm_update", { id, label: "Missing proof" })).statusCode, 422);
+    const updated = await invoke(agent.token, "clock_alarm_update", {
+      id, baseHash: current.baseHash, label: null, repeatDays: [6, 1],
+    });
+    assert.equal(updated.statusCode, 200, updated.body);
+    const after = updated.json<{ data: AlarmView }>().data;
+    assert.equal(after.label, "");
+    assert.deepEqual(after.repeatDays, [1, 6]);
+
+    const worldClock = await platform.app.inject({
+      method: "POST", url: "/api/apps/clock/world-clocks", headers: browser,
+      payload: { city: "Singapore", timezone: "Asia/Singapore" },
+    });
+    assert.equal(worldClock.statusCode, 201, worldClock.body);
+    const overview = await invoke(agent.token, "clock_overview");
+    assert.equal(overview.statusCode, 200, overview.body);
+    assert.equal(overview.json().data.time, FIXED_NOW.toISOString());
+    assert.equal(overview.json().data.enabledAlarms.items[0].id, id);
+    assert.equal(overview.json().data.worldClocks.items[0].localTime, "19:26:00");
+    const worlds = await invoke(agent.token, "clock_world_clocks_list");
+    assert.equal(worlds.statusCode, 200, worlds.body);
+    assert.equal(worlds.json().data.items[0].timezone, "Asia/Singapore");
+    const resource = await platform.app.inject({
+      url: "/api/agent/v1/resources?uri=pp%3A%2F%2Fapps%2Fclock%2Fsummary", headers: auth(agent.token),
+    });
+    assert.equal(resource.statusCode, 200, resource.body);
+    assert.equal(JSON.parse(resource.json().text).enabledAlarms.items[0].id, id);
+
+    const staleDelete = await invoke(agent.token, "clock_alarm_delete", { id, baseHash: current.baseHash });
+    assert.equal(staleDelete.statusCode, 409, staleDelete.body);
+    assert.deepEqual(staleDelete.json().error.details.current, after);
+    const deleted = await invoke(agent.token, "clock_alarm_delete", { id, baseHash: after.baseHash });
+    assert.equal(deleted.statusCode, 200, deleted.body);
+    assert.deepEqual(deleted.json().data, { id });
+    const { rows } = await db.query(
+      "SELECT deleted_by_type, deleted_by_agent_id, deleted_by_label FROM core.trash_items WHERE user_id=$1 AND entity_id=$2",
+      [owner.id, id],
+    );
+    assert.deepEqual(rows, [{ deleted_by_type: "agent", deleted_by_agent_id: agent.agent.id, deleted_by_label: "Clock operator" }]);
+    assert.deepEqual((await invoke(agent.token, "clock_alarms_list")).json().data.items, []);
   });
 });

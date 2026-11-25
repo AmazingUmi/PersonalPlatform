@@ -7,6 +7,7 @@ import {
   findRepoRoot,
   loadAppConfig,
   loadConfig,
+  resolveAgentRuntimeConfig,
   resolveEnvironment,
   resolveSessionCookieSecure,
   resolveTrashRetentionDays,
@@ -107,6 +108,35 @@ storage:
     } finally {
       if (previous === undefined) delete process.env.PLATFORM_ROOT;
       else process.env.PLATFORM_ROOT = previous;
+    }
+  });
+});
+
+describe("Agent runtime config", () => {
+  it("defaults to enabled with no trusted browser origins and 90 days of audit retention", () => {
+    assert.deepEqual(resolveAgentRuntimeConfig({}), { enabled: true, allowedOrigins: [], auditRetentionDays: 90 });
+  });
+
+  it("canonicalizes configured origins with explicit enable and audit overrides", () => {
+    assert.deepEqual(resolveAgentRuntimeConfig({
+      AGENT_API_ENABLED: "false",
+      AGENT_API_ALLOWED_ORIGINS: "https://One.example:443/, http://localhost:8080, https://one.example",
+      AGENT_AUDIT_RETENTION_DAYS: "365",
+    }), {
+      enabled: false, allowedOrigins: ["https://one.example", "http://localhost:8080"], auditRetentionDays: 365,
+    });
+    assert.equal(resolveAgentRuntimeConfig({ AGENT_AUDIT_RETENTION_DAYS: "1" }).auditRetentionDays, 1);
+  });
+
+  it("rejects malformed enable, audit retention and origin values", () => {
+    for (const value of ["", "maybe"]) {
+      assert.throws(() => resolveAgentRuntimeConfig({ AGENT_API_ENABLED: value }), /AGENT_API_ENABLED/);
+    }
+    for (const value of ["", "0", "366", "1.5", "9e1", " 90"]) {
+      assert.throws(() => resolveAgentRuntimeConfig({ AGENT_AUDIT_RETENTION_DAYS: value }), /AGENT_AUDIT_RETENTION_DAYS/);
+    }
+    for (const value of ["*", "null", "ftp://one.example", "https://one.example/path", "https://user@one.example", "https://one.example?x=1", "https://one.example,"]) {
+      assert.throws(() => resolveAgentRuntimeConfig({ AGENT_API_ALLOWED_ORIGINS: value }), /AGENT_API_ALLOWED_ORIGINS/);
     }
   });
 });

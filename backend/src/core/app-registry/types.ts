@@ -7,6 +7,7 @@ import type { AppScheduler, JobHandle } from "../scheduler/index.js";
 import type { TimeService } from "../time/index.js";
 import type { AuthUserView } from "../auth/service.js";
 import type { AppTrash, OwnedTrashEntry, TrashRestoreContext } from "../trash/types.js";
+import type { AppAgentContext } from "../agent/types.js";
 
 export interface ManifestWidget {
   id: string;
@@ -93,6 +94,7 @@ export interface BackendAppModule {
   registerJobs?(ctx: AppContext): Promise<JobHandle[]>;
   healthcheck?(ctx: AppContext): Promise<AppHealth>;
   restoreFromTrash?(ctx: TrashRestoreContext, entry: OwnedTrashEntry): Promise<{ restoredId: string }>;
+  registerAgent?(ctx: AppAgentContext): Promise<void>;
 }
 
 /** Public representation of an App returned by Core APIs. */

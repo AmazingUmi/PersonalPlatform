@@ -119,7 +119,7 @@ export class TrashService {
             },
           }), locked);
         };
-        return prepared ? this.guardedMutation(prepared.intentId, run) : this.options.database.withTransaction(run);
+        return prepared ? this.runAttachmentMutation(prepared.intentId, run) : this.options.database.withTransaction(run);
       },
     };
   }
@@ -200,7 +200,7 @@ export class TrashService {
         : undefined;
       return { scope, intentId };
     });
-    return this.guardedMutation(prepared.intentId, async tx => {
+    return this.runAttachmentMutation(prepared.intentId, async tx => {
       await this.requireOwner(tx, session);
       const intent = prepared.intentId ? await this.options.blobs.lockIntent(tx, prepared.scope, prepared.intentId, "restore") : undefined;
       const row = await this.readEntry(tx, userId, id, true);
@@ -299,7 +299,8 @@ export class TrashService {
     return withAttachmentGuard(this.options.database, "shared", run);
   }
 
-  private async guardedMutation<T>(intentId: string | undefined, run: (tx: DatabaseContext) => Promise<T>): Promise<T> {
+  /** Core transaction with durable outcome resolution for a prepared attachment intent. */
+  async runAttachmentMutation<T>(intentId: string | undefined, run: (tx: DatabaseContext) => Promise<T>): Promise<T> {
     let completed: { result: T } | undefined;
     try {
       return await this.guard(async tx => {

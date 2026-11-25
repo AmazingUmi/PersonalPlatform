@@ -41,6 +41,9 @@ services:
       DATA_BACKUP_ALLOWED_ORIGINS: ${DATA_BACKUP_ALLOWED_ORIGINS:-}
       DATA_BACKUP_ENCRYPTION_KEY: ${DATA_BACKUP_ENCRYPTION_KEY:-}
       TRASH_RETENTION_DAYS: ${TRASH_RETENTION_DAYS-30}
+      AGENT_API_ENABLED: ${AGENT_API_ENABLED-true}
+      AGENT_API_ALLOWED_ORIGINS: ${AGENT_API_ALLOWED_ORIGINS-}
+      AGENT_AUDIT_RETENTION_DAYS: ${AGENT_AUDIT_RETENTION_DAYS-90}
       # First-admin bootstrap (empty = skip; see README "身份认证" / .env.example).
       # Passed through so `docker compose` can activate the placeholder admin
       # on first boot. Never resets an already-activated password; once an

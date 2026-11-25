@@ -48,6 +48,9 @@ const environment = {
   TRUST_PROXY: "",
   DATABASE_POOL_MAX: undefined,
   TRASH_RETENTION_DAYS: undefined,
+  AGENT_API_ENABLED: undefined,
+  AGENT_API_ALLOWED_ORIGINS: undefined,
+  AGENT_AUDIT_RETENTION_DAYS: undefined,
   PG_SHARED_BUFFERS: undefined,
   PG_WORK_MEM: undefined,
   PG_MAINTENANCE_WORK_MEM: undefined,
@@ -117,6 +120,30 @@ test("Trash retention reaches the backend in development, production and release
       assert.equal(JSON.parse(result.stdout).services.backend.environment.TRASH_RETENTION_DAYS, value ?? "30");
     }
   }
+});
+
+test("Agent runtime controls reach the backend in development, production and release", () => {
+  const defaults = { AGENT_API_ENABLED: "true", AGENT_API_ALLOWED_ORIGINS: "", AGENT_AUDIT_RETENTION_DAYS: "90" };
+  const override = { AGENT_API_ENABLED: "false", AGENT_API_ALLOWED_ORIGINS: "https://platform.example", AGENT_AUDIT_RETENTION_DAYS: "42" };
+  for (const file of ["docker-compose.yml", "docker/docker-compose.prod.yml", "docker/docker-compose.release.yml"]) {
+    for (const expected of [defaults, override]) {
+      const rendered = config([file], { ...releaseImages, ...(expected === defaults ? {} : override) });
+      assert.equal(rendered.status, 0, rendered.stderr);
+      const env = JSON.parse(rendered.stdout).services.backend.environment;
+      for (const [key, value] of Object.entries(expected)) assert.equal(env[key], value, file);
+    }
+  }
+});
+
+test("MCP uses an exact, unbuffered Nginx location with the API forwarding headers", () => {
+  const nginx = readFileSync(resolve(root, "docker/nginx.conf"), "utf8");
+  const location = nginx.match(/location = \/api\/agent\/mcp \{([^}]+)\}/)?.[1];
+  assert.ok(location);
+  for (const directive of [
+    "proxy_buffering off;", "proxy_cache off;", "chunked_transfer_encoding on;", "proxy_read_timeout 180s;",
+    "proxy_set_header Host $host;", "proxy_set_header X-Real-IP $remote_addr;",
+    "proxy_set_header X-Forwarded-For $remote_addr;", "proxy_set_header X-Forwarded-Proto $scheme;",
+  ]) assert.ok(location.includes(directive), directive);
 });
 
 test("pull-only release preserves every runtime setting and the same persistent volumes", () => {

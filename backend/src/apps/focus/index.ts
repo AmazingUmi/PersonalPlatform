@@ -18,17 +18,20 @@
  * user (AUTH-3 ownership).
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { AppError } from "../../core/api/errors.js";
+import type { AppAgentContext, AppAgentInvocation } from "../../core/agent/types.js";
 import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-registry/types.js";
 import {
   assertPresentedHash, editorBaseHash, lockOwnedTables, lockOwnerSet, parseSnapshotRow, readPresentedHash, singletonBaseHash, syncWriteFenced,
 } from "../../core/data-management/sync-fence.js";
 import {
   SETTINGS_LIMITS,
+  applyNaturalComplete,
   applyPause,
   applyResume,
   applyStop,
+  isExpired,
   localDateString,
   nextKind as nextKindAfter,
   DEFAULT_SETTINGS,
@@ -40,6 +43,7 @@ import {
   type SettingsView,
 } from "./timer.js";
 import {
+  activeSessionSnapshot,
   completedFocusSinceLongBreak,
   findTerminalSession,
   getSettings,
@@ -122,23 +126,38 @@ async function settingsProof(db: AppContext["database"], userId: string): Promis
  * scoped to the requesting user (AUTH-3).
  */
 async function assembleState(
-  ctx: AppContext,
+  ctx: Pick<AppContext, "database" | "time">,
   userId: string,
   now: Date,
   active: SessionRow | null,
   baseHash: string | null = null,
+  knownSettings?: FocusState["settings"],
+  projectedCompletion?: SessionRow | null,
 ): Promise<FocusState> {
   const [settings, today, completedFocus] = await Promise.all([
-    settingsProof(ctx.database, userId),
+    knownSettings ?? settingsProof(ctx.database, userId),
     todayStats(ctx.database, userId, ctx.time.todayRangeUtc(now)),
     completedFocusSinceLongBreak(ctx.database, userId),
   ]);
+  let effectiveRounds = completedFocus;
+  if (projectedCompletion?.endedAt) {
+    const range = ctx.time.todayRangeUtc(now);
+    if (projectedCompletion.endedAt >= range.start && projectedCompletion.endedAt < range.end) {
+      today.sessionsEnded++;
+      if (projectedCompletion.kind === "focus") {
+        today.completedRounds++;
+        today.focusedSeconds += projectedCompletion.actualDurationSeconds ?? 0;
+      }
+    }
+    if (projectedCompletion.kind === "focus") effectiveRounds++;
+    if (projectedCompletion.kind === "long_break") effectiveRounds = 0;
+  }
   return {
     now: now.toISOString(),
     active: active === null ? null : { ...toSessionView(active, now), ...(baseHash ? { baseHash } : {}) },
     today,
     nextKind:
-      active !== null ? active.kind : nextKindAfter(completedFocus, settings.longBreakInterval),
+      active !== null ? active.kind : nextKindAfter(effectiveRounds, settings.longBreakInterval),
     settings,
   };
 }
@@ -154,7 +173,7 @@ async function sessionBaseHash(tx: AppContext["database"], userId: string, sessi
     "SELECT row_to_json(s)::text AS snapshot FROM focus.sessions s WHERE id = $1 AND user_id = $2",
     [sessionId, userId],
   );
-  return rows[0] ? editorBaseHash([{ table: "focus.sessions", row: parseSnapshotRow(rows[0].snapshot) }]) : null;
+  return rows[0] ? sessionHash(rows[0].snapshot) : null;
 }
 
 async function syncState(ctx: AppContext, userId: string, now: Date): Promise<FocusState> {
@@ -191,7 +210,7 @@ async function stateConflict(
 // `userId` is an additive field on the .v1 payloads (AUTH-3 payload evolution
 // rule: additions allowed, renames/removals require a new .vN).
 
-function publishCompleted(ctx: AppContext, userId: string, row: SessionRow): void {
+function publishCompleted(ctx: Pick<AppContext, "events"> | AppAgentInvocation, userId: string, row: SessionRow): void {
   ctx.events.publish(
     "focus.session.completed.v1",
     {
@@ -204,7 +223,7 @@ function publishCompleted(ctx: AppContext, userId: string, row: SessionRow): voi
   );
 }
 
-function publishCancelled(ctx: AppContext, userId: string, row: SessionRow): void {
+function publishCancelled(ctx: Pick<AppContext, "events"> | AppAgentInvocation, userId: string, row: SessionRow): void {
   ctx.events.publish(
     "focus.session.cancelled.v1",
     {
@@ -325,6 +344,178 @@ function toHistoryItem(row: HistoryItemRow): HistoryItem {
 // routes
 // ---------------------------------------------------------------------------
 
+
+type FocusDb = AppContext["database"];
+type TimerAction = "pause" | "resume" | "stop";
+
+async function lockFocusStart(tx: FocusDb, userId: string): Promise<void> {
+  await lockOwnedTables(tx, ["focus.sessions", "focus.settings"]);
+  await lockOwnerSet(tx, userId, "focus.sessions");
+  await lockOwnerSet(tx, userId, "focus.settings");
+}
+
+async function startSession(tx: FocusDb, userId: string, kind: SessionKind, planned: number, now: Date): Promise<SessionRow> {
+  const row: SessionRow = {
+    id: randomUUID(),
+    kind: kind,
+    status: "running",
+    plannedDurationSeconds: planned,
+    elapsedBeforePauseSeconds: 0,
+    startedAt: now,
+    lastResumedAt: now,
+    pausedAt: null,
+    endedAt: null,
+    endReason: null,
+    actualDurationSeconds: null,
+    revision: 1,
+  };
+  await insertSession(tx, userId, row);
+  return row;
+}
+
+async function writeTransition(tx: FocusDb, userId: string, action: TimerAction, active: SessionRow, now: Date): Promise<SessionRow | null> {
+  const transition = { pause: applyPause, resume: applyResume, stop: applyStop }[action];
+  const row = transition(active, now);
+  return await updateSessionRow(tx, userId, row) === 1 ? row : null;
+}
+
+async function focusStats(ctx: Pick<AppContext, "database" | "time">, userId: string, days: number) {
+  const timezone = ctx.time.timezone();
+  const now = ctx.time.now();
+  const series = await statsSeries(ctx.database, userId, {
+    timeZone: timezone,
+    // Calendar bucketing uses the platform timezone (FP-10), never SQL's.
+    todayLocal: localDateString(now, timezone),
+    days: days,
+  });
+  const totals = series.reduce(
+    (acc, day) => ({
+      focusedSeconds: acc.focusedSeconds + day.focusedSeconds,
+      completedRounds: acc.completedRounds + day.completedRounds,
+    }),
+    { focusedSeconds: 0, completedRounds: 0 },
+  );
+  return { timezone, days: series, totals };
+}
+
+async function agentFocusProof(ctx: AppAgentInvocation, now: Date, lock = false) {
+  const settings = await settingsProof(ctx.database, ctx.userId);
+  const saved = await activeSessionSnapshot(ctx.database, ctx.userId, lock);
+  const raw = saved?.row ?? null;
+  const expired = raw && isExpired(raw, now) ? applyNaturalComplete(raw, now) : null;
+  const active = expired ? null : raw;
+  const baseHash = createHash("sha256").update(JSON.stringify([
+    settings.baseHash, saved ? sessionHash(saved.snapshot) : null, active?.id ?? null,
+  ])).digest("hex");
+  return { settings, active, expired, baseHash };
+}
+
+function sessionHash(snapshot: string): string {
+  return editorBaseHash([{ table: "focus.sessions", row: parseSnapshotRow(snapshot) }]);
+}
+
+async function agentFocusView(ctx: AppAgentInvocation, now: Date, proof: Awaited<ReturnType<typeof agentFocusProof>>) {
+  const view = await assembleState(ctx, ctx.userId, now, proof.active, proof.baseHash, proof.settings, proof.expired);
+  return { ...view, baseHash: proof.baseHash };
+}
+
+async function focusProofConflict(ctx: AppAgentInvocation, now: Date, proof: Awaited<ReturnType<typeof agentFocusProof>>, message: string): Promise<never> {
+  throw new AppError(409, "conflict", message, {
+    current: await agentFocusView(ctx, now, proof),
+    retryHint: "Get the current Focus state and use its session ID and baseHash.",
+  });
+}
+
+async function assertFocusProof(ctx: AppAgentInvocation, now: Date, proof: Awaited<ReturnType<typeof agentFocusProof>>, baseHash: unknown): Promise<void> {
+  const error = hashConflict(await syncWriteFenced(ctx.database, ctx.userId), readPresentedHash(baseHash), proof.baseHash);
+  if (error) await focusProofConflict(ctx, now, proof, "The Focus timer or settings changed.");
+}
+
+function focusArgs(properties: Record<string, unknown>, required: string[] = []) {
+  return { type: "object" as const, additionalProperties: false, properties, required };
+}
+
+async function registerAgent(agent: AppAgentContext): Promise<void> {
+  const state = async (ctx: AppAgentInvocation) => {
+    const now = ctx.time.now();
+    return agentFocusView(ctx, now, await agentFocusProof(ctx, now));
+  };
+  agent.tool({
+    name: "focus_state", description: "Get the effective Focus timer, settings and concurrency hash.",
+    action: "read", scopes: ["read"], inputSchema: focusArgs({}),
+    execute: async ctx => ({ data: await state(ctx) }),
+  });
+
+  const baseHash = { type: "string", pattern: "^[0-9a-fA-F]{64}$" };
+  agent.tool({
+    name: "focus_start", description: "Start a Focus timer from the observed inactive state.",
+    action: "write", scopes: ["read", "write"], create: true,
+    inputSchema: focusArgs({
+      kind: { type: "string", enum: ["focus", "short_break", "long_break"] },
+      plannedDurationSeconds: { type: "integer", minimum: 1, maximum: 86400 },
+      baseHash,
+    }, ["kind", "baseHash"]),
+    execute: async (ctx, args) => {
+      const now = ctx.time.now();
+      await lockFocusStart(ctx.database, ctx.userId);
+      const proof = await agentFocusProof(ctx, now, true);
+      await assertFocusProof(ctx, now, proof, args.baseHash);
+      if (proof.active) await focusProofConflict(ctx, now, proof, ALREADY_ACTIVE_MESSAGE);
+      if (proof.expired) {
+        const { completed } = await reconcileActive(ctx.database, ctx.userId, now);
+        if (completed) publishCompleted(ctx, ctx.userId, completed);
+      }
+      const kind = args.kind as SessionKind;
+      const duration = args.plannedDurationSeconds as number | undefined;
+      const created = await startSession(ctx.database, ctx.userId, kind, duration ?? defaultPlannedSeconds(kind, proof.settings), now);
+      return { data: { id: created.id }, resourceId: created.id };
+    },
+  });
+
+  for (const action of ["pause", "resume", "stop"] as const) {
+    agent.tool({
+      name: `focus_${action}`, description: `Perform ${action} on the observed Focus session.`,
+      action: "write", scopes: ["read", "write"],
+      inputSchema: focusArgs({ sessionId: { type: "string", format: "uuid" }, baseHash }, ["sessionId", "baseHash"]),
+      execute: async (ctx, args) => {
+        const now = ctx.time.now();
+        await lockFocusStart(ctx.database, ctx.userId);
+        const proof = await agentFocusProof(ctx, now, true);
+        await assertFocusProof(ctx, now, proof, args.baseHash);
+        const active = proof.active;
+        if (!active) throw new AppError(409, "no_active_session", NO_ACTIVE_MESSAGE);
+        if (active.id !== String(args.sessionId).toLowerCase()) await focusProofConflict(ctx, now, proof, "The observed Focus session was replaced.");
+        const already = (action === "pause" && active.status === "paused") || (action === "resume" && active.status === "running");
+        if (!already) {
+          const changed = await writeTransition(ctx.database, ctx.userId, action, active, now);
+          if (!changed) await focusProofConflict(ctx, now, proof, "The Focus session changed during the operation.");
+          if (action === "stop" && changed) publishCancelled(ctx, ctx.userId, changed);
+        }
+        const changed = await agentFocusProof(ctx, now);
+        return { data: await agentFocusView(ctx, now, changed), resourceId: active.id };
+      },
+    });
+  }
+  agent.tool({
+    name: "focus_stats", description: "Summarize owned Focus history by platform-local calendar day.",
+    action: "read", scopes: ["read"], inputSchema: focusArgs({ days: { type: "integer", minimum: 1, maximum: 90, default: 7 } }),
+    execute: async (ctx, args) => ({ data: await focusStats(ctx, ctx.userId, Number(args.days)) }),
+  });
+  agent.tool({
+    name: "focus_sessions_list", description: "List recent terminal Focus sessions.",
+    action: "read", scopes: ["read"], inputSchema: focusArgs({
+      limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+      offset: { type: "integer", minimum: 0, maximum: 2_147_483_647, default: 0 },
+    }),
+    execute: async ({ database, userId }, args) => {
+      const { items, total } = await listSessions(database, userId, { limit: Number(args.limit), offset: Number(args.offset) });
+      return { data: { items: items.map(toHistoryItem), total } };
+    },
+  });
+  agent.resource({ uri: "pp://apps/focus/summary", name: "Focus summary", read: state });
+  agent.overview(state);
+}
+
 async function registerApi(ctx: AppContext): Promise<void> {
   const db = ctx.database;
 
@@ -359,7 +550,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
       let outcome: TransitionOutcome;
       try {
         outcome = await db.withTransaction(async (tx) => {
-          await lockOwnedTables(tx, ["focus.sessions", "focus.settings"]);
+          await lockFocusStart(tx, user.id);
           const { row: active, completed } = await reconcileActive(tx, user.id, now);
           if (active !== null) {
             return {
@@ -374,21 +565,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
           const planned =
             body.plannedDurationSeconds ??
             defaultPlannedSeconds(body.kind, await getSettings(tx, user.id));
-          const row: SessionRow = {
-            id: randomUUID(),
-            kind: body.kind,
-            status: "running",
-            plannedDurationSeconds: planned,
-            elapsedBeforePauseSeconds: 0,
-            startedAt: now,
-            lastResumedAt: now,
-            pausedAt: null,
-            endedAt: null,
-            endReason: null,
-            actualDurationSeconds: null,
-            revision: 1,
-          };
-          await insertSession(tx, user.id, row);
+          const row = await startSession(tx, user.id, body.kind, planned, now);
           return {
             activeAfter: row,
             completed,
@@ -438,9 +615,8 @@ async function registerApi(ctx: AppContext): Promise<void> {
       }
       const proved = hashConflict(await syncWriteFenced(tx, user.id), guard.baseHash, (await sessionBaseHash(tx, user.id, active.id)) ?? "");
       if (proved) return { activeAfter: active, completed, cancelled: null, conflict: proved, activeHash: await sessionBaseHash(tx, user.id, active.id) };
-      const paused = applyPause(active, now);
-      const updated = await updateSessionRow(tx, user.id, paused);
-      if (updated !== 1) {
+      const paused = await writeTransition(tx, user.id, "pause", active, now);
+      if (!paused) {
         return {
           activeAfter: active,
           completed,
@@ -479,9 +655,8 @@ async function registerApi(ctx: AppContext): Promise<void> {
       }
       const proved = hashConflict(await syncWriteFenced(tx, user.id), guard.baseHash, (await sessionBaseHash(tx, user.id, active.id)) ?? "");
       if (proved) return { activeAfter: active, completed, cancelled: null, conflict: proved, activeHash: await sessionBaseHash(tx, user.id, active.id) };
-      const resumed = applyResume(active, now);
-      const updated = await updateSessionRow(tx, user.id, resumed);
-      if (updated !== 1) {
+      const resumed = await writeTransition(tx, user.id, "resume", active, now);
+      if (!resumed) {
         return {
           activeAfter: active,
           completed,
@@ -520,9 +695,8 @@ async function registerApi(ctx: AppContext): Promise<void> {
       }
       const proved = hashConflict(await syncWriteFenced(tx, user.id), guard.baseHash, (await sessionBaseHash(tx, user.id, active.id)) ?? "");
       if (proved) return { activeAfter: active, completed, cancelled: null, conflict: proved, activeHash: await sessionBaseHash(tx, user.id, active.id) };
-      const stopped = applyStop(active, now);
-      const updated = await updateSessionRow(tx, user.id, stopped);
-      if (updated !== 1) {
+      const stopped = await writeTransition(tx, user.id, "stop", active, now);
+      if (!stopped) {
         return {
           activeAfter: active,
           completed,
@@ -584,22 +758,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
     },
     async (request) => {
       const user = await ctx.auth.requireUser(request);
-      const timezone = ctx.time.timezone();
-      const now = ctx.time.now();
-      const series = await statsSeries(ctx.database, user.id, {
-        timeZone: timezone,
-        // Calendar bucketing uses the platform timezone (FP-10), never SQL's.
-        todayLocal: localDateString(now, timezone),
-        days: request.query.days ?? 7,
-      });
-      const totals = series.reduce(
-        (acc, day) => ({
-          focusedSeconds: acc.focusedSeconds + day.focusedSeconds,
-          completedRounds: acc.completedRounds + day.completedRounds,
-        }),
-        { focusedSeconds: 0, completedRounds: 0 },
-      );
-      return { timezone, days: series, totals };
+      return focusStats(ctx, user.id, request.query.days ?? 7);
     },
   );
 
@@ -685,5 +844,5 @@ async function healthcheck(ctx: AppContext): Promise<AppHealth> {
   return { status: "ok", checks: { database: { status: "ok" } } };
 }
 
-const app: BackendAppModule = { id, registerApi, healthcheck };
+const app: BackendAppModule = { id, registerApi, healthcheck, registerAgent };
 export default app;
