@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
+import { setTimeout } from "node:timers/promises";
 import { Database } from "../../src/core/database/index.js";
 import assetsApp from "../../src/apps/assets/index.js";
 import type { AppContext, BackendAppModule } from "../../src/core/app-registry/types.js";
 import type { Platform } from "../../src/core/platform.js";
 import { StorageError, type Storage } from "../../src/core/storage/index.js";
+import { TrashBlobStore } from "../../src/core/trash/blobs.js";
 import { buildFixturePlatform, createTestUser, ensureTestAdmin, loginCookie } from "../helpers/platform.js";
 import { resetDatabase, TEST_DATABASE_URL } from "../helpers/db.js";
 import { multipartBody } from "../helpers/multipart.js";
@@ -336,7 +338,7 @@ describe("delete compensation: DB failure before storage removal (FP-12.1)", () 
     }
   });
 
-  it("queues delete_storage for the owner when storage delete fails after the DB commit, then drains", async () => {
+  it("queues delete_storage for the owner when storage delete fails after the DB commit, then drains", async (t) => {
     const itemId = await createItem("Storage fault target");
     const uploaded = await upload(itemId, "stuck.txt", "still-on-disk");
     assert.equal(uploaded.statusCode, 201);
@@ -348,11 +350,10 @@ describe("delete compensation: DB failure before storage removal (FP-12.1)", () 
     );
     const storageKey = rows[0]!.storage_key;
 
-    await withStorageFacade((_userId, driver) => storageFacade(driver, {
-      delete: async () => {
-        throw new StorageError("disk unavailable", "io_error");
-      },
-    }), async () => {
+    const retirement = t.mock.method(assetsContext.trash, "retireLiveAttachment", async () => {
+      throw new StorageError("disk unavailable", "io_error");
+    });
+    try {
       const response = await platform.app.inject({
         method: "DELETE",
         url: `/api/apps/assets/items/${itemId}/attachments/${attachmentId}`,
@@ -371,7 +372,9 @@ describe("delete compensation: DB failure before storage removal (FP-12.1)", () 
       assert.equal(pending.rows[0]!.user_id, adminId, "compensation is owned by the attachment owner");
       assert.equal(pending.rows[0]!.storage_key, storageKey);
       assert.equal(pending.rows[0]!.status, "pending", "inline drain hits the same storage failure");
-    });
+    } finally {
+      retirement.mock.restore();
+    }
 
     const result = await reconcile();
     assert.ok(result.queue.processed >= 1, "reconcile drains the queued storage delete");
@@ -381,6 +384,60 @@ describe("delete compensation: DB failure before storage removal (FP-12.1)", () 
       [storageKey],
     );
     assert.equal(done.rows[0]!.status, "done");
+  });
+});
+
+it("keeps an old download readable while Trash commits and live attachment retirement waits", async () => {
+  const attachment = await createProbeAttachment("trash-reader");
+  const blobs = new TrashBlobStore({ database: db, storageRoot: join(root, "storage"), log: assetsContext.log });
+  let started!: () => void;
+  let resume!: () => void;
+  const reading = new Promise<void>((resolve) => { started = resolve; });
+  const resumeRead = new Promise<void>((resolve) => { resume = resolve; });
+  let paused = false;
+
+  await withStorageFacade((_userId, driver) => storageFacade(driver, {
+    read: async (key) => {
+      if (key === attachment.storageKey && !paused) {
+        paused = true;
+        started();
+        await resumeRead;
+      }
+      return driver.read(key);
+    },
+  }), async () => {
+    const download = platform.app.inject({
+      method: "GET", url: `/api/apps/assets/items/${attachment.itemId}/attachments/${attachment.id}`, headers: { cookie },
+    });
+    let retirement: Promise<void> | undefined;
+    try {
+      const didStart = await Promise.race([reading.then(() => true), setTimeout(3_000, false, { ref: false })]);
+      assert.ok(didStart, "download reached the byte read after finding old metadata");
+      const deleted = await platform.app.inject({
+        method: "DELETE", url: `/api/apps/assets/items/${attachment.itemId}`, headers: { cookie },
+      });
+      assert.equal(deleted.statusCode, 204, deleted.body);
+      assert.equal(await attachmentMetadata(attachment.id), undefined);
+      retirement = blobs.sweep();
+      const deadline = Date.now() + 3_000;
+      for (;;) {
+        const waiter = await db.query("SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 1 AND mode = 'ExclusiveLock' AND NOT granted");
+        if (waiter.rowCount) break;
+        assert.ok(Date.now() < deadline, "live retirement should wait for the attachment reader");
+        await setTimeout(10);
+      }
+      assert.ok(existsSync(attachment.file), "old bytes are still available during the download");
+      resume();
+      const response = await download;
+      assert.equal(response.statusCode, 200, response.body);
+      assert.deepEqual(response.rawPayload, Buffer.from(attachment.content));
+      await retirement;
+      assert.ok(!existsSync(attachment.file), "the committed live retirement removes the old copy");
+    } finally {
+      resume();
+      await download.catch(() => undefined);
+      await retirement?.catch(() => undefined);
+    }
   });
 });
 

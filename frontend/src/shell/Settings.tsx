@@ -12,6 +12,7 @@ import { useAsync } from "../shared/useAsync";
 import pkg from "../../package.json";
 import { DataManagementPanel } from "./DataManagementPanel";
 import { useAuth } from "./AuthContext";
+import { TrashPanel } from "./TrashPanel";
 import "./settings.css";
 
 /** Settings sections retain drafts after their first visit. */
@@ -21,11 +22,11 @@ export function Settings({ apps = [] }: { apps?: AppInfo[] }) {
   const admin = user?.role === "admin";
   const [params] = useSearchParams();
   const requested = params.get("section");
-  const section = requested === "data" || requested === "webdav" || (requested === "users" && admin) ? requested : "general";
+  const section = requested === "data" || requested === "webdav" || requested === "trash" || (requested === "users" && admin) ? requested : "general";
   const [visited, setVisited] = useState<Set<string>>(() => new Set([section]));
   useEffect(() => { setVisited((previous) => previous.has(section) ? previous : new Set([...previous, section])); }, [section]);
   const enabled = apps.filter((app) => app.status === "enabled").length;
-  const sections = [{ id: "general", label: t("General", "概览") }, { id: "data", label: t("Data", "数据") }, { id: "webdav", label: "WebDAV" }, ...(admin ? [{ id: "users", label: t("Users", "用户") }] : [])];
+  const sections = [{ id: "general", label: t("General", "概览") }, { id: "data", label: t("Data", "数据") }, { id: "webdav", label: "WebDAV" }, { id: "trash", label: t("Trash", "回收站") }, ...(admin ? [{ id: "users", label: t("Users", "用户") }] : [])];
   function sectionUrl(id: string) { const next = new URLSearchParams(params); next.set("section", id); return `?${next}`; }
   return (
     <div className="page page--detail settings-page" data-app="settings">
@@ -64,6 +65,7 @@ export function Settings({ apps = [] }: { apps?: AppInfo[] }) {
             </PixelWindow>
           </div>
           {(visited.has("data") || visited.has("webdav") || section === "data" || section === "webdav") && <DataManagementPanel section={section === "data" || section === "webdav" ? section : null} />}
+          {section === "trash" && <TrashPanel key={user?.id} apps={apps} />}
           {admin && (visited.has("users") || section === "users") && <div hidden={section !== "users"}><UsersPanel /></div>}
         </div>
       </div>

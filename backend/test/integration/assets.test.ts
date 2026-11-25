@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { Database } from "../../src/core/database/index.js";
@@ -235,7 +236,10 @@ describe("attachment lifecycle and orphan cleanup (FP-2B.2)", () => {
     assert.equal(status, 404);
   });
 
-  it("deleting the item removes row, attachment metadata and storage objects", async () => {
+  it("archives both attachments and restores their bytes, metadata and category under fresh IDs", async () => {
+    const category = await json<{ id: string }>("POST", "/api/apps/assets/categories", { name: "Archived folder", color: "mint" });
+    assert.equal(category.status, 201);
+    assert.equal((await json("PATCH", `/api/apps/assets/items/${itemId}`, { categoryIds: [category.body.id] })).status, 200);
     const uploadBody1 = multipartBody([{ name: "file", filename: "a.txt", data: "a" }]);
     const upload1 = await platform.app.inject({
       method: "POST",
@@ -250,8 +254,14 @@ describe("attachment lifecycle and orphan cleanup (FP-2B.2)", () => {
       payload: uploadBody2.payload,
       headers: { ...uploadBody2.headers, cookie },
     });
-    assert.ok(existsSync(attachmentPath(itemId, upload1.json().id)));
-    assert.ok(existsSync(attachmentPath(itemId, upload2.json().id)));
+    assert.equal(upload1.statusCode, 201, upload1.body);
+    assert.equal(upload2.statusCode, 201, upload2.body);
+    const oldAttachmentIds: string[] = [upload1.json().id, upload2.json().id];
+    const userStorage = join(root, "storage", "users", adminId);
+    const syncKey = `sync/${randomUUID()}`;
+    mkdirSync(join(userStorage, "apps", "assets", "sync"), { recursive: true });
+    renameSync(attachmentPath(itemId, oldAttachmentIds[1]!), join(userStorage, "apps", "assets", syncKey));
+    await db.query("UPDATE assets.attachments SET storage_key = $2 WHERE id = $1", [oldAttachmentIds[1], syncKey]);
 
     const { status } = await json("DELETE", `/api/apps/assets/items/${itemId}`);
     assert.equal(status, 204);
@@ -263,8 +273,46 @@ describe("attachment lifecycle and orphan cleanup (FP-2B.2)", () => {
       [itemId],
     );
     assert.equal(attachments.rows.length, 0, "attachment metadata gone");
-    assert.ok(!existsSync(attachmentPath(itemId, upload1.json().id)), "first file gone");
-    assert.ok(!existsSync(attachmentPath(itemId, upload2.json().id)), "second file gone");
+
+    const archive = await db.query<{ id: string; attachment_keys: { attachmentId: string; key: string; sha256: string }[] }>(
+      "SELECT id, attachment_keys FROM core.trash_items WHERE user_id = $1 AND entity_id = $2",
+      [adminId, itemId],
+    );
+    assert.equal(archive.rowCount, 1);
+    const entry = archive.rows[0]!;
+    assert.equal(entry.attachment_keys.length, oldAttachmentIds.length);
+    for (const [index, expected] of ["a", "b"].entries()) {
+      const archived = entry.attachment_keys.find((file) => file.attachmentId === oldAttachmentIds[index]);
+      assert.ok(archived);
+      assert.equal(archived.sha256, createHash("sha256").update(expected).digest("hex"));
+      assert.equal(readFileSync(join(userStorage, archived.key), "utf8"), expected);
+    }
+
+    assert.equal((await json("DELETE", `/api/apps/assets/categories/${category.body.id}`)).status, 204);
+    const restored = await json<{ restoredId: string }>("POST", `/api/core/trash/${entry.id}/restore`);
+    assert.equal(restored.status, 200, JSON.stringify(restored.body));
+    const restoredId = restored.body.restoredId;
+    assert.notEqual(restoredId, itemId);
+    const current = await json<ItemView>("GET", `/api/apps/assets/items/${restoredId}`);
+    assert.equal(current.status, 200);
+    assert.equal(current.body.categories.length, 1);
+    assert.notEqual(current.body.categories[0]!.id, category.body.id);
+    assert.equal(current.body.categories[0]!.name, "Archived folder");
+    assert.equal(current.body.categories[0]!.color, "mint");
+
+    const restoredFiles = await db.query<{ id: string; filename: string; storage_key: string }>(
+      "SELECT id, filename, storage_key FROM assets.attachments WHERE item_id = $1 AND user_id = $2 ORDER BY filename",
+      [restoredId, adminId],
+    );
+    assert.deepEqual(restoredFiles.rows.map((file) => file.filename), ["a.txt", "b.txt"]);
+    for (const [index, file] of restoredFiles.rows.entries()) {
+      assert.ok(!oldAttachmentIds.includes(file.id));
+      assert.equal(file.storage_key, `attachments/${restoredId}/${file.id}`);
+      assert.equal(readFileSync(join(userStorage, "apps", "assets", file.storage_key), "utf8"), ["a", "b"][index]);
+    }
+    assert.equal((await db.query("SELECT id FROM core.trash_items WHERE id = $1", [entry.id])).rowCount, 0);
+    assert.equal((await json("DELETE", `/api/apps/assets/items/${restoredId}`)).status, 204);
+    assert.equal((await json("DELETE", `/api/apps/assets/categories/${current.body.categories[0]!.id}`)).status, 204);
   });
 
   it("deleting an unknown item returns 404 without side effects", async () => {

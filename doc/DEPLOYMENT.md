@@ -66,6 +66,7 @@ Nginx 覆盖客户端传入的 `X-Forwarded-For`，后端默认信任内部私�
 | 环境变量 | 生产默认值 | 含义 |
 |---|---|---|
 | `DATABASE_POOL_MAX` | `4` | 后端共享连接池上限；整数 1–100，显式空值或非法值会在启动时失败 |
+| `TRASH_RETENTION_DAYS` | `30` | 新回收站条目的保留期，按经过的 24 小时计算。接受 1–365 的整数。 |
 | `PG_SHARED_BUFFERS` | `64MB` | PostgreSQL 共享缓冲区 |
 | `PG_WORK_MEM` | `2MB` | PostgreSQL 单个排序/哈希等执行操作的基础工作内存，并非整个数据库上限 |
 | `PG_MAINTENANCE_WORK_MEM` | `32MB` | PostgreSQL 维护工作内存 |

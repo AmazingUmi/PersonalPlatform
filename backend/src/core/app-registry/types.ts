@@ -6,6 +6,7 @@ import type { AppEventBus, Unsubscribe } from "../events/index.js";
 import type { AppScheduler, JobHandle } from "../scheduler/index.js";
 import type { TimeService } from "../time/index.js";
 import type { AuthUserView } from "../auth/service.js";
+import type { AppTrash, OwnedTrashEntry, TrashRestoreContext } from "../trash/types.js";
 
 export interface ManifestWidget {
   id: string;
@@ -82,6 +83,7 @@ export interface AppContext {
   time: TimeService;
   /** Request identity (AUTH); always available like api/log/time. */
   auth: AuthService;
+  trash: AppTrash;
 }
 
 export interface BackendAppModule {
@@ -90,6 +92,7 @@ export interface BackendAppModule {
   registerEvents?(ctx: AppContext): Promise<Unsubscribe[]>;
   registerJobs?(ctx: AppContext): Promise<JobHandle[]>;
   healthcheck?(ctx: AppContext): Promise<AppHealth>;
+  restoreFromTrash?(ctx: TrashRestoreContext, entry: OwnedTrashEntry): Promise<{ restoredId: string }>;
 }
 
 /** Public representation of an App returned by Core APIs. */

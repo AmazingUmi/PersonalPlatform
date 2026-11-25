@@ -23,7 +23,7 @@ import { SyncPendingNotice } from "../../shared/sync-guard-client";
  * Clock zones. The faces and controls read/write the same settings row as the
  * dashboard card, so display mode / 12-24h / seconds are shared state.
  */
-export function ClockPage() {
+export function ClockPage({ linkedAlarmId }: { linkedAlarmId?: string }) {
   const { t } = useI18n();
   const displayName = useAppDisplayName({ id: "clock", name: "Clock" });
   const [saveFailed, setSaveFailed] = useState(false);
@@ -144,7 +144,7 @@ export function ClockPage() {
         </PixelWindow>
 
         <PixelWindow title={t("Alarms", "闹钟")} icon="clock" className="clock-page__alarms">
-          <AlarmSection />
+          <AlarmSection linkedAlarmId={linkedAlarmId} />
         </PixelWindow>
 
         <PixelWindow title={t("World Clock", "世界时钟")} icon="clock" className="clock-page__world">

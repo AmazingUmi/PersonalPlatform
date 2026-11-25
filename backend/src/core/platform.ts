@@ -18,6 +18,9 @@ import { createAppContext } from "./app-registry/context.js";
 import { AppRegistry } from "./app-registry/registry.js";
 import type { AppContext, AppHealth, AppRecord, BackendAppModule } from "./app-registry/types.js";
 import { createRequireAdmin, createRequireAuth, purgeExpiredSessions, registerAuthRoutes } from "./auth/index.js";
+import { TrashBlobStore } from "./trash/blobs.js";
+import { registerTrashRoutes } from "./trash/routes.js";
+import { TrashService } from "./trash/service.js";
 
 export const TIMEZONE_SETTING_KEY = "platform.timezone";
 
@@ -86,6 +89,31 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
   }
 
   const contexts = new Map<string, AppContext>();
+  const appTransitions = new Map<string, Promise<AppRecord>>();
+  const trashBlobs = database ? new TrashBlobStore({ database, storageRoot, log }) : null;
+  let trashSweep: Promise<void> | undefined;
+  const sweepTrashBlobs = () => {
+    if (!trashBlobs) return Promise.resolve();
+    trashSweep ??= trashBlobs.sweep().catch(error => {
+      log.error({ error }, "Trash attachment recovery sweep failed");
+    }).finally(() => { trashSweep = undefined; });
+    return trashSweep;
+  };
+  const trash = database && trashBlobs ? new TrashService({
+    database, time, log, storageRoot,
+    retentionDays: config.trashRetentionDays,
+    blobs: trashBlobs,
+    restoreTarget(appId) {
+      const record = registry.get(appId);
+      if (record?.status === "disabled") return { status: "disabled" };
+      const mod = backendModules[appId];
+      const restore = mod?.restoreFromTrash;
+      if (record?.status !== "enabled" || appTransitions.has(appId) || !restore || !record.capabilities.database) {
+        return { status: "unavailable" };
+      }
+      return { status: "ready", restore: restore.bind(mod), capabilities: record.capabilities };
+    },
+  }) : null;
 
   const app: FastifyInstance = Fastify({
     loggerInstance: log as FastifyBaseLogger,
@@ -136,6 +164,7 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
         scheduler,
         time,
         capabilities: record.capabilities,
+        trash: trash?.forApp(appId, record.capabilities),
       });
       contexts.set(appId, ctx);
       instance.addHook("onRequest", lifecycleGuard(registry, appId));
@@ -162,6 +191,7 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
     sessionCookieSecure: resolveSessionCookieSecure(config.platform.environment),
     now: deps.clock,
   });
+  registerTrashRoutes(app, trash, createRequireAuth(authDeps));
   registerCoreRoutes(app, {
     database,
     handlers: { getApps, setAppEnabled, getAppHealth, getSetting, putSetting },
@@ -231,10 +261,22 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
       },
     });
   }
+  if (trash) {
+    scheduler.register({
+      id: "core.trash_purge", owner: "core.trash",
+      schedule: { intervalMs: 3_600_000 },
+      run: async () => { await trash.purgeExpired(); },
+    });
+    scheduler.register({
+      id: "core.trash_recovery", owner: "core.trash",
+      schedule: { intervalMs: 60_000 }, run: sweepTrashBlobs,
+    });
+  }
 
   for (const record of registry.getApps()) {
     if (record.status === "enabled") await activateApp(record.id);
   }
+  await sweepTrashBlobs();
   scheduler.start();
 
   function getApps(): AppRecord[] {
@@ -246,6 +288,20 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
   }
 
   async function setAppEnabled(id: string, enabled: boolean): Promise<AppRecord> {
+    const previous = appTransitions.get(id);
+    const transition = (previous ?? Promise.resolve()).then(
+      () => changeAppEnabled(id, enabled),
+      () => changeAppEnabled(id, enabled),
+    );
+    appTransitions.set(id, transition);
+    try {
+      return await transition;
+    } finally {
+      if (appTransitions.get(id) === transition) appTransitions.delete(id);
+    }
+  }
+
+  async function changeAppEnabled(id: string, enabled: boolean): Promise<AppRecord> {
     const record = await registry.setEnabled(id, enabled);
     releaseAppResources(id);
     if (record.status === "enabled") {
@@ -327,6 +383,8 @@ export async function createPlatform(deps: PlatformDeps): Promise<Platform> {
 
   async function stop(): Promise<void> {
     await app.close();
+    scheduler.stopByOwner("core.trash");
+    await trashSweep;
     scheduler.stopByOwner("core.data-backups");
     await backups?.stop();
     for (const record of registry.getApps()) releaseAppResources(record.id);

@@ -105,7 +105,7 @@ describe("TasksPage", () => {
     await screen.findByText("Ship release");
     fireEvent.click(screen.getByRole("button", { name: /delete task "ship release"/i }));
     expect(await screen.findByTestId("confirm-dialog")).toBeDefined();
-    expect(screen.getByText(/delete "ship release"/i)).toBeDefined();
+    expect(screen.getByText(/move "ship release" to trash\?/i)).toBeDefined();
   });
 
   it("marks overdue tasks through the danger badge", async () => {

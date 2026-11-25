@@ -3,7 +3,9 @@ import { AppError } from "../../core/api/errors.js";
 import {
   assertPresentedHash, editorBaseHash, headerPresentedHash, lockOwnedTables, lockOwnerSet, parseSnapshotRow, parseSnapshotRows, readPresentedHash, syncWriteFenced,
 } from "../../core/data-management/sync-fence.js";
+import { record, validTimestamp } from "../../core/data-management/snapshot-schema.js";
 import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-registry/types.js";
+import type { OwnedTrashEntry, TrashMutationContext, TrashRestoreContext } from "../../core/trash/types.js";
 import {
   DEFAULT_SORT_BY,
   MOODS,
@@ -85,18 +87,22 @@ const NOTE_SNAPSHOT_SQL = `
 type Tx = AppContext["database"];
 
 /** Table locks, then one notes-wide advisory, then parent and link reads. */
-async function lockedNoteHash(tx: Tx, userId: string, noteId: string): Promise<string | null> {
+async function lockedNote(tx: Tx, userId: string, noteId: string): Promise<(Pick<NoteRow, "id" | "title" | "content"> & {
+  snapshot: string;
+  baseHash: string;
+}) | null> {
   await lockOwnerSet(tx, userId, "notes");
-  const note = await tx.query<{ snapshot: string }>(
-    "SELECT row_to_json(n)::text AS snapshot FROM notes.notes n WHERE n.id = $1 AND n.user_id = $2 FOR UPDATE",
+  const note = await tx.query<Pick<NoteRow, "id" | "title" | "content"> & { snapshot: string }>(
+    "SELECT id, title, content, row_to_json(n)::text AS snapshot FROM notes.notes n WHERE n.id = $1 AND n.user_id = $2 FOR UPDATE",
     [noteId, userId],
   );
-  if (!note.rows[0]) return null;
+  const current = note.rows[0];
+  if (!current) return null;
   const links = await tx.query<{ snapshot: string }>(
     "SELECT row_to_json(nt)::text AS snapshot FROM notes.note_tags nt WHERE nt.note_id = $1 ORDER BY nt.tag_id FOR UPDATE",
     [noteId],
   );
-  return noteBaseHash(note.rows[0].snapshot, links.rows.map((row) => parseSnapshotRow(row.snapshot)));
+  return { ...current, baseHash: noteBaseHash(current.snapshot, links.rows.map((row) => parseSnapshotRow(row.snapshot))) };
 }
 
 function noteBaseHash(noteSnapshot: string, linkSnapshot: unknown): string {
@@ -202,6 +208,89 @@ async function replaceNoteTags(
 
 function tagNotFoundError(tagIds: string[]): AppError {
   return new AppError(422, "tag_not_found", "tagIds reference tags that do not exist", { tagIds });
+}
+
+export async function deleteNote(ctx: TrashMutationContext, noteId: string, presentedHash: string | undefined): Promise<void> {
+  const { database: tx, userId } = ctx;
+  await lockOwnedTables(tx, ["notes.notes", "notes.note_tags", "notes.tags"]);
+  const current = await lockedNote(tx, userId, noteId);
+  if (!current) throw new AppError(404, "not_found", "note not found");
+  assertPresentedHash(await syncWriteFenced(tx, userId), presentedHash, current.baseHash);
+
+  const { rows } = await tx.query<{ tag: unknown }>(
+    `SELECT json_build_object('id', t.id, 'name', t.name, 'created_at', t.created_at) AS tag
+     FROM notes.note_tags nt JOIN notes.tags t ON t.id = nt.tag_id
+     WHERE nt.note_id = $1 AND t.user_id = $2 ORDER BY t.id`,
+    [noteId, userId],
+  );
+  const { title, content, mood, occurred_at, pinned, created_at, updated_at } = parseSnapshotRow(current.snapshot);
+  const summary = current.content.trim().slice(0, 160) || null;
+  await ctx.moveToTrash({
+    entityType: "note", entityId: current.id, title: current.title?.trim() || "Untitled note", summary,
+    payload: { title, content, mood, occurred_at, pinned, created_at, updated_at, tags: rows.map((row) => row.tag) },
+  });
+  await tx.query("DELETE FROM notes.notes WHERE id = $1 AND user_id = $2", [noteId, userId]);
+}
+
+type ArchivedTag = { id: string; name: string; created_at: string };
+
+function isArchivedTag(tag: unknown): tag is ArchivedTag {
+  return record(tag) && typeof tag.id === "string" && isUuid(tag.id)
+    && typeof tag.name === "string" && typeof tag.created_at === "string" && validTimestamp(tag.created_at);
+}
+
+async function restoreTag(tx: Db, userId: string, tag: ArchivedTag): Promise<string> {
+  const existing = await tx.query<{ id: string }>(
+    `SELECT id FROM notes.tags WHERE user_id = $1 AND (id = $2 OR name = $3)
+     ORDER BY (id = $2) DESC LIMIT 1 FOR KEY SHARE`,
+    [userId, tag.id, tag.name],
+  );
+  if (existing.rows[0]) return existing.rows[0].id;
+
+  const inserted = await tx.query<{ id: string }>(
+    `INSERT INTO notes.tags (id, user_id, name, created_at) VALUES ($1, $2, $3, $4)
+     ON CONFLICT (user_id, name) DO NOTHING RETURNING id`,
+    [randomUUID(), userId, tag.name, tag.created_at],
+  );
+  if (inserted.rows[0]) return inserted.rows[0].id;
+
+  // Standalone tag creation also uses owner/name uniqueness and can win this insert.
+  const concurrent = await tx.query<{ id: string }>(
+    "SELECT id FROM notes.tags WHERE user_id = $1 AND name = $2 FOR KEY SHARE",
+    [userId, tag.name],
+  );
+  if (!concurrent.rows[0]) throw tagNotFoundError([tag.id]);
+  return concurrent.rows[0].id;
+}
+
+async function restoreFromTrash(ctx: TrashRestoreContext, entry: OwnedTrashEntry): Promise<{ restoredId: string }> {
+  const { database: tx, userId, restoredId } = ctx;
+  const payload = record(entry.payload) ? entry.payload : {};
+  const { title, content, mood, occurred_at, pinned, created_at, updated_at, tags } = payload;
+  if (entry.entityType !== "note" || entry.payloadVersion !== 1 || entry.attachmentKeys.length !== 0
+    || (title !== null && typeof title !== "string") || typeof content !== "string"
+    || (mood !== null && !MOODS.some((knownMood) => knownMood === mood)) || typeof pinned !== "boolean"
+    || typeof occurred_at !== "string" || !validTimestamp(occurred_at)
+    || typeof created_at !== "string" || !validTimestamp(created_at)
+    || typeof updated_at !== "string" || !validTimestamp(updated_at)
+    || !Array.isArray(tags) || !tags.every(isArchivedTag)) {
+    throw new AppError(422, "trash_payload_invalid", "The archived note data is unsupported or invalid.");
+  }
+
+  await lockOwnedTables(tx, ["notes.notes", "notes.note_tags", "notes.tags"]);
+  await lockOwnerSet(tx, userId, "notes");
+  const original = await tx.query("SELECT 1 FROM notes.notes WHERE id = $1 AND user_id = $2", [entry.entityId, userId]);
+  if (original.rowCount) throw new AppError(409, "original_live", "The original note already exists.");
+  await tx.query(
+    `INSERT INTO notes.notes (id, user_id, title, content, mood, occurred_at, pinned, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [restoredId, userId, title, content, mood, occurred_at, pinned, created_at, updated_at],
+  );
+
+  const tagIds = new Set<string>();
+  for (const tag of tags) tagIds.add(await restoreTag(tx, userId, tag));
+  await replaceNoteTags(tx, restoredId, [...tagIds], userId);
+  return { restoredId };
 }
 
 async function registerApi(ctx: AppContext): Promise<void> {
@@ -436,9 +525,9 @@ async function registerApi(ctx: AppContext): Promise<void> {
       try {
         await ctx.database.withTransaction(async (tx) => {
           await lockOwnedTables(tx, ["notes.notes", "notes.note_tags"]);
-          const actual = await lockedNoteHash(tx, user.id, request.params.id);
-          if (actual === null) throw new AppError(404, "not_found", "note not found");
-          assertPresentedHash(await syncWriteFenced(tx, user.id), presented, actual);
+          const current = await lockedNote(tx, user.id, request.params.id);
+          if (!current) throw new AppError(404, "not_found", "note not found");
+          assertPresentedHash(await syncWriteFenced(tx, user.id), presented, current.baseHash);
           if (sets.length > 0) {
             sets.push("updated_at = now()");
             const updated = await tx.query(
@@ -459,15 +548,8 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
   // Deleting a note cascades its note_tags rows (FK ON DELETE CASCADE).
   ctx.api.delete<{ Params: { id: string } }>("/notes/:id", async (request, reply) => {
-    const user = await ctx.auth.requireUser(request);
     const presented = headerPresentedHash(request.headers["x-base-hash"]);
-    await db.withTransaction(async (tx) => {
-      await lockOwnedTables(tx, ["notes.notes", "notes.note_tags"]);
-      const actual = await lockedNoteHash(tx, user.id, request.params.id);
-      if (actual === null) throw new AppError(404, "not_found", "note not found");
-      assertPresentedHash(await syncWriteFenced(tx, user.id), presented, actual);
-      await tx.query("DELETE FROM notes.notes WHERE id = $1 AND user_id = $2", [request.params.id, user.id]);
-    });
+    await ctx.trash.withMutation(request, (mutation) => deleteNote(mutation, request.params.id, presented));
     return reply.code(204).send();
   });
 
@@ -558,5 +640,5 @@ async function healthcheck(ctx: AppContext): Promise<AppHealth> {
   return { status: "ok", checks: { database: { status: "ok" } } };
 }
 
-const app: BackendAppModule = { id, registerApi, healthcheck };
+const app: BackendAppModule = { id, registerApi, healthcheck, restoreFromTrash };
 export default app;

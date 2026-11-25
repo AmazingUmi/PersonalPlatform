@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { after, before } from "node:test";
 import type { Platform } from "../../src/core/platform.js";
 import { createPlatform } from "../../src/core/platform.js";
-import type { PlatformConfig } from "../../src/core/config/index.js";
+import { resolveTrashRetentionDays, type PlatformConfig } from "../../src/core/config/index.js";
 import { createLogger } from "../../src/core/logging/index.js";
 import type { BackendAppModule } from "../../src/core/app-registry/types.js";
 import type { Database } from "../../src/core/database/index.js";
@@ -152,6 +152,7 @@ export async function buildFixturePlatform(options: FixtureOptions): Promise<{
   const config: PlatformConfig = {
     platform: { name: "test", environment: "test" },
     apps: { manifests_directory: "apps", enabled: {} },
+    trashRetentionDays: resolveTrashRetentionDays({}),
     storage: { driver: "local", root: "storage" },
   };
 

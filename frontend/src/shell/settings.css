@@ -12,6 +12,32 @@
 .settings-page .user-panel__field input { width: 100%; min-width: 0; }
 .settings-page .user-panel__table { min-width: 480px; }
 .settings-focus-target:focus { outline: none; }
+.trash-panel .px-window__body { display: grid; gap: var(--space-4); }
+.trash-panel__toolbar, .trash-panel__actions, .trash-panel__metadata {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.trash-panel__toolbar { justify-content: space-between; gap: var(--space-3); }
+.trash-panel__filter { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.trash-panel__filter select { width: auto; }
+.trash-panel__list { display: grid; gap: var(--space-3); list-style: none; margin: 0; padding: 0; }
+.trash-panel__entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: var(--border-2) solid var(--px-border-soft);
+  border-radius: var(--radius-pixel);
+}
+.trash-panel__description { flex: 1 1 18rem; min-width: 0; overflow-wrap: anywhere; }
+.trash-panel__description h3 { margin: 0 0 var(--space-1); }
+.trash-panel__description p { margin: 0 0 var(--space-2); }
+.trash-panel__metadata { color: var(--px-ink-muted); font-size: var(--text-sm); }
+.trash-panel__metadata .status-chip { min-width: 0; max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 @media (max-width: 768px) {
   .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 20px; }
   .settings-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }

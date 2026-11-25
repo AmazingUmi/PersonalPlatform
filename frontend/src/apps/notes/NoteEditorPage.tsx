@@ -347,7 +347,7 @@ function NoteEditorForm({ note, onServerRefresh }: { note: NoteView | null; onSe
       {confirmingDelete ? (
         <ConfirmDialog
           title={t("Delete note", "删除笔记")}
-          message={t("Delete this note? This cannot be undone.", "删除这条笔记？此操作无法撤销。")}
+          message={t("Move this note to Trash?", "将这条笔记移入回收站？")}
           busy={remove.busy}
           onCancel={() => setConfirmingDelete(false)}
           onConfirm={async () => {

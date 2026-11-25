@@ -4,7 +4,9 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import { AppError } from "../api/errors.js";
 import { resolveSession } from "../auth/service.js";
 import type { Database, DatabaseContext } from "../database/index.js";
+import { withAttachmentGuard } from "../storage/attachment-guard.js";
 import { sanitizeKey } from "../storage/index.js";
+import { canRetireLiveAssetAttachment, listTrashReservedAssetKeys } from "../trash/blobs.js";
 import { backupKey, encryptPassword, decryptPassword } from "./credentials.js";
 import { dataLockNames } from "./data-lock.js";
 import { assertRecordGraph } from "./record-graph.js";
@@ -558,7 +560,7 @@ export class ContinuousSync {
     const staged = { created: [] as string[], retired: [] as string[] };
     let finished = false;
     try {
-      await this.deps.database.withTransaction(async tx => {
+      await withAttachmentGuard(this.deps.database, "shared", async tx => {
         await run(tx, staged);
         finished = true;
       });
@@ -715,7 +717,7 @@ export class ContinuousSync {
   }
 
   private async commitBaseline(userId: string, token: string, lease: string, binding: Binding, captured: { snapshot: Snapshot; digest: string }, tombstones: readonly string[] = binding.pending_tombstones ?? []): Promise<void> {
-    await this.deps.database.withTransaction(async tx => {
+    await withAttachmentGuard(this.deps.database, "shared", async tx => {
       await tx.query("SET LOCAL lock_timeout = '5s'");
       await tx.query("SET LOCAL statement_timeout = '30s'");
       const catalog = await readDataCatalog(tx, this.deps.installedApps());
@@ -937,17 +939,22 @@ export class ContinuousSync {
       const gone = retiring();
       for (let index = 0; index < actions.length; index++) {
         const action = actions[index]!;
-        if (action.type !== "apply-remote") continue;
         const name = tableOf(action.key);
         const spec = TABLES.find(table => table.name === name);
+        const restoredTaxonomy = action.type === "conflict" && action.reason === "deleted-locally"
+          && (name === "notes.tags" || name === "assets.categories") && !local.has(action.key);
+        const remoteRow = action.type === "apply-remote" ? action.row : restoredTaxonomy ? action.remote : undefined;
+        if (!remoteRow) continue;
         if (spec?.natural) {
-          const collision = [...local.entries()].find(([key, row]) => key.startsWith(name + ":") && key !== action.key && !gone.has(key) && row[spec.natural!] === action.row[spec.natural!]);
+          const natural = spec.natural;
+          const collision = [...local.entries()].find(([key, row]) => key.startsWith(name + ":") && key !== action.key && !gone.has(key) && row[natural] === remoteRow[natural]);
           if (collision) {
-            actions[index] = { type: "conflict", key: action.key, reason: "natural-key", local: collision[1], remote: action.row };
+            actions[index] = { type: "conflict", key: action.key, reason: "natural-key", local: collision[1], remote: remoteRow };
             changed = true;
             continue;
           }
         }
+        if (action.type !== "apply-remote") continue;
         const missingParent = Object.entries(spec?.parents ?? {}).find(([column, parent]) => !this.parentAvailable(actions, local, remote, parent, action.row[column]));
         if (missingParent) {
           const localRow = local.get(action.key);
@@ -1114,18 +1121,23 @@ export class ContinuousSync {
 
   /** Lease is still held. Skip while a publication is pending or its commit is unknown. */
   private async retainLocal(userId: string, lease: string): Promise<void> {
-    const binding = await this.binding(userId);
-    if (!binding || binding.lease_token !== lease || binding.pending_op_token || binding.phase === "publication_unknown") return;
-    const conflicts = (await this.deps.database.query<{ local_content_sha256: string | null; remote_content_sha256: string | null }>(
-      "SELECT local_content_sha256, remote_content_sha256 FROM core.sync_conflicts WHERE user_id=$1 AND state='open'", [userId])).rows;
-    const stored = (await this.deps.database.query<{ storage_key: string | null }>(
-      "SELECT storage_key FROM assets.attachments WHERE user_id=$1", [userId])).rows;
-    const refs = collectSyncRetentionRefs({
-      heads: [binding.head_document, binding.pending_head],
-      conflictHashes: conflicts.flatMap(row => [row.local_content_sha256, row.remote_content_sha256]),
-      storageKeys: stored.map(row => row.storage_key).filter((key): key is string => typeof key === "string"),
+    await withAttachmentGuard(this.deps.database, "exclusive", async tx => {
+      const binding = await this.binding(userId, tx);
+      if (!binding || binding.lease_token !== lease || binding.pending_op_token || binding.phase === "publication_unknown") return;
+      const conflicts = (await tx.query<{ local_content_sha256: string | null; remote_content_sha256: string | null }>(
+        "SELECT local_content_sha256, remote_content_sha256 FROM core.sync_conflicts WHERE user_id=$1 AND state='open'", [userId])).rows;
+      const stored = (await tx.query<{ storage_key: string | null }>(
+        "SELECT storage_key FROM assets.attachments WHERE user_id=$1", [userId])).rows;
+      const refs = collectSyncRetentionRefs({
+        heads: [binding.head_document, binding.pending_head],
+        conflictHashes: conflicts.flatMap(row => [row.local_content_sha256, row.remote_content_sha256]),
+        storageKeys: [
+          ...stored.map(row => row.storage_key).filter((key): key is string => typeof key === "string"),
+          ...await listTrashReservedAssetKeys(tx, userId),
+        ],
+      });
+      await pruneSyncLocalFiles({ root: this.deps.storageRoot, userId, cacheHashes: refs.cacheHashes, storageKeys: refs.storageKeys });
     });
-    await pruneSyncLocalFiles({ root: this.deps.storageRoot, userId, cacheHashes: refs.cacheHashes, storageKeys: refs.storageKeys });
   }
 
   private async capture(userId: string): Promise<{ snapshot: Snapshot; digest: string }> {
@@ -1134,8 +1146,8 @@ export class ContinuousSync {
     return { snapshot, digest: captureDigest(snapshot, [...tombstones]) };
   }
 
-  private async binding(userId: string): Promise<Binding | undefined> {
-    return (await this.deps.database.query<Binding>("SELECT * FROM core.sync_bindings WHERE user_id=$1", [userId])).rows[0];
+  private async binding(userId: string, db: Pick<DatabaseContext, "query"> = this.deps.database): Promise<Binding | undefined> {
+    return (await db.query<Binding>("SELECT * FROM core.sync_bindings WHERE user_id=$1", [userId])).rows[0];
   }
 
   private async baseline(userId: string): Promise<Map<string, string | { hash: string; highScore?: number }>> {
@@ -1267,18 +1279,16 @@ export class ContinuousSync {
   }
 
   private async retireFiles(userId: string, keys: string[]): Promise<void> {
-    const seen = new Set<string>();
-    for (const key of keys) {
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      let canonical: string;
-      try { canonical = sanitizeKey(key); }
-      catch { continue; }
-      if (canonical !== key) continue;
-      const used = await this.deps.database.query("SELECT 1 FROM assets.attachments WHERE user_id=$1 AND storage_key=$2", [userId, key]);
-      if (used.rowCount) continue;
-      await this.unlinkOwnedFile(userId, canonical);
-    }
+    if (!keys.length) return;
+    await withAttachmentGuard(this.deps.database, "exclusive", async tx => {
+      for (const key of new Set(keys)) {
+        let canonical: string;
+        try { canonical = sanitizeKey(key); }
+        catch { continue; }
+        if (canonical !== key || !await canRetireLiveAssetAttachment(tx, userId, canonical)) continue;
+        await this.unlinkOwnedFile(userId, canonical);
+      }
+    });
   }
 
   /** Unlink one user file. The storage root may be a mount; no descendant symlink is followed. */
@@ -1491,7 +1501,7 @@ function heldLocalKeys(actions: SyncAction[], localRows: Map<string, Row>): Set<
 }
 
 function captureOwnSnapshotOn(database: Database, options: SnapshotOptions): Promise<Snapshot> {
-  return database.withTransaction(async tx => {
+  return withAttachmentGuard(database, "shared", async tx => {
     await tx.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
     await tx.query("SET LOCAL statement_timeout = '30s'");
     return captureOwnSnapshot(tx, options);

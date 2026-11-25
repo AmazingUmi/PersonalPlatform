@@ -16,6 +16,23 @@ export interface DatabaseContext {
   withTransaction<T>(fn: (tx: DatabaseContext) => Promise<T>): Promise<T>;
 }
 
+/** Run one transaction on a checked-out Core connection. The caller releases it. */
+export async function runTransactionOn<T>(client: PoolClient, fn: (tx: DatabaseContext) => Promise<T>): Promise<T> {
+  const tx: DatabaseContext = {
+    query: (text, params) => client.query(text, params),
+    withTransaction: (inner) => inner(tx),
+  };
+  try {
+    await client.query("BEGIN");
+    const result = await fn(tx);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  }
+}
+
 export interface DatabasePoolOptions {
   /** Shared by all Apps and users; unrelated to PostgreSQL max_connections. */
   max?: number;
@@ -87,18 +104,8 @@ export class Database {
 
   async withTransaction<T>(fn: (tx: DatabaseContext) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
-    const tx: DatabaseContext = {
-      query: (text, params) => client.query(text, params),
-      withTransaction: (inner) => inner(tx),
-    };
     try {
-      await client.query("BEGIN");
-      const result = await fn(tx);
-      await client.query("COMMIT");
-      return result;
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
+      return await runTransactionOn(client, fn);
     } finally {
       client.release();
     }

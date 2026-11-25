@@ -4,6 +4,8 @@ import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-reg
 import {
   assertPresentedHash, editorBaseHash, headerPresentedHash, lockOwnedTables, lockOwnerSet, parseSnapshotRow, readPresentedHash, singletonBaseHash, syncWriteFenced,
 } from "../../core/data-management/sync-fence.js";
+import { record, validTimestamp } from "../../core/data-management/snapshot-schema.js";
+import type { OwnedTrashEntry, TrashMutationContext, TrashRestoreContext } from "../../core/trash/types.js";
 import {
   ALARM_TIME_PATTERN,
   DEFAULT_CLOCK_SETTINGS,
@@ -121,6 +123,51 @@ const SETTINGS_ID = "current";
 
 function clockRowHash(table: string, snapshot: string): string {
   return editorBaseHash([{ table, row: parseSnapshotRow(snapshot) }]);
+}
+
+export async function deleteClockAlarm(ctx: TrashMutationContext, alarmId: string, presentedHash: string | undefined): Promise<void> {
+  if (!isUuid(alarmId)) throw new AppError(404, "not_found", "alarm not found");
+  const { database: tx, userId } = ctx;
+  await lockOwnedTables(tx, ["clock.alarms"]);
+  const { rows } = await tx.query<Pick<AlarmRow, "id" | "label" | "time"> & { snapshot: string }>(
+    "SELECT id, label, time, row_to_json(a)::text AS snapshot FROM clock.alarms a WHERE id = $1 AND user_id = $2 FOR UPDATE",
+    [alarmId, userId],
+  );
+  const current = rows[0];
+  if (!current) throw new AppError(404, "not_found", "alarm not found");
+  assertPresentedHash(await syncWriteFenced(tx, userId), presentedHash, clockRowHash("clock.alarms", current.snapshot));
+
+  const { time, label, enabled, repeat_days, created_at, updated_at } = parseSnapshotRow(current.snapshot);
+  await ctx.moveToTrash({
+    entityType: "clock_alarm", entityId: current.id, title: current.label || current.time,
+    summary: current.label ? current.time : null,
+    payload: { time, label, enabled, repeat_days, created_at, updated_at },
+  });
+  await tx.query("DELETE FROM clock.alarms WHERE id = $1 AND user_id = $2", [alarmId, userId]);
+}
+
+async function restoreFromTrash(ctx: TrashRestoreContext, entry: OwnedTrashEntry): Promise<{ restoredId: string }> {
+  const { database: tx, userId, restoredId } = ctx;
+  const payload = record(entry.payload) ? entry.payload : {};
+  const { time, label, enabled, repeat_days, created_at, updated_at } = payload;
+  if (entry.entityType !== "clock_alarm" || entry.payloadVersion !== 1 || entry.attachmentKeys.length !== 0
+    || typeof time !== "string" || !ALARM_TIME_PATTERN.test(time) || typeof label !== "string"
+    || typeof enabled !== "boolean" || !Array.isArray(repeat_days)
+    || !repeat_days.every((day) => typeof day === "number" && Number.isInteger(day) && day >= 0 && day <= 6)
+    || typeof created_at !== "string" || !validTimestamp(created_at)
+    || typeof updated_at !== "string" || !validTimestamp(updated_at)) {
+    throw new AppError(422, "trash_payload_invalid", "The archived alarm data is unsupported or invalid.");
+  }
+
+  await lockOwnedTables(tx, ["clock.alarms"]);
+  const original = await tx.query("SELECT 1 FROM clock.alarms WHERE id = $1 AND user_id = $2", [entry.entityId, userId]);
+  if (original.rowCount) throw new AppError(409, "original_live", "The original alarm already exists.");
+  await tx.query(
+    `INSERT INTO clock.alarms (id, user_id, time, label, enabled, repeat_days, created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+    [restoredId, userId, time, label, enabled, repeat_days, created_at, updated_at],
+  );
+  return { restoredId };
 }
 
 function absentClockSettingsHash(): string {
@@ -312,19 +359,8 @@ async function registerApi(ctx: AppContext): Promise<void> {
   });
 
   ctx.api.delete<{ Params: { id: string } }>("/alarms/:id", async (request, reply) => {
-    const user = await ctx.auth.requireUser(request);
-    if (!isUuid(request.params.id)) throw new AppError(404, "not_found", "alarm not found");
     const presented = headerPresentedHash(request.headers["x-base-hash"]);
-    await db.withTransaction(async (tx) => {
-      await lockOwnedTables(tx, ["clock.alarms"]);
-      const current = await tx.query<{ snapshot: string }>(
-        "SELECT row_to_json(a)::text AS snapshot FROM clock.alarms a WHERE id = $1 AND user_id = $2 FOR UPDATE",
-        [request.params.id, user.id],
-      );
-      if (!current.rows[0]) throw new AppError(404, "not_found", "alarm not found");
-      assertPresentedHash(await syncWriteFenced(tx, user.id), presented, clockRowHash("clock.alarms", current.rows[0].snapshot));
-      await tx.query("DELETE FROM clock.alarms WHERE id = $1 AND user_id = $2", [request.params.id, user.id]);
-    });
+    await ctx.trash.withMutation(request, (mutation) => deleteClockAlarm(mutation, request.params.id, presented));
     return reply.code(204).send();
   });
 
@@ -523,6 +559,6 @@ async function healthcheck(ctx: AppContext): Promise<AppHealth> {
   return { status: "ok", checks: { database: { status: "ok" } } };
 }
 
-const clockApp: BackendAppModule = { id, registerApi, healthcheck };
+const clockApp: BackendAppModule = { id, registerApi, healthcheck, restoreFromTrash };
 
 export default clockApp;

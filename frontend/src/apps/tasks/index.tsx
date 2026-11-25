@@ -614,7 +614,7 @@ function TasksPage() {
       {deleting ? (
         <ConfirmDialog
           title={t("Delete task", "删除任务")}
-          message={t(`Delete "${deleting.title}"? This cannot be undone.`, `删除“${deleting.title}”？此操作无法撤销。`)}
+          message={t(`Move "${deleting.title}" to Trash?`, `将“${deleting.title}”移入回收站？`)}
           busy={remove.busy}
           onCancel={() => setDeleting(null)}
           onConfirm={async () => {

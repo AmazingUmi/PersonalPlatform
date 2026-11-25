@@ -1131,7 +1131,7 @@ function AssetDetailPage() {
       {deleting ? (
         <ConfirmDialog
           title={t("Delete item", "删除物品")}
-          message={t(`Delete "${data.name}" and all of its attachments? This cannot be undone.`, `删除“${data.name}”及其全部附件？此操作无法撤销。`)}
+          message={t(`Move "${data.name}" and all of its attachments to Trash?`, `将“${data.name}”及其全部附件移入回收站？`)}
           busy={deleteItem.busy}
           onCancel={() => setDeleting(false)}
           onConfirm={async () => {

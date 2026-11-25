@@ -5,13 +5,17 @@ import { mkdtemp, mkdir, rm, readdir, symlink, writeFile, readFile } from 'node:
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { setTimeout } from 'node:timers/promises';
 import { resetDatabase, TEST_DATABASE_URL } from '../helpers/db.js';
 import { ensureTestAdmin, createTestUser } from '../helpers/platform.js';
 import { runAppMigrations } from '../../src/core/database/startup-migrations.js';
 import type { Database, DatabaseContext } from '../../src/core/database/index.js';
-import { createAppStorage } from '../../src/core/storage/local.js';
+import { createLogger } from '../../src/core/logging/index.js';
+import { createAppStorage, LocalStorageDriver } from '../../src/core/storage/local.js';
 import { exportSnapshot, importSnapshot, previewSnapshot, type Snapshot, type Actor } from '../../src/core/data-management/snapshot.js';
 import { TABLES } from '../../src/core/data-management/snapshot-schema.js';
+import { WebdavBackups } from '../../src/core/data-management/webdav.js';
+import { TrashBlobStore } from '../../src/core/trash/blobs.js';
 let db:Database, root:string, admin:Actor, alice:Actor, bob:Actor;
 const repo=resolve(import.meta.dirname,'../../..');
 const bytes=Buffer.from([0,1,255,128,42]);
@@ -55,6 +59,101 @@ describe('Settings snapshot export and merge',()=>{
     assert.ok(!('core.sessions' in all.tables));assert.ok(!('assets.cleanup_jobs' in all.tables));
     await assert.rejects(exportSnapshot(options(alice,'all')),/Administrator/);
   });
+
+  for (const consumer of ['own', 'all', 'webdav'] as const) {
+    it(`preserves old attachment bytes during ${consumer === 'webdav' ? 'a WebDAV backup' : `a Settings export (${consumer} scope)`}`, async (t) => {
+      const scope = consumer === 'all' ? 'all' : 'own';
+      const actor = scope === 'own' ? alice : admin;
+      const backupActor = { id: actor.id, role: 'user' as const };
+      const storageKey = consumer === 'webdav' ? `sync/${randomUUID()}` : 'original/file';
+      let backups: WebdavBackups | undefined;
+      const uploaded = new Map<string, Buffer>();
+      if (consumer === 'webdav') {
+        await createAppStorage(root, 'assets').forUser(alice.id).save(storageKey, bytes);
+        await db.query('UPDATE assets.attachments SET storage_key = $1 WHERE id = $2', [storageKey, attachment]);
+        backups = new WebdavBackups({
+          database: db, storageRoot: root, installedApps: () => [],
+          request: async ({ method, filename, body }) => {
+            assert.equal(method, 'PUT');
+            uploaded.set(filename!, Buffer.from(body!));
+            return Buffer.alloc(0);
+          },
+        });
+        await backups.save(backupActor, { endpoint: 'https://cloud.example/backups/', username: 'test', password: 'test-only', scope, intervalHours: 0 });
+      }
+      const storagePath = join(root, 'users', alice.id, 'apps', 'assets', storageKey);
+      const trashId = randomUUID();
+      let entered!: () => void;
+      let resume!: () => void;
+      const reading = new Promise<void>((resolve) => { entered = resolve; });
+      const resumeRead = new Promise<void>((resolve) => { resume = resolve; });
+      let paused = false;
+      const originalRead = LocalStorageDriver.prototype.read;
+      t.mock.method(LocalStorageDriver.prototype, 'read', async function (this: LocalStorageDriver, key: string) {
+        if (key === storageKey && !paused) {
+          paused = true;
+          entered();
+          await resumeRead;
+        }
+        return originalRead.call(this, key);
+      });
+
+      const exporting = backups
+        ? backups.run(backupActor, false, 'full').then(report => {
+          assert.ok(report.backup);
+          const data = uploaded.get(report.backup.filename);
+          assert.ok(data);
+          return JSON.parse(data.toString('utf8')) as Snapshot;
+        })
+        : exportSnapshot(options(actor, scope));
+      let retiring: Promise<void> | undefined;
+      try {
+        const didStart = await Promise.race([reading.then(() => true), setTimeout(3_000, false, { ref: false })]);
+        assert.ok(didStart, 'export selected old metadata and reached the byte read');
+        await db.withTransaction(async (tx) => {
+          await tx.query('DELETE FROM assets.items WHERE id = $1 AND user_id = $2', [item, alice.id]);
+          await tx.query(`
+            INSERT INTO core.trash_blob_cleanup (user_id, app_id, trash_id, kind, storage_key)
+            VALUES ($1, 'assets', $2, 'live', $3)`, [alice.id, trashId, `apps/assets/${storageKey}`]);
+        });
+        const blobs = new TrashBlobStore({ database: db, storageRoot: root, log: createLogger('fatal') });
+        retiring = blobs.sweep();
+        const deadline = Date.now() + 3_000;
+        for (;;) {
+          const blocked = await db.query(`
+            SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND objsubid = 1 AND mode = 'ExclusiveLock' AND NOT granted`);
+          if (blocked.rowCount) break;
+          assert.ok(Date.now() < deadline, 'retirement should wait for the export');
+          await setTimeout(10);
+        }
+        assert.deepEqual(await readFile(storagePath), bytes);
+
+        resume();
+        const oldSnapshot = await exporting;
+        assert.ok(oldSnapshot.tables['assets.attachments']?.some((row) => row.id === attachment));
+        const oldFile = oldSnapshot.files.find((file) => file.attachmentId === attachment);
+        assert.ok(oldFile);
+        assert.deepEqual(Buffer.from(oldFile.data, 'base64'), bytes);
+        await retiring;
+        await assert.rejects(readFile(storagePath), { code: 'ENOENT' });
+
+        const newSnapshot = await exportSnapshot(options(actor, scope));
+        assert.equal(newSnapshot.formatVersion, 1);
+        assert.deepEqual(newSnapshot.tables['assets.attachments'], []);
+        assert.ok(!Object.keys(newSnapshot.tables).some((table) => table.startsWith('core.trash_')));
+      } finally {
+        resume();
+        await exporting.catch(() => undefined);
+        await retiring?.catch(() => undefined);
+        if (backups) {
+          await backups.stop();
+          await db.query('DELETE FROM core.backup_history WHERE user_id = $1', [actor.id]);
+          await db.query('DELETE FROM core.backup_targets WHERE user_id = $1', [actor.id]);
+        }
+      }
+    });
+  }
+
   it('preview rolls back and repeated merge preserves current records without extra files',async()=>{
     const snapshot=await exportSnapshot(options());
     await db.query('DELETE FROM tasks.tasks WHERE id=$1',[task]);
