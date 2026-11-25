@@ -339,31 +339,61 @@ interface Replica {
   close: () => Promise<void>;
 }
 
+async function dropReplicaDatabase(name: string): Promise<void> {
+  // pg.Pool.end() can resolve while PostgreSQL is still processing the
+  // client's orderly shutdown. Retrying DROP avoids interrupting that socket.
+  const deadline = performance.now() + 5_000;
+  for (;;) {
+    try {
+      await db.query(`DROP DATABASE IF EXISTS ${name}`);
+      return;
+    } catch (error) {
+      if ((error as { code?: string } | null | undefined)?.code !== "55006" || performance.now() >= deadline) throw error;
+      await delay(25);
+    }
+  }
+}
+
+async function closeInOrder(...steps: (() => void | Promise<void>)[]): Promise<void> {
+  const failures: unknown[] = [];
+  for (const step of steps) {
+    try { await step(); }
+    catch (error) { failures.push(error); }
+  }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, "Sync fixture cleanup failed");
+}
+
 async function openReplica(label: string, backend?: BackendAppModule): Promise<Replica> {
   const name = `pp_sync_${label}_${randomBytes(3).toString("hex")}`;
-  await db.query(`CREATE DATABASE ${name}`);
   const url = databaseNamed(name);
-  await runMigrations({ databaseUrl: url, targets: [{ scope: "core", schema: "core", dir: join(repo, "migrations", "core") }] });
-  await runAppMigrations({ databaseUrl: url, manifestsDir: join(repo, "apps") });
-  const peerDb = new Database(url, undefined, { max: 1 });
-  const username = `sync-${label}`;
-  const user = await createTestUser(peerDb, username);
-  const built = await buildFixturePlatform({
-    manifests: backend ? [{ id: backend.id }] : [],
-    database: peerDb,
-    backendModules: backend ? { [backend.id]: backend } : {},
-  });
-  const cookie = await loginCookie(built.platform, user.username, `test-password-${username}`);
-  return {
-    name, db: peerDb, platform: built.platform, root: built.root, user, cookie,
-    close: async () => {
-      await built.platform.stop().catch(() => undefined);
-      built.cleanup();
-      await peerDb.close().catch(() => undefined);
-      await db.query(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid <> pg_backend_pid()`, [name]).catch(() => undefined);
-      await db.query(`DROP DATABASE IF EXISTS ${name}`).catch(() => undefined);
-    },
-  };
+  await db.query(`CREATE DATABASE ${name}`);
+  let peerDb: Database | undefined;
+  let built: Awaited<ReturnType<typeof buildFixturePlatform>> | undefined;
+  const close = () => closeInOrder(
+    () => built?.platform.stop(),
+    () => peerDb?.close(),
+    () => built?.cleanup(),
+    () => dropReplicaDatabase(name),
+  );
+  try {
+    await runMigrations({ databaseUrl: url, targets: [{ scope: "core", schema: "core", dir: join(repo, "migrations", "core") }] });
+    await runAppMigrations({ databaseUrl: url, manifestsDir: join(repo, "apps") });
+    peerDb = new Database(url, undefined, { max: 1 });
+    const username = `sync-${label}`;
+    const user = await createTestUser(peerDb, username);
+    built = await buildFixturePlatform({
+      manifests: backend ? [{ id: backend.id }] : [],
+      database: peerDb,
+      backendModules: backend ? { [backend.id]: backend } : {},
+    });
+    const cookie = await loginCookie(built.platform, user.username, `test-password-${username}`);
+    return { name, db: peerDb, platform: built.platform, root: built.root, user, cookie, close };
+  } catch (error) {
+    try { await close(); }
+    catch (cleanupError) { throw new AggregateError([error, cleanupError], "Sync replica setup and cleanup failed"); }
+    throw error;
+  }
 }
 
 function peerAssets(peer: Replica) {
@@ -717,6 +747,13 @@ it("Continuous Sync capture reads old attachment bytes before Trash retirement a
   let running: ReturnType<typeof peerCycle> | undefined;
   let retiring: Promise<void> | undefined;
   let release = (): void => {};
+  t.after(() => closeInOrder(
+    () => editor?.platform.stop(),
+    () => editorDb?.close(),
+    () => editor?.cleanup(),
+    () => source?.close(),
+    () => dav.close(),
+  ));
   try {
     source = await openReplica("trash_capture", assetsApp);
     editorDb = new Database(databaseNamed(source.name), undefined, { max: 1 });
@@ -784,14 +821,6 @@ it("Continuous Sync capture reads old attachment bytes before Trash retirement a
   } finally {
     release();
     await Promise.allSettled([running, retiring]);
-    try {
-      await editor?.platform.stop();
-      editor?.cleanup();
-      await editorDb?.close();
-    } finally {
-      try { await source?.close(); }
-      finally { await dav.close(); }
-    }
   }
 });
 
@@ -922,7 +951,7 @@ describe("continuous sync routes and cycles", () => {
       } finally {
         if (peerPlatform) await peerPlatform.stop().catch(() => undefined);
         await peerDb.close().catch(() => undefined);
-        await db.query(`DROP DATABASE IF EXISTS ${peerName}`).catch(() => undefined);
+        await dropReplicaDatabase(peerName).catch(() => undefined);
       }
     } finally { await dav.close(); }
   });
@@ -1749,8 +1778,7 @@ describe("two isolated sync deployments", () => {
       await dav.close();
       if (peerPlatform) await peerPlatform.stop().catch(() => undefined);
       if (peerDb) await peerDb.close().catch(() => undefined);
-      await db.query(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid <> pg_backend_pid()`, [peerName]).catch(() => undefined);
-      await db.query(`DROP DATABASE IF EXISTS ${peerName}`).catch(() => undefined);
+      await dropReplicaDatabase(peerName).catch(() => undefined);
     }
   });
 });
@@ -1881,8 +1909,7 @@ describe("sync review regressions", () => {
     } finally {
       if (peerPlatform) await peerPlatform.stop().catch(() => undefined);
       if (peerDb) await peerDb.close().catch(() => undefined);
-      await db.query(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid <> pg_backend_pid()`, [peerName]).catch(() => undefined);
-      await db.query(`DROP DATABASE IF EXISTS ${peerName}`).catch(() => undefined);
+      await dropReplicaDatabase(peerName).catch(() => undefined);
       await dav.close();
     }
   });
@@ -2014,8 +2041,7 @@ describe("sync review regressions", () => {
     } finally {
       if (peerPlatform) await peerPlatform.stop().catch(() => undefined);
       if (peerDb) await peerDb.close().catch(() => undefined);
-      await db.query(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=$1 AND pid <> pg_backend_pid()`, [peerName]).catch(() => undefined);
-      await db.query(`DROP DATABASE IF EXISTS ${peerName}`).catch(() => undefined);
+      await dropReplicaDatabase(peerName).catch(() => undefined);
       await dav.close();
     }
   });
@@ -2211,7 +2237,7 @@ async function assertNaturalLinks(choice: "keep-local" | "keep-remote", kind: "n
     if (peerPlatform) await peerPlatform.stop().catch(() => undefined);
     if (peerDb) await peerDb.close().catch(() => undefined);
     await dav.close();
-    await db.query(`DROP DATABASE IF EXISTS ${peerName}`).catch(() => undefined);
+    await dropReplicaDatabase(peerName).catch(() => undefined);
   }
 }
 
