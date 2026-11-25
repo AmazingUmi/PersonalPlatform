@@ -56,12 +56,13 @@ test("help is accessible on keyboard and stays inside narrow viewports", async (
   await page.screenshot({ path: testInfo.outputPath("settings-zh-desktop.png"), fullPage: true });
 
   await page.getByRole("navigation", { name: "设置分区" }).getByRole("link", { name: "WebDAV", exact: true }).click();
+  await page.mouse.move(1, 1);
   for (const viewport of [{ width: 1280, height: 900 }, { width: 768, height: 1024 }, { width: 390, height: 844 }, { width: 320, height: 740 }]) {
     await page.setViewportSize(viewport);
     const connectionHelp = page.getByRole("button", { name: "帮助：连接设置", exact: true });
-    await connectionHelp.click();
+    await connectionHelp.press("Enter");
     const dialog = page.getByRole("dialog", { name: "连接设置", exact: true });
-    await expect(dialog).toBeVisible();
+    await expect(dialog).toBeFocused();
     await expect(dialog.getByRole("link", { name: "坚果云官方说明" })).toHaveAttribute("href", "https://help.jianguoyun.com/?p=3234");
     await expect.poll(async () => {
       const bounds = await dialog.boundingBox();
@@ -70,6 +71,7 @@ test("help is accessible on keyboard and stays inside narrow viewports", async (
     expect(await dialog.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
     await page.screenshot({ path: testInfo.outputPath(`help-zh-${viewport.width}.png`) });
     await page.keyboard.press("Escape");
+    await expect(connectionHelp).toBeFocused();
     await expect(dialog).toHaveCount(0);
   }
 });

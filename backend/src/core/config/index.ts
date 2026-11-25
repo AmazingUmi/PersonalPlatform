@@ -8,6 +8,13 @@ export interface PlatformConfig {
   apps: { manifests_directory: string; enabled?: Record<string, boolean> };
   storage: { driver: string; root: string };
   trashRetentionDays: number;
+  agent: AgentRuntimeConfig;
+}
+
+export interface AgentRuntimeConfig {
+  enabled: boolean;
+  allowedOrigins: readonly string[];
+  auditRetentionDays: number;
 }
 
 type Env = Record<string, string | undefined>;
@@ -29,6 +36,40 @@ function envFlag(env: Env, name: string): boolean | undefined {
   if (raw === "true" || raw === "1" || raw === "yes" || raw === "on") return true;
   if (raw === "false" || raw === "0" || raw === "no" || raw === "off") return false;
   throw new Error(`${name} must be a boolean (true/false), got "${env[name]}"`);
+}
+
+export function resolveAgentRuntimeConfig(env: Env = process.env): AgentRuntimeConfig {
+  const rawEnabled = env.AGENT_API_ENABLED;
+  if (rawEnabled !== undefined && rawEnabled.trim() === "") {
+    throw new Error("AGENT_API_ENABLED must be a boolean (true/false)");
+  }
+  const enabled = envFlag(env, "AGENT_API_ENABLED") ?? true;
+  const rawRetention = env.AGENT_AUDIT_RETENTION_DAYS;
+  const auditRetentionDays = rawRetention === undefined ? 90 : Number(rawRetention);
+  if (!Number.isInteger(auditRetentionDays) || auditRetentionDays < 1 || auditRetentionDays > 365
+      || (rawRetention !== undefined && String(auditRetentionDays) !== rawRetention)) {
+    throw new Error("AGENT_AUDIT_RETENTION_DAYS must be an integer from 1 to 365");
+  }
+
+  const rawOrigins = env.AGENT_API_ALLOWED_ORIGINS?.trim();
+  const allowedOrigins = new Set<string>();
+  if (rawOrigins) {
+    for (const entry of rawOrigins.split(",")) {
+      const value = entry.trim();
+      try {
+        const url = new URL(value);
+        if ((url.protocol !== "http:" && url.protocol !== "https:")
+            || url.username || url.password || url.search || url.hash
+            || !/^https?:\/\/[^/\\?#\s]+\/?$/i.test(value)) {
+          throw new Error("invalid origin");
+        }
+        allowedOrigins.add(url.origin);
+      } catch {
+        throw new Error("AGENT_API_ALLOWED_ORIGINS must contain comma-separated HTTP(S) origins");
+      }
+    }
+  }
+  return { enabled, allowedOrigins: [...allowedOrigins], auditRetentionDays };
 }
 
 /**
@@ -130,6 +171,7 @@ export function loadConfig(): PlatformConfig {
       root: String(storage["root"] ?? "storage"),
     },
     trashRetentionDays: resolveTrashRetentionDays(),
+    agent: resolveAgentRuntimeConfig(),
   };
 }
 

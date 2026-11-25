@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { AppAgentContext, AppAgentInvocation } from "../../core/agent/types.js";
 import { AppError } from "../../core/api/errors.js";
 import {
   assertPresentedHash, editorBaseHash, headerPresentedHash, lockOwnedTables, lockOwnerSet, parseSnapshotRow, parseSnapshotRows, readPresentedHash, syncWriteFenced,
@@ -20,6 +21,7 @@ import {
 
 /** Database surface derived from AppContext (never from core internals — focus repository precedent). */
 type Db = AppContext["database"];
+type NoteMutation = { database: Db; userId: string; time: AppContext["time"] };
 
 interface NoteRow {
   id: string;
@@ -82,7 +84,8 @@ const NOTE_SNAPSHOT_SQL = `
   row_to_json(n)::text AS note_snapshot,
   COALESCE((SELECT json_agg(row_to_json(nt) ORDER BY nt.tag_id) FROM notes.note_tags nt WHERE nt.note_id = n.id), '[]'::json) AS link_snapshot,
   COALESCE((SELECT json_agg(json_build_object('id', t.id, 'name', t.name) ORDER BY t.name, t.id)
-            FROM notes.note_tags nt JOIN notes.tags t ON t.id = nt.tag_id WHERE nt.note_id = n.id), '[]'::json) AS tag_views`;
+            FROM notes.note_tags nt JOIN notes.tags t ON t.id = nt.tag_id AND t.user_id = n.user_id
+            WHERE nt.note_id = n.id), '[]'::json) AS tag_views`;
 
 type Tx = AppContext["database"];
 
@@ -210,12 +213,14 @@ function tagNotFoundError(tagIds: string[]): AppError {
   return new AppError(422, "tag_not_found", "tagIds reference tags that do not exist", { tagIds });
 }
 
-export async function deleteNote(ctx: TrashMutationContext, noteId: string, presentedHash: string | undefined): Promise<void> {
+export async function deleteNote(
+  ctx: TrashMutationContext, noteId: string, presentedHash: string | undefined, agentTime?: AppContext["time"],
+): Promise<void> {
   const { database: tx, userId } = ctx;
   await lockOwnedTables(tx, ["notes.notes", "notes.note_tags", "notes.tags"]);
   const current = await lockedNote(tx, userId, noteId);
   if (!current) throw new AppError(404, "not_found", "note not found");
-  assertPresentedHash(await syncWriteFenced(tx, userId), presentedHash, current.baseHash);
+  await assertNoteProof(tx, userId, noteId, current.baseHash, presentedHash, agentTime);
 
   const { rows } = await tx.query<{ tag: unknown }>(
     `SELECT json_build_object('id', t.id, 'name', t.name, 'created_at', t.created_at) AS tag
@@ -291,6 +296,207 @@ async function restoreFromTrash(ctx: TrashRestoreContext, entry: OwnedTrashEntry
   for (const tag of tags) tagIds.add(await restoreTag(tx, userId, tag));
   await replaceNoteTags(tx, restoredId, [...tagIds], userId);
   return { restoredId };
+}
+
+interface NoteCreate {
+  content: string;
+  title?: string | null;
+  mood?: string | null;
+  occurredAt?: string | null;
+  pinned?: boolean;
+  tagIds?: string[];
+}
+
+const noteProperties = {
+  content: { type: "string", minLength: 1, maxLength: 100_000 },
+  title: { type: ["string", "null"], maxLength: 300 },
+  mood: { enum: [...MOODS, null] },
+  occurredAt: { type: ["string", "null"], format: "date-time" },
+  pinned: { type: "boolean" },
+  tagIds: { type: "array", items: { type: "string" } },
+};
+
+async function createNote({ database: tx, userId, time }: NoteMutation, body: NoteCreate): Promise<string> {
+  const tagIds = dedupeTagIds(body.tagIds ?? []);
+  assertValidTagIds(tagIds);
+  const occurredAt = body.occurredAt ?? time.now().toISOString();
+  const newId = randomUUID();
+  try {
+    await lockOwnedTables(tx, ["notes.notes", "notes.note_tags", "notes.tags"]);
+    await lockOwnerSet(tx, userId, "notes");
+    await tx.query(
+      `INSERT INTO notes.notes (id, user_id, title, content, mood, occurred_at, pinned)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [newId, userId, body.title ?? null, body.content, body.mood ?? null, occurredAt, body.pinned ?? false],
+    );
+    await replaceNoteTags(tx, newId, tagIds, userId);
+  } catch (error) {
+    if (isForeignKeyViolation(error)) throw tagNotFoundError(tagIds);
+    throw error;
+  }
+  return newId;
+}
+
+async function assertNoteProof(
+  tx: Db, userId: string, noteId: string, actual: string, presented: string | undefined, agentTime?: AppContext["time"],
+): Promise<void> {
+  const fenced = await syncWriteFenced(tx, userId);
+  if (agentTime && presented !== actual) {
+    const current = await requireNoteView(tx, noteId, agentTime.timezone(), userId);
+    throw new AppError(409, "conflict", "This note changed.", {
+      current, retryHint: "Review the current note and retry with its baseHash.",
+    });
+  }
+  assertPresentedHash(fenced, presented, actual);
+}
+
+async function updateNote(
+  { database: tx, userId, time }: NoteMutation, noteId: string, body: Record<string, unknown>,
+  presented: string | undefined, agent = false,
+): Promise<void> {
+  const columns = {
+    content: "content", title: "title", mood: "mood", occurredAt: "occurred_at", pinned: "pinned",
+  };
+  const sets: string[] = [];
+  const params: unknown[] = [noteId, userId];
+  for (const [key, column] of Object.entries(columns)) {
+    if (!(key in body)) continue;
+    const value = key === "occurredAt" && body[key] === null ? time.now().toISOString() : body[key];
+    sets.push(`${column} = $${params.push(value)}`);
+  }
+  const replaceTags = "tagIds" in body;
+  const tagIds = replaceTags ? dedupeTagIds(body.tagIds as string[]) : [];
+  if (replaceTags) assertValidTagIds(tagIds);
+  if (!agent && !sets.length && !replaceTags) return;
+
+  try {
+    await lockOwnedTables(tx, ["notes.notes", "notes.note_tags"]);
+    const current = await lockedNote(tx, userId, noteId);
+    if (!current) throw new AppError(404, "not_found", "note not found");
+    await assertNoteProof(tx, userId, noteId, current.baseHash, presented, agent ? time : undefined);
+    if (sets.length) {
+      sets.push("updated_at = now()");
+      const updated = await tx.query(`UPDATE notes.notes SET ${sets.join(", ")} WHERE id = $1 AND user_id = $2 RETURNING id`, params);
+      if (!updated.rowCount) throw new AppError(404, "not_found", "note not found");
+    }
+    if (replaceTags) await replaceNoteTags(tx, noteId, tagIds, userId);
+  } catch (error) {
+    if (isForeignKeyViolation(error)) throw tagNotFoundError(tagIds);
+    throw error;
+  }
+}
+
+type NoteAgentFilters = { q?: string; tag?: string; mood?: Mood; pinned?: boolean; includeContent?: boolean; limit?: number; offset?: number };
+type NotePreviewRow = { id: string; title: string | null; content: string; mood: Mood | null; occurred_at: Date; pinned: boolean };
+
+async function listAgentNotes({ database, userId }: AppAgentInvocation, filters: NoteAgentFilters) {
+  const limit = filters.limit ?? 20;
+  const offset = filters.offset ?? 0;
+  const { rows } = await database.query<NotePreviewRow>(
+    `SELECT n.id, n.title, CASE WHEN $2 THEN n.content ELSE left(n.content, 160) END AS content,
+       n.mood, n.occurred_at, n.pinned FROM notes.notes n
+     WHERE n.user_id = $1 AND ($3::text IS NULL OR n.title ILIKE $3 OR n.content ILIKE $3 OR EXISTS (
+       SELECT 1 FROM notes.note_tags nt JOIN notes.tags t ON t.id = nt.tag_id AND t.user_id = n.user_id
+       WHERE nt.note_id = n.id AND t.name ILIKE $3
+     )) AND ($4::text IS NULL OR EXISTS (
+       SELECT 1 FROM notes.note_tags nt JOIN notes.tags t ON t.id = nt.tag_id AND t.user_id = n.user_id
+       WHERE nt.note_id = n.id AND (t.name = $4 OR t.id::text = $4)
+     )) AND ($5::text IS NULL OR n.mood = $5) AND ($6::boolean IS NULL OR n.pinned = $6)
+     ORDER BY n.occurred_at DESC, n.created_at DESC, n.id LIMIT $7 OFFSET $8`,
+    [userId, filters.includeContent ?? false, filters.q ? `%${filters.q}%` : null, filters.tag ?? null, filters.mood ?? null,
+      filters.pinned ?? null, limit + 1, offset],
+  );
+  return {
+    items: rows.slice(0, limit).map(({ id, title, content, mood, occurred_at, pinned }) => ({
+      id, title, ...(filters.includeContent ? { content } : { snippet: content }), mood, occurredAt: occurred_at.toISOString(), pinned,
+    })),
+    hasMore: rows.length > limit,
+  };
+}
+
+async function noteOverview(ctx: AppAgentInvocation) {
+  const { database, userId, time } = ctx;
+  const { start, end } = time.todayRangeUtc();
+  const { rows } = await database.query<{ total: number; today: number }>(
+    `SELECT count(*)::int AS total, count(*) FILTER (WHERE occurred_at >= $2 AND occurred_at < $3)::int AS today
+     FROM notes.notes WHERE user_id = $1`, [userId, start, end],
+  );
+  const recent = await database.query<{ id: string; title: string | null; occurredAt: Date }>(
+    `SELECT id, title, occurred_at AS "occurredAt" FROM notes.notes WHERE user_id = $1
+     ORDER BY occurred_at DESC, created_at DESC, id LIMIT 5`, [userId],
+  );
+  return { ...rows[0]!, recent: recent.rows.map((note) => ({ ...note, occurredAt: note.occurredAt.toISOString() })) };
+}
+
+function noteAgentSchema(properties: Record<string, unknown>, required: string[] = []) {
+  return { type: "object" as const, additionalProperties: false, properties, required };
+}
+
+async function registerAgent(ctx: AppAgentContext): Promise<void> {
+  const idField = { type: "string", format: "uuid" };
+  const baseHash = { type: "string", pattern: "^[0-9a-f]{64}$" };
+  const properties = { ...noteProperties, tagIds: { type: "array", items: idField } };
+  ctx.tool({
+    name: "notes_list", description: "List your notes with short content snippets by default.", action: "read", scopes: ["read"],
+    inputSchema: noteAgentSchema({
+      q: { type: "string", maxLength: 300 }, tag: { type: "string", maxLength: 50 }, mood: { enum: [...MOODS] },
+      pinned: { type: "boolean" }, includeContent: { type: "boolean", default: false },
+      limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+      offset: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER, default: 0 },
+    }),
+    async execute(invocation, args) { return { data: await listAgentNotes(invocation, args) }; },
+  });
+  ctx.tool({
+    name: "notes_get", description: "Read an owned note, its Markdown, tags and current edit proof.", action: "read", scopes: ["read"],
+    inputSchema: noteAgentSchema({ id: idField }, ["id"]),
+    async execute({ database, userId, time }, args) {
+      return { data: await requireNoteView(database, args.id as string, time.timezone(), userId) };
+    },
+  });
+  ctx.tool({
+    name: "notes_create", description: "Create an owned note and optionally link existing tags.", action: "write", scopes: ["read", "write"], create: true,
+    inputSchema: noteAgentSchema({
+      ...properties,
+      title: { ...properties.title, default: null },
+      mood: { ...properties.mood, default: null },
+      occurredAt: { ...properties.occurredAt, default: null },
+      pinned: { ...properties.pinned, default: false },
+      tagIds: { ...properties.tagIds, default: [] },
+    }, ["content"]),
+    async execute(invocation, args) {
+      const id = await createNote(invocation, args as unknown as NoteCreate);
+      return { data: { id }, resourceId: id };
+    },
+  });
+  ctx.tool({
+    name: "notes_update", description: "Update fields or tags on an owned note using its current edit proof.", action: "write", scopes: ["read", "write"],
+    inputSchema: noteAgentSchema({ ...properties, id: idField, baseHash }, ["id", "baseHash"]),
+    async execute(invocation, args) {
+      const noteId = args.id as string;
+      await updateNote(invocation, noteId, args, readPresentedHash(args.baseHash), true);
+      return { data: await requireNoteView(invocation.database, noteId, invocation.time.timezone(), invocation.userId), resourceId: noteId };
+    },
+  });
+  ctx.tool({
+    name: "notes_delete", description: "Move an owned note to Trash using its current edit proof.", action: "delete", scopes: ["read", "delete"],
+    inputSchema: noteAgentSchema({ id: idField, baseHash }, ["id", "baseHash"]),
+    async execute({ trash, time }, args) {
+      if (!trash) throw new Error("Agent Trash authorization is missing");
+      const noteId = args.id as string;
+      await deleteNote(trash, noteId, readPresentedHash(args.baseHash), time);
+      return { data: { id: noteId }, resourceId: noteId };
+    },
+  });
+  ctx.tool({
+    name: "notes_tags_list", description: "List the tags you can assign to notes.", action: "read", scopes: ["read"],
+    inputSchema: noteAgentSchema({}),
+    async execute({ database, userId }) {
+      const { rows } = await database.query<TagRow>("SELECT id, name, created_at FROM notes.tags WHERE user_id = $1 ORDER BY name, id", [userId]);
+      return { data: { items: rows.map(toTagView) } };
+    },
+  });
+  ctx.resource({ uri: "pp://apps/notes/summary", name: "Notes summary", read: noteOverview });
+  ctx.overview(noteOverview);
 }
 
 async function registerApi(ctx: AppContext): Promise<void> {
@@ -401,63 +607,13 @@ async function registerApi(ctx: AppContext): Promise<void> {
     return { total: Number(rows[0]?.count ?? 0) };
   });
 
-  ctx.api.post<{
-    Body: {
-      content: string;
-      title?: string | null;
-      mood?: string | null;
-      occurredAt?: string | null;
-      pinned?: boolean;
-      tagIds?: string[];
-    };
-  }>(
-    "/notes",
-    {
-      schema: {
-        body: {
-          type: "object",
-          required: ["content"],
-          additionalProperties: false,
-          properties: {
-            content: { type: "string", minLength: 1, maxLength: 100_000 },
-            title: { type: ["string", "null"], maxLength: 300 },
-            mood: { enum: [...MOODS, null] },
-            occurredAt: { type: ["string", "null"], format: "date-time" },
-            pinned: { type: "boolean" },
-            tagIds: { type: "array", items: { type: "string" } },
-          },
-        },
-      },
-    },
-    async (request, reply) => {
-      const user = await ctx.auth.requireUser(request);
-      const b = request.body;
-      const tagIds = dedupeTagIds(b.tagIds ?? []);
-      assertValidTagIds(tagIds);
-      // occurred_at has no DB default on purpose (worklist §1): the handler
-      // injects the platform clock. An explicit null takes the same default —
-      // the column is NOT NULL and "no custom time" means capture time.
-      const occurredAt = b.occurredAt ?? ctx.time.now().toISOString();
-      const newId = randomUUID();
-      try {
-        await ctx.database.withTransaction(async (tx) => {
-          await lockOwnedTables(tx, ["notes.notes", "notes.note_tags", "notes.tags"]);
-          await lockOwnerSet(tx, user.id, "notes");
-          await tx.query(
-            `INSERT INTO notes.notes (id, user_id, title, content, mood, occurred_at, pinned)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-            [newId, user.id, b.title ?? null, b.content, b.mood ?? null, occurredAt, b.pinned ?? false],
-          );
-          await replaceNoteTags(tx, newId, tagIds, user.id);
-        });
-      } catch (error) {
-        if (isForeignKeyViolation(error)) throw tagNotFoundError(tagIds);
-        throw error;
-      }
-      // capabilities.events is false: no publish (worklist §2.6).
-      return reply.code(201).send(await requireNoteView(db, newId, timezone(), user.id));
-    },
-  );
+  ctx.api.post<{ Body: NoteCreate }>("/notes", {
+    schema: { body: { type: "object", required: ["content"], additionalProperties: false, properties: noteProperties } },
+  }, async (request, reply) => {
+    const user = await ctx.auth.requireUser(request);
+    const newId = await db.withTransaction((database) => createNote({ database, userId: user.id, time: ctx.time }, request.body));
+    return reply.code(201).send(await requireNoteView(db, newId, timezone(), user.id));
+  });
 
   ctx.api.get<{ Params: { id: string } }>("/notes/:id", async (request) => {
     const user = await ctx.auth.requireUser(request);
@@ -473,75 +629,16 @@ async function registerApi(ctx: AppContext): Promise<void> {
         body: {
           type: "object",
           additionalProperties: false,
-          properties: {
-            // Value-only: content is NOT NULL, so an explicit null is a 400
-            // rather than a "clear" (only title/mood are clearable).
-            content: { type: "string", minLength: 1, maxLength: 100_000 },
-            title: { type: ["string", "null"], maxLength: 300 },
-            mood: { enum: [...MOODS, null] },
-            occurredAt: { type: ["string", "null"], format: "date-time" },
-            pinned: { type: "boolean" },
-            // Arrays only: `tagIds: null` fails this schema → 400 (use [] to clear).
-            tagIds: { type: "array", items: { type: "string" } },
-            baseHash: { type: "string" },
-          },
+          properties: { ...noteProperties, baseHash: { type: "string" } },
         },
       },
     },
     async (request) => {
       const user = await ctx.auth.requireUser(request);
-      const body = request.body;
-      const presented = readPresentedHash(body.baseHash);
-      const columns: Array<[string, string]> = [
-        ["content", "content"],
-        ["title", "title"],
-        ["mood", "mood"],
-        ["occurredAt", "occurred_at"],
-        ["pinned", "pinned"],
-      ];
-      const sets: string[] = [];
-      const params: unknown[] = [request.params.id];
-      for (const [key, column] of columns) {
-        if (!(key in body)) continue;
-        // occurred_at is NOT NULL: an explicit null re-stamps with the platform
-        // clock, the same "no custom time" default POST uses.
-        const value = key === "occurredAt" && body[key] === null ? ctx.time.now().toISOString() : body[key];
-        params.push(value);
-        sets.push(`${column} = $${params.length}`);
-      }
-      const replaceTags = "tagIds" in body;
-      const tagIds = replaceTags ? dedupeTagIds(body.tagIds as string[]) : [];
-      if (replaceTags) assertValidTagIds(tagIds);
-
-      if (sets.length === 0 && !replaceTags) {
-        // Nothing mutable supplied: return the current view as-is.
-        return requireNoteView(db, request.params.id, timezone(), user.id);
-      }
-      // Ownership predicate appended after the SET params; foreign note ids
-      // 404 (AUTH-3: never a 403, never another user's row).
-      params.push(user.id);
-      const owned = `id = $1 AND user_id = $${params.length}`;
-
-      try {
-        await ctx.database.withTransaction(async (tx) => {
-          await lockOwnedTables(tx, ["notes.notes", "notes.note_tags"]);
-          const current = await lockedNote(tx, user.id, request.params.id);
-          if (!current) throw new AppError(404, "not_found", "note not found");
-          assertPresentedHash(await syncWriteFenced(tx, user.id), presented, current.baseHash);
-          if (sets.length > 0) {
-            sets.push("updated_at = now()");
-            const updated = await tx.query(
-              `UPDATE notes.notes SET ${sets.join(", ")} WHERE ${owned} RETURNING id`,
-              params,
-            );
-            if (!updated.rows[0]) throw new AppError(404, "not_found", "note not found");
-          }
-          if (replaceTags) await replaceNoteTags(tx, request.params.id, tagIds, user.id);
-        });
-      } catch (error) {
-        if (isForeignKeyViolation(error)) throw tagNotFoundError(tagIds);
-        throw error;
-      }
+      const presented = readPresentedHash(request.body.baseHash);
+      await db.withTransaction((database) => updateNote(
+        { database, userId: user.id, time: ctx.time }, request.params.id, request.body, presented,
+      ));
       return requireNoteView(db, request.params.id, timezone(), user.id);
     },
   );
@@ -640,5 +737,5 @@ async function healthcheck(ctx: AppContext): Promise<AppHealth> {
   return { status: "ok", checks: { database: { status: "ok" } } };
 }
 
-const app: BackendAppModule = { id, registerApi, healthcheck, restoreFromTrash };
+const app: BackendAppModule = { id, registerApi, registerAgent, healthcheck, restoreFromTrash };
 export default app;

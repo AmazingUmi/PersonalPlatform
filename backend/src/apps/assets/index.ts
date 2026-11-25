@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import multipart from "@fastify/multipart";
+import type { AppAgentContext, AppAgentInvocation } from "../../core/agent/types.js";
 import { AppError } from "../../core/api/errors.js";
 import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-registry/types.js";
 import {
@@ -16,6 +17,7 @@ import type {
 /** Database surface derived from AppContext (never from core internals — notes precedent). */
 type Db = AppContext["database"];
 type AppStorage = AppContext["storage"];
+type ItemMutation = { database: Db; userId: string; storage: AppStorage };
 
 interface CategoryRow {
   id: string;
@@ -295,7 +297,8 @@ async function categoriesForItems(db: Db, itemIds: string[]): Promise<Map<string
   const { rows } = await db.query<ItemCategoryLinkRow>(
     `SELECT ic.item_id, c.id, c.name, c.color
      FROM assets.item_categories ic
-     JOIN assets.categories c ON c.id = ic.category_id
+     JOIN assets.items i ON i.id = ic.item_id
+     JOIN assets.categories c ON c.id = ic.category_id AND c.user_id = i.user_id
      WHERE ic.item_id = ANY($1)
      ORDER BY c.name`,
     [itemIds],
@@ -330,7 +333,8 @@ async function itemProof(
     : `SELECT ${ITEM_COLUMNS}, row_to_json(i)::text AS item_snapshot,
             COALESCE((SELECT json_agg(row_to_json(ic) ORDER BY ic.category_id) FROM assets.item_categories ic WHERE ic.item_id = i.id), '[]'::json) AS link_snapshot,
             COALESCE((SELECT json_agg(json_build_object('id', c.id, 'name', c.name, 'color', c.color) ORDER BY c.name)
-                      FROM assets.item_categories ic JOIN assets.categories c ON c.id = ic.category_id WHERE ic.item_id = i.id), '[]'::json) AS category_views,
+                      FROM assets.item_categories ic JOIN assets.categories c ON c.id = ic.category_id AND c.user_id = i.user_id
+                      WHERE ic.item_id = i.id), '[]'::json) AS category_views,
             COALESCE((SELECT json_agg(row_to_json(a) ORDER BY a.created_at, a.id) FROM assets.attachments a WHERE a.item_id = i.id AND a.user_id = i.user_id), '[]'::json) AS attachment_snapshot
        FROM assets.items i WHERE i.id = $1 AND i.user_id = $2`;
   const { rows } = await tx.query<{
@@ -360,8 +364,8 @@ async function itemProof(
     linkRows = links.rows.map((link) => parseSnapshotRow(link.snapshot));
     const named = await tx.query<ItemCategoryView>(
       `SELECT c.id, c.name, c.color FROM assets.item_categories ic
-       JOIN assets.categories c ON c.id = ic.category_id WHERE ic.item_id = $1 ORDER BY c.name`,
-      [itemId],
+       JOIN assets.categories c ON c.id = ic.category_id AND c.user_id = $2 WHERE ic.item_id = $1 ORDER BY c.name`,
+      [itemId, userId],
     );
     categoryViews = named.rows;
     const files = await tx.query<{ snapshot: string }>(
@@ -397,12 +401,13 @@ export async function prepareAssetItemDelete(
   storage: AppStorage,
   itemId: string,
   presentedHash: string | undefined,
+  agent = false,
 ): Promise<TrashDraft> {
   const { database: tx, userId } = ctx;
   await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments", "assets.categories"]);
   const current = await itemProof(tx, storage, userId, itemId, true);
   if (!current) throw new AppError(404, "not_found", "item not found");
-  assertPresentedHash(await syncWriteFenced(tx, userId), presentedHash, current.hash);
+  await assertAssetProof(tx, userId, current, presentedHash, agent);
 
   const { rows } = await tx.query<{ category: unknown }>(
     `SELECT json_build_object('id', c.id, 'name', c.name, 'color', c.color, 'created_at', c.created_at) AS category
@@ -430,8 +435,9 @@ export async function deleteAssetItem(
   storage: AppStorage,
   itemId: string,
   presentedHash: string | undefined,
+  agent = false,
 ): Promise<void> {
-  const draft = await prepareAssetItemDelete(ctx, storage, itemId, presentedHash);
+  const draft = await prepareAssetItemDelete(ctx, storage, itemId, presentedHash, agent);
   await ctx.moveToTrash(draft);
   await ctx.database.query("DELETE FROM assets.items WHERE id = $1 AND user_id = $2", [itemId, ctx.userId]);
 }
@@ -754,6 +760,220 @@ function attachmentTooLarge(cause: unknown): never {
   throw cause;
 }
 
+interface AssetCreate {
+  name: string;
+  description?: string | null;
+  quantity?: number;
+  acquiredAt?: string | null;
+  categoryIds?: string[];
+  targetLocation?: string | null;
+}
+
+const assetProperties = {
+  name: { type: "string", minLength: 1, maxLength: 300 },
+  description: { type: ["string", "null"], maxLength: 5000 },
+  quantity: { type: "integer", minimum: 0 },
+  acquiredAt: { type: ["string", "null"], format: "date" },
+  categoryIds: { type: "array", items: { type: "string" } },
+  targetLocation: { type: ["string", "null"], maxLength: 300 },
+};
+
+async function createAsset(tx: Db, userId: string, body: AssetCreate) {
+  const categoryIds = dedupeCategoryIds(body.categoryIds ?? []);
+  assertValidCategoryIds(categoryIds);
+  const assetId = randomUUID();
+  try {
+    await tx.query(
+      `INSERT INTO assets.items (id, user_id, name, description, quantity, acquired_at, target_location)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [assetId, userId, body.name, body.description ?? null, body.quantity ?? 1, body.acquiredAt ?? null, body.targetLocation ?? null],
+    );
+    await replaceItemCategories(tx, userId, assetId, categoryIds);
+  } catch (error) {
+    if (isForeignKeyViolation(error)) throw categoryNotFoundError(categoryIds);
+    throw error;
+  }
+  return { id: assetId, name: body.name, categoryIds };
+}
+
+function publishAssetCreated(
+  events: Pick<AppContext["events"], "publish">, userId: string, asset: Awaited<ReturnType<typeof createAsset>>,
+): void {
+  events.publish("assets.item.created.v2", { userId, ...asset }, "assets");
+}
+
+type AssetProof = NonNullable<Awaited<ReturnType<typeof itemProof>>>;
+
+function assetAgentView(proof: AssetProof) {
+  return {
+    ...proof.view,
+    attachments: proof.attachments.map((file) => ({
+      id: String(file.id), filename: String(file.filename),
+      contentType: typeof file.content_type === "string" ? file.content_type : null, size: Number(file.size),
+    })),
+  };
+}
+
+async function assertAssetProof(tx: Db, userId: string, proof: AssetProof, presented: string | undefined, agent: boolean): Promise<void> {
+  const fenced = await syncWriteFenced(tx, userId);
+  if (agent && presented !== proof.hash) {
+    throw new AppError(409, "conflict", "This asset changed.", {
+      current: assetAgentView(proof), retryHint: "Review the current asset and retry with its baseHash.",
+    });
+  }
+  assertPresentedHash(fenced, presented, proof.hash);
+}
+
+async function updateAsset(
+  { database: tx, userId, storage }: ItemMutation, itemId: string, body: Record<string, unknown>,
+  presented: string | undefined, agent = false,
+): Promise<void> {
+  const columns = {
+    name: "name", description: "description", quantity: "quantity", acquiredAt: "acquired_at", targetLocation: "target_location",
+  };
+  const sets: string[] = [];
+  const params: unknown[] = [itemId, userId];
+  for (const [key, column] of Object.entries(columns)) {
+    if (!(key in body)) continue;
+    sets.push(`${column} = $${params.push(body[key])}`);
+  }
+  const replaceCategories = "categoryIds" in body;
+  const categoryIds = replaceCategories ? dedupeCategoryIds(body.categoryIds as string[]) : [];
+  if (replaceCategories) assertValidCategoryIds(categoryIds);
+  if (!agent && !sets.length && !replaceCategories) return;
+
+  try {
+    await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments"]);
+    const proof = await itemProof(tx, storage, userId, itemId, true);
+    if (!proof) throw new AppError(404, "not_found", "item not found");
+    await assertAssetProof(tx, userId, proof, presented, agent);
+    if (sets.length) {
+      sets.push("updated_at = now()");
+      const updated = await tx.query(`UPDATE assets.items SET ${sets.join(", ")} WHERE id = $1 AND user_id = $2 RETURNING id`, params);
+      if (!updated.rowCount) throw new AppError(404, "not_found", "item not found");
+    }
+    if (replaceCategories) await replaceItemCategories(tx, userId, itemId, categoryIds);
+  } catch (error) {
+    if (isForeignKeyViolation(error)) throw categoryNotFoundError(categoryIds);
+    throw error;
+  }
+}
+
+type AssetAgentFilters = { q?: string; categoryId?: string; limit?: number; offset?: number };
+
+async function listAgentAssets({ database, userId }: AppAgentInvocation, filters: AssetAgentFilters) {
+  const limit = filters.limit ?? 20;
+  const offset = filters.offset ?? 0;
+  const { conditions, params } = itemConditions({ q: filters.q }, filters.categoryId ? [filters.categoryId] : [], userId);
+  params.push(limit + 1, offset);
+  const { rows } = await database.query<Pick<ItemRow, "id" | "name" | "quantity" | "acquired_at" | "target_location">>(
+    `SELECT id, name, quantity, acquired_at, target_location FROM assets.items i ${whereClause(conditions)}
+     ORDER BY created_at DESC, id LIMIT $${params.length - 1} OFFSET $${params.length}`, params,
+  );
+  const items = rows.slice(0, limit);
+  const categories = await categoriesForItems(database, items.map((item) => item.id));
+  return {
+    items: items.map((item) => ({
+      id: item.id, name: item.name, quantity: item.quantity, acquiredAt: item.acquired_at,
+      targetLocation: item.target_location, categories: categories.get(item.id) ?? [],
+    })),
+    hasMore: rows.length > limit,
+  };
+}
+
+async function getAgentAsset({ database, storage, userId }: AppAgentInvocation, itemId: string) {
+  const current = await itemProof(database, storage, userId, itemId, false);
+  if (!current) throw new AppError(404, "not_found", "item not found");
+  return assetAgentView(current);
+}
+
+async function assetSummary(db: Db, userId: string) {
+  const { rows } = await db.query<{ items: number; categories: number }>(
+    `SELECT (SELECT count(*)::int FROM assets.items WHERE user_id = $1) AS items,
+            (SELECT count(*)::int FROM assets.categories WHERE user_id = $1) AS categories`,
+    [userId],
+  );
+  return rows[0]!;
+}
+
+function assetAgentSchema(properties: Record<string, unknown>, required: string[] = []) {
+  return { type: "object" as const, additionalProperties: false, properties, required };
+}
+
+async function registerAgent(ctx: AppAgentContext): Promise<void> {
+  const idField = { type: "string", format: "uuid" };
+  const baseHash = { type: "string", pattern: "^[0-9a-f]{64}$" };
+  const properties = {
+    ...assetProperties,
+    quantity: { ...assetProperties.quantity, maximum: 2_147_483_647 },
+    categoryIds: { type: "array", items: idField },
+  };
+  ctx.tool({
+    name: "assets_list", description: "List your assets with concise item and category information.", action: "read", scopes: ["read"],
+    inputSchema: assetAgentSchema({
+      q: { type: "string", maxLength: 300 }, categoryId: idField,
+      limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+      offset: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER, default: 0 },
+    }),
+    async execute(invocation, args) { return { data: await listAgentAssets(invocation, args) }; },
+  });
+  ctx.tool({
+    name: "assets_get", description: "Read an owned asset, its attachment metadata and its current edit proof.", action: "read", scopes: ["read"],
+    inputSchema: assetAgentSchema({ id: idField }, ["id"]),
+    async execute(invocation, args) { return { data: await getAgentAsset(invocation, args.id as string) }; },
+  });
+  ctx.tool({
+    name: "assets_create", description: "Create an owned asset and optionally assign existing categories.", action: "write", scopes: ["read", "write"], create: true,
+    inputSchema: assetAgentSchema({
+      ...properties,
+      description: { ...properties.description, default: null },
+      quantity: { ...properties.quantity, default: 1 },
+      acquiredAt: { ...properties.acquiredAt, default: null },
+      categoryIds: { ...properties.categoryIds, default: [] },
+      targetLocation: { ...properties.targetLocation, default: null },
+    }, ["name"]),
+    async execute({ database, userId, events }, args) {
+      const created = await createAsset(database, userId, args as unknown as AssetCreate);
+      publishAssetCreated(events, userId, created);
+      return { data: { id: created.id }, resourceId: created.id };
+    },
+  });
+  ctx.tool({
+    name: "assets_update", description: "Update an owned asset or its categories using the current edit proof.", action: "write", scopes: ["read", "write"],
+    inputSchema: assetAgentSchema({ ...properties, id: idField, baseHash }, ["id", "baseHash"]),
+    async execute(invocation, args) {
+      const itemId = args.id as string;
+      await updateAsset(invocation, itemId, args, readPresentedHash(args.baseHash), true);
+      return { data: await getAgentAsset(invocation, itemId), resourceId: itemId };
+    },
+  });
+  ctx.tool({
+    name: "assets_delete", description: "Move an owned asset and its attachments to Trash using the current edit proof.",
+    action: "delete", scopes: ["read", "delete"],
+    inputSchema: assetAgentSchema({ id: idField, baseHash }, ["id", "baseHash"]),
+    prepareDelete(invocation, args) {
+      return prepareAssetItemDelete(invocation, invocation.storage, args.id as string, readPresentedHash(args.baseHash), true);
+    },
+    async execute({ trash, storage }, args) {
+      if (!trash) throw new Error("Agent Trash authorization is missing");
+      const itemId = args.id as string;
+      await deleteAssetItem(trash, storage, itemId, readPresentedHash(args.baseHash), true);
+      return { data: { id: itemId }, resourceId: itemId };
+    },
+  });
+  ctx.tool({
+    name: "assets_categories_list", description: "List the categories you can assign to assets.", action: "read", scopes: ["read"],
+    inputSchema: assetAgentSchema({}),
+    async execute({ database, userId }) {
+      const { rows } = await database.query<CategoryRow>("SELECT id, name, color, created_at FROM assets.categories WHERE user_id = $1 ORDER BY name, id", [userId]);
+      return { data: { items: rows.map(toCategoryView) } };
+    },
+  });
+  const summary = ({ database, userId }: AppAgentInvocation) => assetSummary(database, userId);
+  ctx.resource({ uri: "pp://apps/assets/summary", name: "Assets summary", read: summary });
+  ctx.overview(summary);
+}
+
 async function registerApi(ctx: AppContext): Promise<void> {
   const db = ctx.database;
 
@@ -984,56 +1204,14 @@ async function registerApi(ctx: AppContext): Promise<void> {
     },
   );
 
-  ctx.api.post<{ Body: { name: string; description?: string; quantity?: number; acquiredAt?: string; categoryIds?: string[]; targetLocation?: string } }>(
-    "/items",
-    {
-      schema: {
-        body: {
-          type: "object",
-          required: ["name"],
-          additionalProperties: false,
-          properties: {
-            name: { type: "string", minLength: 1, maxLength: 300 },
-            description: { type: ["string", "null"], maxLength: 5000 },
-            quantity: { type: "integer", minimum: 0 },
-            acquiredAt: { type: ["string", "null"], format: "date" },
-            // Arrays only: `categoryIds: null` fails this schema → 400 (use []
-            // to clear on PATCH; create simply defaults to no categories).
-            categoryIds: { type: "array", items: { type: "string" } },
-            targetLocation: { type: ["string", "null"], maxLength: 300 },
-          },
-        },
-      },
-    },
-    async (request, reply) => {
-      const user = await ctx.auth.requireUser(request);
-      const b = request.body;
-      const categoryIds = dedupeCategoryIds(b.categoryIds ?? []);
-      assertValidCategoryIds(categoryIds);
-      const newId = randomUUID();
-      try {
-        await ctx.database.withTransaction(async (tx) => {
-          await tx.query(
-            `INSERT INTO assets.items (id, user_id, name, description, quantity, acquired_at, target_location)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-            [newId, user.id, b.name, b.description ?? null, b.quantity ?? 1, b.acquiredAt ?? null, b.targetLocation ?? null],
-          );
-          await replaceItemCategories(tx, user.id, newId, categoryIds);
-        });
-      } catch (error) {
-        if (isForeignKeyViolation(error)) throw categoryNotFoundError(categoryIds);
-        throw error;
-      }
-      // The create transaction has committed — publish only now so the event
-      // reflects persisted state (focus/notes "events after commit" precedent).
-      ctx.events.publish(
-        "assets.item.created.v2",
-        { userId: user.id, id: newId, name: b.name, categoryIds },
-        "assets",
-      );
-      return reply.code(201).send(await requireItemView(ctx, user.id, newId));
-    },
-  );
+  ctx.api.post<{ Body: AssetCreate }>("/items", {
+    schema: { body: { type: "object", required: ["name"], additionalProperties: false, properties: assetProperties } },
+  }, async (request, reply) => {
+    const user = await ctx.auth.requireUser(request);
+    const created = await db.withTransaction((tx) => createAsset(tx, user.id, request.body));
+    publishAssetCreated(ctx.events, user.id, created);
+    return reply.code(201).send(await requireItemView(ctx, user.id, created.id));
+  });
 
   ctx.api.get<{ Params: { id: string } }>("/items/:id", async (request) => {
     const user = await ctx.auth.requireUser(request);
@@ -1051,70 +1229,16 @@ async function registerApi(ctx: AppContext): Promise<void> {
         body: {
           type: "object",
           additionalProperties: false,
-          properties: {
-            name: { type: "string", minLength: 1, maxLength: 300 },
-            description: { type: ["string", "null"], maxLength: 5000 },
-            quantity: { type: "integer", minimum: 0 },
-            acquiredAt: { type: ["string", "null"], format: "date" },
-            categoryIds: { type: "array", items: { type: "string" } },
-            targetLocation: { type: ["string", "null"], maxLength: 300 },
-            baseHash: { type: "string" },
-          },
+          properties: { ...assetProperties, baseHash: { type: "string" } },
         },
       },
     },
     async (request) => {
       const user = await ctx.auth.requireUser(request);
-      const body = request.body as Record<string, unknown>;
-      const presented = readPresentedHash(body.baseHash);
-      const columns: Array<[string, string]> = [
-        ["name", "name"],
-        ["description", "description"],
-        ["quantity", "quantity"],
-        ["acquiredAt", "acquired_at"],
-        ["targetLocation", "target_location"],
-      ];
-      const sets: string[] = [];
-      const params: unknown[] = [request.params.id, user.id];
-      for (const [key, column] of columns) {
-        if (!(key in body)) continue;
-        params.push(body[key]);
-        sets.push(`${column} = $${params.length}`);
-      }
-      const replaceCategories = "categoryIds" in body;
-      const categoryIds = replaceCategories ? dedupeCategoryIds(body.categoryIds as string[]) : [];
-      if (replaceCategories) assertValidCategoryIds(categoryIds);
-
-      if (sets.length === 0 && !replaceCategories) {
-        return requireItemView(ctx, user.id, request.params.id);
-      }
-
-      try {
-        await ctx.trash.withAttachmentRead(async (tx) => {
-          await lockOwnedTables(tx, ["assets.items", "assets.item_categories", "assets.attachments"]);
-          const proof = await itemProof(tx, ctx.storage, user.id, request.params.id, true);
-          if (!proof) throw new AppError(404, "not_found", "item not found");
-          assertPresentedHash(await syncWriteFenced(tx, user.id), presented, proof.hash);
-          if (sets.length > 0) {
-            sets.push("updated_at = now()");
-            const updated = await tx.query(
-              `UPDATE assets.items SET ${sets.join(", ")} WHERE id = $1 AND user_id = $2 RETURNING id`,
-              params,
-            );
-            if (!updated.rows[0]) throw new AppError(404, "not_found", "item not found");
-          } else {
-            const exists = await tx.query("SELECT id FROM assets.items WHERE id = $1 AND user_id = $2", [
-              request.params.id,
-              user.id,
-            ]);
-            if (!exists.rows[0]) throw new AppError(404, "not_found", "item not found");
-          }
-          if (replaceCategories) await replaceItemCategories(tx, user.id, request.params.id, categoryIds);
-        });
-      } catch (error) {
-        if (isForeignKeyViolation(error)) throw categoryNotFoundError(categoryIds);
-        throw error;
-      }
+      const presented = readPresentedHash(request.body.baseHash);
+      await ctx.trash.withAttachmentRead((database) => updateAsset(
+        { database, userId: user.id, storage: ctx.storage }, request.params.id, request.body, presented,
+      ));
       return requireItemView(ctx, user.id, request.params.id);
     },
   );
@@ -1278,18 +1402,7 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
   ctx.api.get("/summary", async (request) => {
     const user = await ctx.auth.requireUser(request);
-    const items = await db.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM assets.items WHERE user_id = $1",
-      [user.id],
-    );
-    const categories = await db.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM assets.categories WHERE user_id = $1",
-      [user.id],
-    );
-    return {
-      items: Number(items.rows[0]?.count ?? 0),
-      categories: Number(categories.rows[0]?.count ?? 0),
-    };
+    return assetSummary(db, user.id);
   });
 
   // Operator surface for the consistency machinery: run reconciliation on
@@ -1332,5 +1445,5 @@ async function healthcheck(ctx: AppContext): Promise<AppHealth> {
   return { status: "ok", checks: { database: { status: "ok" } } };
 }
 
-const app: BackendAppModule = { id, registerApi, registerJobs, healthcheck, restoreFromTrash };
+const app: BackendAppModule = { id, registerApi, registerAgent, registerJobs, healthcheck, restoreFromTrash };
 export default app;

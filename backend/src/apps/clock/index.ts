@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { AppError } from "../../core/api/errors.js";
+import type { AppAgentContext, AppAgentInvocation } from "../../core/agent/types.js";
 import type { AppContext, AppHealth, BackendAppModule } from "../../core/app-registry/types.js";
 import {
   assertPresentedHash, editorBaseHash, headerPresentedHash, lockOwnedTables, lockOwnerSet, parseSnapshotRow, readPresentedHash, singletonBaseHash, syncWriteFenced,
@@ -28,6 +29,29 @@ interface AlarmRow {
   created_at: Date;
   updated_at: Date;
 }
+
+type AlarmSnapshot = AlarmRow & { snapshot: string };
+type AlarmProof = AlarmView & { baseHash: string };
+
+interface NewAlarm {
+  time: string;
+  label?: string;
+  enabled?: boolean;
+  repeatDays?: number[];
+}
+
+type AlarmPatch = Omit<Partial<NewAlarm>, "label"> & { label?: string | null };
+
+const alarmFields = {
+  time: { type: "string", pattern: ALARM_TIME_PATTERN.source },
+  label: { type: "string", maxLength: 100 },
+  enabled: { type: "boolean" },
+  repeatDays: {
+    type: "array", maxItems: 7, uniqueItems: true,
+    items: { type: "integer", minimum: 0, maximum: 6 },
+  },
+};
+const alarmPatchFields = { ...alarmFields, label: { type: ["string", "null"], maxLength: 100 } };
 
 interface WorldClockRow {
   id: string;
@@ -72,6 +96,10 @@ function toAlarmView(row: AlarmRow): AlarmView {
   };
 }
 
+function alarmProof(row: AlarmSnapshot): AlarmProof {
+  return { ...toAlarmView(row), baseHash: clockRowHash("clock.alarms", row.snapshot) };
+}
+
 function toWorldClockView(row: WorldClockRow): WorldClockView {
   return {
     id: row.id,
@@ -96,13 +124,90 @@ function invalidCityError(): AppError {
 }
 
 /** A malformed uuid must not reach pg as a 22P02 parse error — it is simply not found. */
-async function findAlarmView(db: Db, alarmId: string, userId: string): Promise<AlarmView | null> {
+async function findAlarm(db: Db, alarmId: string, userId: string, lock = false): Promise<AlarmSnapshot | null> {
   if (!isUuid(alarmId)) return null;
-  const { rows } = await db.query<AlarmRow & { snapshot: string }>(
-    "SELECT a.*, row_to_json(a)::text AS snapshot FROM clock.alarms a WHERE id = $1 AND user_id = $2",
+  const { rows } = await db.query<AlarmSnapshot>(
+    "SELECT a.*, row_to_json(a)::text AS snapshot FROM clock.alarms a WHERE id = $1 AND user_id = $2" +
+      (lock ? " FOR UPDATE" : ""),
     [alarmId, userId],
   );
-  return rows[0] ? { ...toAlarmView(rows[0]), baseHash: clockRowHash("clock.alarms", rows[0].snapshot) } : null;
+  return rows[0] ?? null;
+}
+
+async function listAlarms(db: Db, userId: string, limit: number | null = null, offset = 0, enabled: boolean | null = null): Promise<AlarmProof[]> {
+  const { rows } = await db.query<AlarmSnapshot>(
+    `SELECT a.*, row_to_json(a)::text AS snapshot FROM clock.alarms a
+     WHERE user_id = $1 AND ($2::boolean IS NULL OR enabled = $2)
+     ORDER BY time ASC, created_at ASC, id ASC LIMIT $3 OFFSET $4`,
+    [userId, enabled, limit, offset],
+  );
+  return rows.map(alarmProof);
+}
+
+async function createClockAlarm(db: Db, userId: string, body: NewAlarm): Promise<string> {
+  const alarmId = randomUUID();
+  await db.query(
+    `INSERT INTO clock.alarms (id, user_id, time, label, enabled, repeat_days)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [alarmId, userId, body.time, body.label?.trim() ?? "", body.enabled ?? true, body.repeatDays ?? []],
+  );
+  return alarmId;
+}
+
+function alarmNotFound(): AppError {
+  return new AppError(404, "not_found", "alarm not found");
+}
+
+async function assertAlarmProof(tx: Db, userId: string, current: AlarmSnapshot, presented: string | undefined, agent: boolean): Promise<void> {
+  const fenced = await syncWriteFenced(tx, userId);
+  const snapshot = alarmProof(current);
+  if (agent) {
+    if (!presented) throw new AppError(400, "validation_error", "baseHash is required.");
+    if (presented !== snapshot.baseHash) {
+      throw new AppError(409, "conflict", "This alarm changed. Review the current value before retrying.", {
+        current: snapshot, retryHint: "Use the current baseHash after reviewing the alarm.",
+      });
+    }
+  }
+  assertPresentedHash(fenced, presented, snapshot.baseHash);
+}
+
+async function updateClockAlarm(
+  db: Db, userId: string, alarmId: string, body: AlarmPatch, rawHash: unknown, agent = false,
+): Promise<AlarmProof> {
+  if (!isUuid(alarmId)) throw alarmNotFound();
+  const sets: string[] = [];
+  const params: unknown[] = [alarmId, userId];
+  const set = (column: string, value: unknown): void => {
+    params.push(value);
+    sets.push(`${column} = $${params.length}`);
+  };
+  if (body.time !== undefined) set("time", body.time);
+  if (body.label !== undefined) set("label", body.label === null ? "" : body.label.trim());
+  if (body.enabled !== undefined) set("enabled", body.enabled);
+  if (body.repeatDays !== undefined) set("repeat_days", normalizeRepeatDays(body.repeatDays));
+  if (sets.length === 0 && !agent) {
+    const current = await findAlarm(db, alarmId, userId);
+    if (!current) throw alarmNotFound();
+    return alarmProof(current);
+  }
+
+  const presented = readPresentedHash(rawHash);
+  return db.withTransaction(async (tx) => {
+    await lockOwnedTables(tx, ["clock.alarms"]);
+    const current = await findAlarm(tx, alarmId, userId, true);
+    if (!current) throw alarmNotFound();
+    await assertAlarmProof(tx, userId, current, presented, agent);
+    if (sets.length === 0) return alarmProof(current);
+    const written = await tx.query<AlarmSnapshot>(
+      `UPDATE clock.alarms AS a SET ${sets.join(", ")}, updated_at = now()
+       WHERE id = $1 AND user_id = $2 RETURNING a.*, row_to_json(a)::text AS snapshot`,
+      params,
+    );
+    const row = written.rows[0];
+    if (!row) throw alarmNotFound();
+    return alarmProof(row);
+  });
 }
 
 async function findWorldClockView(
@@ -125,17 +230,15 @@ function clockRowHash(table: string, snapshot: string): string {
   return editorBaseHash([{ table, row: parseSnapshotRow(snapshot) }]);
 }
 
-export async function deleteClockAlarm(ctx: TrashMutationContext, alarmId: string, presentedHash: string | undefined): Promise<void> {
-  if (!isUuid(alarmId)) throw new AppError(404, "not_found", "alarm not found");
+export async function deleteClockAlarm(
+  ctx: TrashMutationContext, alarmId: string, presentedHash: string | undefined, agent = false,
+): Promise<void> {
+  if (!isUuid(alarmId)) throw alarmNotFound();
   const { database: tx, userId } = ctx;
   await lockOwnedTables(tx, ["clock.alarms"]);
-  const { rows } = await tx.query<Pick<AlarmRow, "id" | "label" | "time"> & { snapshot: string }>(
-    "SELECT id, label, time, row_to_json(a)::text AS snapshot FROM clock.alarms a WHERE id = $1 AND user_id = $2 FOR UPDATE",
-    [alarmId, userId],
-  );
-  const current = rows[0];
-  if (!current) throw new AppError(404, "not_found", "alarm not found");
-  assertPresentedHash(await syncWriteFenced(tx, userId), presentedHash, clockRowHash("clock.alarms", current.snapshot));
+  const current = await findAlarm(tx, alarmId, userId, true);
+  if (!current) throw alarmNotFound();
+  await assertAlarmProof(tx, userId, current, presentedHash, agent);
 
   const { time, label, enabled, repeat_days, created_at, updated_at } = parseSnapshotRow(current.snapshot);
   await ctx.moveToTrash({
@@ -245,116 +348,30 @@ async function registerApi(ctx: AppContext): Promise<void> {
 
   ctx.api.get("/alarms", async (request) => {
     const user = await ctx.auth.requireUser(request);
-    const { rows } = await db.query<AlarmRow & { snapshot: string }>(
-      "SELECT a.*, row_to_json(a)::text AS snapshot FROM clock.alarms a WHERE user_id = $1 ORDER BY time ASC, created_at ASC",
-      [user.id],
-    );
-    return { items: rows.map((row) => ({ ...toAlarmView(row), baseHash: clockRowHash("clock.alarms", row.snapshot) })) };
+    return { items: await listAlarms(db, user.id) };
   });
 
   ctx.api.post("/alarms", {
-    schema: {
-      body: {
-        type: "object",
-        required: ["time"],
-        additionalProperties: false,
-        properties: {
-          time: { type: "string", pattern: ALARM_TIME_PATTERN.source },
-          label: { type: "string", maxLength: 100 },
-          enabled: { type: "boolean" },
-          repeatDays: {
-            type: "array",
-            maxItems: 7,
-            uniqueItems: true,
-            items: { type: "integer", minimum: 0, maximum: 6 },
-          },
-        },
-      },
-    },
+    schema: { body: { type: "object", required: ["time"], additionalProperties: false, properties: alarmFields } },
     async handler(request, reply) {
       const user = await ctx.auth.requireUser(request);
-      const body = request.body as {
-        time: string;
-        label?: string;
-        enabled?: boolean;
-        repeatDays?: number[];
-      };
-      const newId = randomUUID();
-      await db.query(
-        `INSERT INTO clock.alarms (id, user_id, time, label, enabled, repeat_days)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [newId, user.id, body.time, body.label?.trim() ?? "", body.enabled ?? true, body.repeatDays ?? []],
-      );
-      return reply.code(201).send(await findAlarmView(db, newId, user.id));
+      const alarmId = await createClockAlarm(db, user.id, request.body as NewAlarm);
+      const row = await findAlarm(db, alarmId, user.id);
+      return reply.code(201).send(row ? alarmProof(row) : null);
     },
   });
 
-  // Three-state PATCH (notes/assets precedent): absent = keep, explicit null =
-  // clear (label → ''), value = update. `time` is NOT NULL and not clearable.
-  ctx.api.patch<{ Params: { id: string } }>("/alarms/:id", {
+  // Three-state PATCH: absent means keep and explicit null clears the label.
+  ctx.api.patch<{ Params: { id: string }; Body: AlarmPatch & { baseHash?: string } }>("/alarms/:id", {
     schema: {
       body: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          time: { type: "string", pattern: ALARM_TIME_PATTERN.source },
-          label: { type: ["string", "null"], maxLength: 100 },
-          enabled: { type: "boolean" },
-          repeatDays: {
-            type: "array",
-            maxItems: 7,
-            uniqueItems: true,
-            items: { type: "integer", minimum: 0, maximum: 6 },
-          },
-          baseHash: { type: "string" },
-        },
+        type: "object", additionalProperties: false,
+        properties: { ...alarmPatchFields, baseHash: { type: "string" } },
       },
     },
     async handler(request) {
       const user = await ctx.auth.requireUser(request);
-      if (!isUuid(request.params.id)) throw new AppError(404, "not_found", "alarm not found");
-      const body = request.body as {
-        time?: string;
-        label?: string | null;
-        enabled?: boolean;
-        repeatDays?: number[];
-        baseHash?: unknown;
-      };
-      if (body.time === undefined && body.label === undefined && body.enabled === undefined && body.repeatDays === undefined) {
-        const view = await findAlarmView(db, request.params.id, user.id);
-        if (!view) throw new AppError(404, "not_found", "alarm not found");
-        return view;
-      }
-      const sets: string[] = [];
-      const params: unknown[] = [request.params.id, user.id];
-      const set = (column: string, value: unknown): void => {
-        params.push(value);
-        sets.push(`${column} = $${params.length}`);
-      };
-      if (body.time !== undefined) set("time", body.time);
-      if (body.label !== undefined) set("label", body.label === null ? "" : body.label.trim());
-      if (body.enabled !== undefined) set("enabled", body.enabled);
-      if (body.repeatDays !== undefined) set("repeat_days", normalizeRepeatDays(body.repeatDays));
-      const presented = readPresentedHash((body as { baseHash?: unknown }).baseHash);
-      const updated = await db.withTransaction(async (tx) => {
-        await lockOwnedTables(tx, ["clock.alarms"]);
-        const current = await tx.query<{ snapshot: string }>(
-          "SELECT row_to_json(a)::text AS snapshot FROM clock.alarms a WHERE id = $1 AND user_id = $2 FOR UPDATE",
-          [request.params.id, user.id],
-        );
-        if (!current.rows[0]) throw new AppError(404, "not_found", "alarm not found");
-        assertPresentedHash(await syncWriteFenced(tx, user.id), presented, clockRowHash("clock.alarms", current.rows[0].snapshot));
-        const written = await tx.query<AlarmRow>(
-          `UPDATE clock.alarms SET ${sets.join(", ")}, updated_at = now()
-           WHERE id = $1 AND user_id = $2 RETURNING *`,
-          params,
-        );
-        return written.rows[0] ?? null;
-      });
-      if (!updated) throw new AppError(404, "not_found", "alarm not found");
-      const view = await findAlarmView(db, request.params.id, user.id);
-      if (!view) throw new AppError(404, "not_found", "alarm not found");
-      return view;
+      return updateClockAlarm(db, user.id, request.params.id, request.body, request.body.baseHash);
     },
   });
 
@@ -542,11 +559,17 @@ async function registerApi(ctx: AppContext): Promise<void> {
   });
 }
 
-async function worldClockList(db: Db, userId: string): Promise<{ items: Array<WorldClockView & { baseHash: string }>; orderHash: string }> {
+async function worldClockRows(db: Db, userId: string, limit: number | null = null, offset = 0) {
   const { rows } = await db.query<WorldClockRow & { snapshot: string }>(
-    "SELECT w.*, row_to_json(w)::text AS snapshot FROM clock.world_clocks w WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC",
-    [userId],
+    `SELECT w.*, row_to_json(w)::text AS snapshot FROM clock.world_clocks w
+     WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC, id ASC LIMIT $2 OFFSET $3`,
+    [userId, limit, offset],
   );
+  return rows;
+}
+
+async function worldClockList(db: Db, userId: string): Promise<{ items: Array<WorldClockView & { baseHash: string }>; orderHash: string }> {
+  const rows = await worldClockRows(db, userId);
   const parts = rows.map((row) => ({ table: "clock.world_clocks", row: parseSnapshotRow(row.snapshot) }));
   return {
     items: rows.map((row) => ({ ...toWorldClockView(row), baseHash: clockRowHash("clock.world_clocks", row.snapshot) })),
@@ -554,11 +577,113 @@ async function worldClockList(db: Db, userId: string): Promise<{ items: Array<Wo
   };
 }
 
+const pageProperties = {
+  limit: { type: "integer", minimum: 1, maximum: 100, default: 20 },
+  offset: { type: "integer", minimum: 0, maximum: 2_147_483_647, default: 0 },
+};
+const alarmIdProof = {
+  id: { type: "string", pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" },
+  baseHash: { type: "string", pattern: "^[0-9a-f]{64}$" },
+};
+
+function page<T>(rows: T[], limit: number) {
+  return { items: rows.slice(0, limit), hasMore: rows.length > limit };
+}
+
+async function agentClockOverview(ctx: AppAgentInvocation, limit: number) {
+  const at = ctx.time.now();
+  const timezone = ctx.time.timezone();
+  const alarms = await listAlarms(ctx.database, ctx.userId, limit + 1, 0, true);
+  const worldClocks = await worldClockRows(ctx.database, ctx.userId, limit + 1);
+  const timeIn = (timeZone: string) => new Intl.DateTimeFormat("en-GB", {
+    timeZone, hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+  }).format(at);
+  return {
+    time: at.toISOString(), timezone, localTime: timeIn(timezone),
+    enabledAlarms: page(alarms, limit),
+    worldClocks: page(worldClocks.map((row) => ({ ...toWorldClockView(row), localTime: timeIn(row.timezone) })), limit),
+  };
+}
+
+async function registerAgent(ctx: AppAgentContext): Promise<void> {
+  ctx.tool({
+    name: "clock_overview", description: "Read platform time, world clocks and enabled alarms.",
+    action: "read", scopes: ["read"],
+    inputSchema: { type: "object", additionalProperties: false },
+    execute: async (invocation) => ({ data: await agentClockOverview(invocation, 20) }),
+  });
+  ctx.tool({
+    name: "clock_alarms_list", description: "List alarms and their current base hashes.",
+    action: "read", scopes: ["read"],
+    inputSchema: { type: "object", additionalProperties: false, properties: { ...pageProperties, enabled: { type: "boolean" } } },
+    execute: async (invocation, args) => {
+      const { limit, offset, enabled } = args as { limit: number; offset: number; enabled?: boolean };
+      return { data: page(await listAlarms(invocation.database, invocation.userId, limit + 1, offset, enabled ?? null), limit) };
+    },
+  });
+  ctx.tool({
+    name: "clock_alarm_create", description: "Create an alarm from a local time in HH:MM format.",
+    action: "write", scopes: ["write"], create: true,
+    inputSchema: {
+      type: "object", additionalProperties: false, required: ["time"],
+      properties: {
+        ...alarmFields,
+        label: { ...alarmFields.label, default: "" },
+        enabled: { ...alarmFields.enabled, default: true },
+        repeatDays: { ...alarmFields.repeatDays, default: [] },
+      },
+    },
+    execute: async (invocation, args) => {
+      const alarmId = await createClockAlarm(invocation.database, invocation.userId, args as unknown as NewAlarm);
+      return { data: { id: alarmId }, resourceId: alarmId };
+    },
+  });
+  ctx.tool({
+    name: "clock_alarm_update", description: "Change an alarm using its current base hash.",
+    action: "write", scopes: ["read", "write"],
+    inputSchema: {
+      type: "object", additionalProperties: false, required: ["id", "baseHash"], minProperties: 3,
+      properties: { ...alarmIdProof, ...alarmPatchFields },
+    },
+    execute: async (invocation, args) => {
+      const { id, baseHash, ...changes } = args as { id: string; baseHash: string } & AlarmPatch;
+      const data = await updateClockAlarm(invocation.database, invocation.userId, id, changes, baseHash, true);
+      return { data, resourceId: id };
+    },
+  });
+  ctx.tool({
+    name: "clock_alarm_delete", description: "Move an alarm to Trash using its current base hash.",
+    action: "delete", scopes: ["read", "delete"],
+    inputSchema: { type: "object", additionalProperties: false, required: ["id", "baseHash"], properties: alarmIdProof },
+    execute: async (invocation, args) => {
+      if (!invocation.trash) throw new AppError(500, "internal_error", "Trash transaction unavailable.");
+      const { id, baseHash } = args as { id: string; baseHash: string };
+      await deleteClockAlarm(invocation.trash, id, readPresentedHash(baseHash), true);
+      return { data: { id }, resourceId: id };
+    },
+  });
+  ctx.tool({
+    name: "clock_world_clocks_list", description: "List world clocks in their configured order.",
+    action: "read", scopes: ["read"],
+    inputSchema: { type: "object", additionalProperties: false, properties: pageProperties },
+    execute: async (invocation, args) => {
+      const { limit, offset } = args as { limit: number; offset: number };
+      const rows = await worldClockRows(invocation.database, invocation.userId, limit + 1, offset);
+      return { data: page(rows.map(toWorldClockView), limit) };
+    },
+  });
+  ctx.resource({
+    uri: "pp://apps/clock/summary", name: "Clock summary",
+    mimeType: "application/json", read: (invocation) => agentClockOverview(invocation, 5),
+  });
+  ctx.overview((invocation) => agentClockOverview(invocation, 5));
+}
+
 async function healthcheck(ctx: AppContext): Promise<AppHealth> {
   await ctx.database.query("SELECT 1 FROM clock.alarms LIMIT 1");
   return { status: "ok", checks: { database: { status: "ok" } } };
 }
 
-const clockApp: BackendAppModule = { id, registerApi, healthcheck, restoreFromTrash };
+const clockApp: BackendAppModule = { id, registerApi, registerAgent, healthcheck, restoreFromTrash };
 
 export default clockApp;
